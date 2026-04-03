@@ -1,139 +1,176 @@
 <p align="center">
-  <h1 align="center">hex</h1>
-  <p align="center"><b>persistent memory for AI coding agents</b></p>
+  <h1 align="center">hex 🧠</h1>
+  <p align="center"><b>Persistent memory for AI coding agents</b></p>
+  <p align="center"><i>Zero dependencies. Zero API keys. Zero cloud. Just SQLite.</i></p>
   <p align="center">
     <a href="#quick-start">Quick Start</a> ·
     <a href="#how-it-works">How It Works</a> ·
-    <a href="#philosophy">Philosophy</a>
+    <a href="#why-hex">Why hex?</a>
   </p>
   <p align="center">
+    <a href="https://github.com/mrap/hex-hermes/stargazers"><img src="https://img.shields.io/github/stars/mrap/hex-hermes?style=social" alt="GitHub Stars"></a>
+    <a href="https://github.com/mrap/hex-hermes/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT License"></a>
     <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="Zero Dependencies">
     <img src="https://img.shields.io/badge/python-3.8+-blue" alt="Python 3.8+">
     <img src="https://img.shields.io/badge/storage-SQLite_FTS5-orange" alt="SQLite FTS5">
-    <img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT License">
   </p>
 </p>
 
 ---
 
-Your AI agent forgets everything between sessions. hex fixes that.
+**Your AI agent has amnesia.** Every time you start a new session with Claude Code, Codex, Cursor, or Aider, it starts from zero. Re-discovers your conventions. Asks questions you already answered. Makes mistakes you already corrected.
 
-Every time you start a new session with Claude Code, Codex, Cursor, Aider, or Gemini CLI, your agent starts from zero. It re-discovers your conventions. It asks questions you already answered. It makes mistakes you already corrected. You lose 10–15 minutes per session to context rebuilding.
+**hex gives your agent a memory.** A persistent, searchable memory backed by SQLite FTS5 — in ~200 lines of Python standard library code with zero external dependencies.
 
-hex gives your agent a persistent memory backed by SQLite FTS5. No API keys. No cloud services. No dependencies beyond Python's standard library. Just files in your repo that your agent reads automatically.
+<!-- TODO: Replace with actual terminal recording GIF
+     Record with: vhs record demo.tape (see demo.tape in repo)
+     Or: asciinema rec demo.cast && agg demo.cast demo.gif
+     
+     Show: bash setup.sh → save a memory → search it → Claude Code session using it
+-->
+<!-- <p align="center">
+  <img src="assets/demo.gif" alt="hex demo — setup, save, search, agent uses memory" width="700">
+</p> -->
 
-## The difference
+### The difference
 
-**Without hex** — every session starts from scratch:
+**Without hex** — every session starts cold:
 ```
 You: Fix the auth middleware
 Agent: What framework are you using?
-You: Express, like I told you last time
+You: Express, like I told you yesterday
 Agent: What's your auth strategy?
-You: JWT with refresh tokens, same as the last 3 sessions
-Agent: Let me look at the codebase...
-(10 minutes of re-discovery)
+You: JWT with refresh tokens, same as the last 3 sessions...
+      (10 minutes of re-discovery)
 ```
 
 **With hex** — your agent remembers:
 ```
 You: Fix the auth middleware
-Agent: [searches memory → finds: Express + JWT + refresh tokens, auth middleware
-        is in src/middleware/auth.ts, last issue was token expiry edge case]
-Agent: I see the auth middleware in src/middleware/auth.ts. Based on previous context,
-       you're using JWT with refresh tokens. Looking at the recent issue with token
-       expiry handling...
-(starts working immediately)
+Agent: [searches memory → finds: Express + JWT + refresh tokens,
+        auth middleware is in src/middleware/auth.ts,
+        last issue was token expiry edge case]
+Agent: Found relevant context in memory. Your auth middleware is in
+       src/middleware/auth.ts using JWT with refresh tokens. Looking
+       at the recent token expiry issue...
+       (starts working immediately)
 ```
 
 ## Quick start
 
-**30 seconds. Zero dependencies.**
+**30 seconds. Zero dependencies. Python 3.8+ only.**
+
+### Option A: Add to an existing project (recommended)
 
 ```bash
-# 1. Use this template (click "Use this template" on GitHub) or clone it
-git clone https://github.com/mrap/hex-hermes.git .hex-bootstrap
-cp -r .hex-bootstrap/{CLAUDE.md,AGENTS.md,setup.sh,.hex} your-project/
-cd your-project
-
-# 2. Run setup
+# From your project directory:
+git clone https://github.com/mrap/hex-hermes.git /tmp/hex-setup
+cp -r /tmp/hex-setup/{CLAUDE.md,AGENTS.md,setup.sh,.hex} .
 bash setup.sh
-
-# 3. Done. Your agent now has persistent memory.
+rm -rf /tmp/hex-setup
 ```
 
-That's it. Next time Claude Code, Codex, or Cursor opens your project, it reads `CLAUDE.md` / `AGENTS.md` and knows how to use the memory system.
+### Option B: Use as a GitHub template
+
+1. Click **[Use this template](https://github.com/mrap/hex-hermes/generate)** on GitHub
+2. Clone your new repo
+3. Run `bash setup.sh`
+
+### Verify it works
+
+```bash
+# Save your first memory
+python3 .hex/memory/save.py 'Project uses Express with JWT auth, refresh tokens in httpOnly cookies' \
+  --tags 'auth,architecture' --source 'initial-setup'
+
+# Search it back
+python3 .hex/memory/search.py 'authentication'
+# → #1  2025-04-03T...  initial-setup
+#   tags: auth,architecture
+#   Project uses Express with JWT auth, refresh tokens in httpOnly cookies
+
+# ✅ Now start Claude Code or Codex — they'll read CLAUDE.md/AGENTS.md
+#    and automatically search memory before making assumptions.
+```
 
 ## How it works
 
-hex is just files and SQLite. No magic.
+hex is files + SQLite. No magic, no servers, no config.
 
 ```
 your-project/
-├── CLAUDE.md              # Agent instructions (Claude Code reads this automatically)
-├── AGENTS.md              # Agent instructions (Codex, Cursor, Gemini CLI)
+├── CLAUDE.md              # Instructions for Claude Code (auto-read)
+├── AGENTS.md              # Instructions for Codex, Cursor, Gemini CLI, Aider
 └── .hex/
     ├── memory/
-    │   ├── memory.db      # SQLite FTS5 database (gitignored)
-    │   ├── search.py      # Search memories: python3 .hex/memory/search.py 'query'
-    │   ├── save.py        # Save a memory:   python3 .hex/memory/save.py 'content'
-    │   └── index.py       # Index workspace:  python3 .hex/memory/index.py
+    │   ├── memory.db      # SQLite FTS5 database (gitignored — stays local)
+    │   ├── search.py      # python3 .hex/memory/search.py 'query'
+    │   ├── save.py        # python3 .hex/memory/save.py 'content' --tags 'x'
+    │   └── index.py       # python3 .hex/memory/index.py  (bulk index markdown)
     ├── landings/           # Daily context snapshots (what your agent reads first)
-    ├── evolution/          # Self-improvement logs and retrospectives
-    └── standing-orders/    # Behavioral rules your agent follows
+    ├── evolution/          # Self-improvement logs
+    └── standing-orders/    # Behavioral rules across sessions
 ```
 
-**Memory operations** are plain Python scripts your agent calls via shell:
+**How your agent uses it:**
+1. Agent starts a session → reads `CLAUDE.md` or `AGENTS.md`
+2. These files instruct it to **search memory before guessing**
+3. Agent runs `python3 .hex/memory/search.py 'topic'` → gets ranked results via FTS5
+4. Agent saves new discoveries with `python3 .hex/memory/save.py 'what it learned'`
+5. Next session, those memories are there. Your agent gets smarter over time.
 
-```bash
-# Search (FTS5 full-text search)
-python3 .hex/memory/search.py 'authentication middleware'
+## Why hex?
 
-# Save a discovery
-python3 .hex/memory/save.py 'JWT refresh tokens stored in httpOnly cookies' \
-  --tags 'auth,security' --source 'src/middleware/auth.ts'
+### vs. just using CLAUDE.md / AGENTS.md alone
 
-# Index all markdown files into memory
-python3 .hex/memory/index.py
-```
+Those files give your agent instructions but not *memory*. They're static. hex adds a searchable, growing database that your agent reads and writes to. Instructions + memory > instructions alone.
+
+### vs. mem0
+
+mem0 is a full memory platform — API keys, cloud service, pip/npm dependencies, LLM calls to extract memories. hex is the opposite: zero dependencies, runs locally, no API keys, no cloud, no LLM needed. If you want a managed service with entity extraction and multi-user support, use mem0. If you want something you can `cp` into any project in 10 seconds and never think about dependencies, use hex.
+
+### vs. rolling your own
+
+You could build this in an afternoon. But you'd also need to wire up FTS5, write the save/search/index scripts, create the agent instruction files, handle idempotent setup, design the landing/standing-order system, and keep it all working across agents. hex is that afternoon, packaged.
 
 ## Features
 
-- **Zero dependencies** — Python 3.8+ standard library only. SQLite FTS5 ships with Python.
-- **Works with any agent** — Claude Code (`CLAUDE.md`), Codex/Cursor/Gemini CLI (`AGENTS.md`), or anything that can read files and run shell commands.
-- **Full-text search** — SQLite FTS5 with BM25 ranking. Sub-millisecond queries on thousands of memories.
-- **Incremental indexing** — `index.py` hashes content chunks and skips unchanged files. Rebuilds in seconds.
-- **Git-friendly** — Memory DB is gitignored. Config and instructions are committed. Team members get the structure; memories are local.
-- **Idempotent setup** — Run `setup.sh` as many times as you want. It won't clobber existing data.
-- **Template repo** — Click "Use this template" to bootstrap any new project.
+- **Zero dependencies** — Python 3.8+ standard library only. No pip install, no npm, no API keys.
+- **Works with any agent** — Claude Code (`CLAUDE.md`), Codex/Cursor/Gemini CLI/Aider (`AGENTS.md`), or anything that reads files and runs shell commands.
+- **Full-text search** — SQLite FTS5 with BM25 ranking. Sub-millisecond queries over thousands of memories.
+- **Incremental indexing** — `index.py` hashes content chunks and only re-indexes changed files.
+- **Git-friendly** — Memory DB is gitignored (local). Config and instructions are committed. Team members get the structure; memories stay personal.
+- **Idempotent** — Run `setup.sh` as many times as you want. It never clobbers existing data.
+- **Self-improving** — Landings give context, standing orders enforce discipline, evolution tracks what works. Your agent gets better the longer you use it.
 
 ## Compatible agents
 
-| Agent | Reads config from | Status |
-|-------|-------------------|--------|
-| Claude Code | `CLAUDE.md` | ✅ Works now |
-| OpenAI Codex | `AGENTS.md` | ✅ Works now |
-| Cursor | `AGENTS.md` / `.cursorrules` | ✅ Works now |
-| Aider | `AGENTS.md` | ✅ Works now |
-| Gemini CLI | `AGENTS.md` | ✅ Works now |
+| Agent | Config file | Status |
+|-------|------------|--------|
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `CLAUDE.md` | ✅ Works |
+| [OpenAI Codex](https://openai.com/index/codex/) | `AGENTS.md` | ✅ Works |
+| [Cursor](https://cursor.sh/) | `AGENTS.md` | ✅ Works |
+| [Aider](https://aider.chat/) | `AGENTS.md` | ✅ Works |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `AGENTS.md` | ✅ Works |
 
-Any agent that can read workspace files and execute `python3` commands will work.
+Any agent that can read files and run `python3` commands will work.
 
-## Philosophy
+## Memory commands
 
-hex is built on three ideas:
+```bash
+# Search memories (FTS5 full-text search with BM25 ranking)
+python3 .hex/memory/search.py 'authentication middleware'
+python3 .hex/memory/search.py 'auth' --top 5 --compact
 
-**1. Landings** — Every session starts with a context snapshot. What's in progress, what's blocked, what was decided. Your agent reads this first and hits the ground running instead of re-discovering your project from scratch. Landings have tiers: L1 (critical blockers) through L4 (background context).
+# Save a memory
+python3 .hex/memory/save.py 'JWT refresh tokens stored in httpOnly cookies' \
+  --tags 'auth,security' --source 'src/middleware/auth.ts'
 
-**2. Standing orders** — Persistent behavioral rules your agent follows across sessions. "Search memory before guessing." "Persist discoveries immediately." "Verify before asserting." These compound over time — your agent gets better the longer you use it.
+# Bulk index all markdown files into memory
+python3 .hex/memory/index.py
+```
 
-**3. Evolution** — Your agent observes its own friction patterns, logs what slows it down, and proposes improvements. A retrospective loop that turns repeated mistakes into standing orders. The system improves itself.
-
-These three layers work together: landings provide context, standing orders provide discipline, and evolution provides growth. The result is an agent that doesn't just remember — it gets better.
-
-## Memory system details
-
-The memory database uses SQLite FTS5 for full-text search with BM25 ranking. Each memory record stores:
+### Memory schema
 
 | Field | Description |
 |-------|-------------|
@@ -142,12 +179,34 @@ The memory database uses SQLite FTS5 for full-text search with BM25 ranking. Eac
 | `source` | Origin file or context |
 | `timestamp` | ISO 8601 creation time |
 
-Search returns results ranked by relevance. The `--compact` flag gives one-line summaries suitable for agent consumption. The `--context` flag controls how much surrounding text to show.
+## The three layers
+
+hex is built on three ideas that compound over time:
+
+**🎯 Landings** — Every session starts with a context snapshot. What's in progress, what's blocked, what was decided. Your agent reads this first and skips the re-discovery phase. Landings have priority tiers: L1 (critical) → L4 (background).
+
+**📏 Standing orders** — Persistent rules your agent follows: "Search memory before guessing." "Save discoveries immediately." "Verify before asserting." These build discipline that persists across sessions.
+
+**🔄 Evolution** — Your agent logs friction patterns and proposes improvements. Repeated mistakes become standing orders. The system literally improves itself.
+
+## Troubleshooting
+
+**"no such module: fts5"** — Your Python was compiled without FTS5 support. This is rare but happens on minimal Linux installations (Alpine, some Docker images). Fix: install `python3` from your distro's main repo (not the minimal package), or build Python with `--enable-loadable-sqlite-extensions`.
+
+**setup.sh creates directories but no DB** — Make sure Python 3.8+ is available as `python3`. Run `python3 --version` to check.
+
+**Agent doesn't search memory** — Verify `CLAUDE.md` (for Claude Code) or `AGENTS.md` (for Codex/Cursor) is in your project root. These files contain the instructions that teach your agent to use the memory system.
 
 ## Contributing
 
-hex is intentionally simple. PRs that add external dependencies will be closed. PRs that make the memory system smarter, the standing orders better, or the evolution engine more useful are welcome.
+hex is intentionally simple. PRs that add external dependencies will be closed. PRs that make the memory smarter, the standing orders better, or the evolution loop more useful are welcome.
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+---
+
+<p align="center">
+  <sub>Built by <a href="https://github.com/mrap">@mrap</a> · If hex saves you time, <a href="https://github.com/mrap/hex-hermes">⭐ star the repo</a></sub>
+</p>
