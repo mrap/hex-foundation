@@ -29,10 +29,16 @@ def save(content, tags="", source=""):
         (content, tags, source, ts),
     )
     mem_id = c.lastrowid
+
+    # Fetch total count for growth feedback
+    c.execute("SELECT COUNT(*) FROM memories")
+    total = c.fetchone()[0]
+
     conn.commit()
     conn.close()
 
     print(f"Saved memory #{mem_id}: {content[:80]}{'...' if len(content) > 80 else ''}")
+    print(f"  ({total} memories total)")
 
 
 if __name__ == "__main__":

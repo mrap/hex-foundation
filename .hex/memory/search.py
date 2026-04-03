@@ -12,8 +12,23 @@ import argparse
 import os
 import sqlite3
 import sys
+from datetime import datetime, timezone
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.db")
+
+
+def _log_search(conn, query):
+    """Log search query for stats tracking."""
+    c = conn.cursor()
+    c.execute(
+        "CREATE TABLE IF NOT EXISTS search_log "
+        "(id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT, timestamp TEXT)"
+    )
+    c.execute(
+        "INSERT INTO search_log (query, timestamp) VALUES (?, ?)",
+        (query, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+    )
+    conn.commit()
 
 
 def search(query, top=10, compact=False, context=120):
@@ -22,6 +37,7 @@ def search(query, top=10, compact=False, context=120):
         sys.exit(1)
 
     conn = sqlite3.connect(DB_PATH)
+    _log_search(conn, query)
     c = conn.cursor()
 
     try:
