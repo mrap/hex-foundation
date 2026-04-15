@@ -1,14 +1,21 @@
-# hex memory database (local, not committed)
-.hex/memory/memory.db
-.hex/memory/*.db-wal
-.hex/memory/*.db-shm
-.hex/memory/*.db-journal
-
 # Python
 __pycache__/
 *.pyc
 *.pyo
+.venv/
+
+# SQLite
+*.db
 
 # OS
 .DS_Store
 Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test artifacts
+/tmp/
