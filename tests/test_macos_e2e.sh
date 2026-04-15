@@ -77,20 +77,22 @@ echo "  VM IP: $VM_IP"
 
 # Wait for SSH to be ready
 echo "  Waiting for SSH..."
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no"
 for i in $(seq 1 30); do
-    if sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$SSH_USER@$VM_IP" "echo ready" 2>/dev/null | grep -q ready; then
+    if sshpass -p "$SSH_PASS" ssh $SSH_OPTS -o ConnectTimeout=2 "$SSH_USER@$VM_IP" "echo ready" 2>/dev/null | grep -q ready; then
         break
     fi
     sleep 2
 done
 
+
 # Helper: run command in VM via SSH
 vm_run() {
-    sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no "$SSH_USER@$VM_IP" "$@"
+    sshpass -p "$SSH_PASS" ssh $SSH_OPTS "$SSH_USER@$VM_IP" "$@"
 }
 
 vm_scp() {
-    sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no -r "$@"
+    sshpass -p "$SSH_PASS" scp $SSH_OPTS -r "$@"
 }
 
 # Verify SSH works
@@ -104,12 +106,9 @@ echo "  SSH ready"
 
 echo "[3/6] Copying hex repo into VM..."
 vm_run "mkdir -p /tmp/hex-setup"
-# Create tar locally, scp it, extract in VM
-TMPTAR=$(mktemp /tmp/hex-repo-XXXXXX.tar.gz)
-tar -C "$REPO_DIR" -czf "$TMPTAR" --exclude='.git' --exclude='__pycache__' --exclude='.pytest_cache' .
-vm_scp "$TMPTAR" "$SSH_USER@$VM_IP:/tmp/hex-repo.tar.gz"
-vm_run "tar -C /tmp/hex-setup -xzf /tmp/hex-repo.tar.gz"
-rm -f "$TMPTAR"
+# Pipe tar through SSH (scp breaks with sshpass on newer macOS)
+tar -C "$REPO_DIR" -czf - --exclude='.git' --exclude='__pycache__' --exclude='.pytest_cache' . \
+    | vm_run "tar -C /tmp/hex-setup -xzf -"
 echo "  Repo copied"
 
 # Check VM Python version
