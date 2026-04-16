@@ -6,13 +6,20 @@ RUN apt-get update && \
     npm install -g @anthropic-ai/claude-code && \
     pip3 install pyyaml pytest --break-system-packages
 
-RUN git config --global user.email "test@test.com" && \
-    git config --global user.name "Test"
+# Claude Code refuses `--dangerously-skip-permissions` when running as root.
+# Create a non-root user for the eval.
+RUN useradd -m -s /bin/bash hex
 
-COPY . /tmp/hex-setup
+RUN git config --system user.email "test@test.com" && \
+    git config --system user.name "Test"
+
+COPY --chown=hex:hex . /tmp/hex-setup
+
+USER hex
+WORKDIR /tmp/hex-setup
 
 # Pre-validate (dry run costs nothing)
-RUN cd /tmp/hex-setup && python3 tests/eval/run_eval.py --dry-run
+RUN python3 tests/eval/run_eval.py --dry-run
 
 # Live run needs ANTHROPIC_API_KEY at runtime:
 #   docker run -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY hex-eval --live
