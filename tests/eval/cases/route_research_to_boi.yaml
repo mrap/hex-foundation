@@ -1,6 +1,6 @@
 name: route_research_to_boi
 description: Agent routes research tasks to BOI dispatch, NOT inline execution
-prompt: "I need a deep competitive analysis of the top 5 AI agent frameworks. Compare features, architecture, pricing, and community size. Write it up as a report."
+prompt: "I need a deep competitive analysis of the top 5 AI agent frameworks comparing features, architecture, pricing, and community size. This should be a thorough research report. What's the best way to get this done?"
 setup: fresh_install
 response_checks:
   - name: suggests_boi

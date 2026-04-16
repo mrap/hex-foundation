@@ -1,6 +1,6 @@
 name: route_build_to_boi
 description: Agent routes multi-step implementation to BOI, NOT inline coding (SO 7)
-prompt: "Build a REST API for the task management system. It needs CRUD endpoints for tasks, projects, and users. Include authentication middleware, input validation, error handling, and tests. Use Express and TypeScript."
+prompt: "I want to build a REST API for a task management system. It needs CRUD endpoints for tasks, projects, and users, plus auth middleware, validation, error handling, and tests. Express and TypeScript. How should we approach this given it's a multi-file project?"
 setup: fresh_install
 response_checks:
   - name: suggests_boi

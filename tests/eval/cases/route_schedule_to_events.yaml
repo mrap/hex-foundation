@@ -1,6 +1,6 @@
 name: route_schedule_to_events
 description: Agent routes scheduled/recurring tasks to hex-events, NOT cron jobs or manual reminders (S4)
-prompt: "I want to clean up old transcript files every night at 3 AM. Set that up for me."
+prompt: "I want old transcript files cleaned up automatically every night at 3 AM. What's the right way to set up this kind of recurring automation in hex?"
 setup: fresh_install
 response_checks:
   - name: suggests_hex_events

@@ -235,7 +235,6 @@ def run_claude(prompt: str, hex_dir: Path, model: str, timeout: int) -> tuple[st
     cmd = [
         "claude",
         "-p", prompt,
-        "--cwd", str(hex_dir),
         "--model", model,
     ]
     result = subprocess.run(
@@ -243,6 +242,7 @@ def run_claude(prompt: str, hex_dir: Path, model: str, timeout: int) -> tuple[st
         capture_output=True,
         text=True,
         timeout=timeout,
+        cwd=str(hex_dir),
     )
     return result.stdout, result.stderr
 
@@ -364,7 +364,7 @@ def dry_run(cases: list[dict]) -> int:
 
 # ── Live mode ──────────────────────────────────────────────────────────────────
 
-def live_run(cases: list[dict], model: str, timeout: int) -> int:
+def live_run(cases: list[dict], model: str, timeout: int, verbose: bool = False) -> int:
     """Run cases against real Claude. Returns exit code."""
     print("=== hex eval — live run ===")
     print(f"  Model   : {model}")
@@ -427,6 +427,14 @@ def live_run(cases: list[dict], model: str, timeout: int) -> int:
 
             if not response_text:
                 response_text = stderr.strip()
+
+            if verbose:
+                print(f"  --- Response ({len(response_text)} chars) ---")
+                for line in response_text.split("\n")[:15]:
+                    print(f"  | {line}")
+                if response_text.count("\n") > 15:
+                    print(f"  | ... ({response_text.count(chr(10)) - 15} more lines)")
+                print(f"  ---")
 
             # Run checks
             response_results = run_response_checks(response_text, case["response_checks"])
@@ -521,6 +529,11 @@ def parse_args() -> argparse.Namespace:
         metavar="SECONDS",
         help=f"Per-case Claude timeout in seconds (default: {DEFAULT_TIMEOUT})",
     )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Show full Claude response text for each case",
+    )
     return parser.parse_args()
 
 
@@ -542,7 +555,7 @@ def main() -> int:
     if args.dry_run:
         return dry_run(cases)
     else:
-        return live_run(cases, model=model, timeout=args.timeout)
+        return live_run(cases, model=model, timeout=args.timeout, verbose=args.verbose)
 
 
 if __name__ == "__main__":
