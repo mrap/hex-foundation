@@ -215,7 +215,7 @@ Record in `evolution/changelog.md`:
 | S1 | **Track friction to evolution.** Single canonical source (`evolution/observations.md`). Surface patterns during planning. |
 | S2 | **Decompose into DAG before multi-phase dispatch.** Analyze dependencies. Default to maximum parallelism. |
 | S3 | **Monitor overnight runs.** Ensure workers are running or set up failure detection. One restart attempt, then notify. |
-| S4 | **Use event-driven automation for reactive behavior.** Scheduled tasks and notifications use policies, not polling loops. |
+| S4 | NEVER use native looping constructs or manual timing delays; ALWAYS implement state changes or multi-step workflows by triggering specific `hex-events` handlers or coordinating logic using `BOI` for delegation. |
 | S5 | **Lock before writing shared files.** Check coordination locks on learnings.md, todo.md, evolution/. |
 | S6 | **Audit worker config after dispatch failures.** Check all config locations. Workers can mutate phase files. |
 | S7 | **No markdown tables in chat platforms.** Use bullet lists with bold labels. Pipe-delimited tables render as broken text in Slack/Discord/etc. |
