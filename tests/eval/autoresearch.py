@@ -237,12 +237,48 @@ def extract_standing_orders(text: str) -> str:
 
 # ── Mutation generation ───────────────────────────────────────────────────────
 
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:26b")
+
+
 def generate_mutation(failure_analysis: str, model: str = "claude-sonnet-4-5") -> dict:
-    """Ask Claude to propose a CLAUDE.md mutation. Returns parsed mutation dict."""
-    cmd = [
-        "claude", "-p", failure_analysis,
-        "--model", model,
-    ]
+    """Generate a CLAUDE.md mutation. Uses local Ollama if available, falls back to Claude."""
+    # Try Ollama first (fast, free)
+    try:
+        return _generate_mutation_ollama(failure_analysis)
+    except Exception as e:
+        print(f"    Ollama unavailable ({e}), falling back to Claude...")
+        return _generate_mutation_claude(failure_analysis, model)
+
+
+def _generate_mutation_ollama(prompt: str) -> dict:
+    """Generate mutation via local Ollama (Gemma)."""
+    import urllib.request
+    import urllib.error
+
+    payload = json.dumps({
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+    }).encode()
+
+    req = urllib.request.Request(
+        f"{OLLAMA_URL}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=180) as resp:
+        data = json.loads(resp.read())
+
+    response = data.get("response", "")
+    duration = data.get("total_duration", 0) / 1e9
+    print(f"    [Gemma {OLLAMA_MODEL}] {duration:.1f}s")
+    return parse_mutation_response(response)
+
+
+def _generate_mutation_claude(prompt: str, model: str) -> dict:
+    """Generate mutation via Claude Code CLI (fallback)."""
+    cmd = ["claude", "-p", prompt, "--model", model]
     result = subprocess.run(
         cmd, capture_output=True, text=True, timeout=300,
         cwd=str(REPO_ROOT),
