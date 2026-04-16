@@ -159,33 +159,66 @@ def analyze_failures(result: EvalResult, claude_md_text: str, focus_cases: Optio
     if not failing:
         return ""
 
-    return f"""The hex eval harness tests whether the CLAUDE.md operating model makes the agent
-behave correctly. Current score: {result.score_str}.
+    # Build a focused prompt — only include rules relevant to the failures
+    relevant_rules = _extract_relevant_rules(claude_md_text, failing)
 
-FAILING CASES:
-{chr(10).join(failing)}
+    return f"""hex eval score: {result.score_str}. Failing: {', '.join(f[2:] for f in failing)}
 
-The main failure pattern: the agent defaults to Claude Code's built-in features
-(CronCreate for scheduling, hooks for automation, inline coding for multi-step work)
-instead of hex's systems (hex-events for ALL automation, BOI for ALL multi-step work).
+The agent defaults to Claude Code built-in features (CronCreate, hooks, inline coding)
+instead of hex systems (hex-events for automation, BOI for multi-step delegation).
 
-CURRENT CLAUDE.md STANDING ORDERS (the section that controls agent behavior):
----
-{extract_standing_orders(claude_md_text)}
----
+RELEVANT RULES (edit one of these):
+{relevant_rules}
 
-Propose ONE specific, surgical edit to the standing orders that would fix the most
-failing cases. The edit should:
-1. Be explicit — use NEVER/ALWAYS, not "should" or "prefer"
-2. Name the specific Claude Code feature to avoid (CronCreate, hooks, inline coding)
-3. Name the hex system to use instead (hex-events, BOI)
-4. Be concise — one rule, 2-3 sentences max
+Propose ONE surgical edit. Use NEVER/ALWAYS, name the Claude Code feature to avoid,
+name the hex system to use instead. 2-3 sentences max.
 
-Output format (exactly):
-RULE_NUMBER: <which SO number to edit, or "NEW" for a new rule>
-ORIGINAL: <the original text of the rule, or "N/A" for new>
-REPLACEMENT: <the new text>
-REASONING: <one sentence why this fixes the failing cases>"""
+Output EXACTLY this format:
+RULE_NUMBER: <number or NEW>
+ORIGINAL: <current text or N/A>
+REPLACEMENT: <new text>
+REASONING: <one sentence>"""
+
+
+def _extract_relevant_rules(text: str, failing_cases: list) -> str:
+    """Extract only the rules relevant to the failing cases."""
+    rules = []
+    # Map failure patterns to relevant rule numbers
+    rule_map = {
+        "delegation": ["7"],
+        "route_build_to_boi": ["7"],
+        "route_research_to_boi": ["7"],
+        "route_schedule_to_events": ["S4"],
+        "route_monitoring_to_events": ["S4"],
+        "route_reactive_to_events": ["S4"],
+        "hex_events_routing": ["S4"],
+        "persistence": ["2", "18"],
+        "onboarding": [],
+        "memory_search": ["1"],
+        "startup_loads_context": [],
+    }
+
+    needed = set()
+    for case in failing_cases:
+        name = case.lstrip("- ").split(":")[0].strip()
+        for rule_num in rule_map.get(name, []):
+            needed.add(rule_num)
+
+    # Also always include the Delegation Check mechanism
+    needed.add("Delegation")
+
+    # Extract matching lines from CLAUDE.md
+    for line in text.split("\n"):
+        for rule_num in needed:
+            if f"| {rule_num} |" in line or f"|{rule_num}|" in line:
+                rules.append(line.strip())
+            elif rule_num == "Delegation" and "Delegation Check" in line:
+                # Get the next few lines too
+                idx = text.index(line)
+                chunk = text[idx:idx+300]
+                rules.append(chunk.split("\n\n")[0].strip())
+
+    return "\n".join(rules) if rules else "(no matching rules found)"
 
 
 def extract_standing_orders(text: str) -> str:
@@ -211,7 +244,7 @@ def generate_mutation(failure_analysis: str, model: str = "claude-sonnet-4-5") -
         "--model", model,
     ]
     result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=120,
+        cmd, capture_output=True, text=True, timeout=300,
         cwd=str(REPO_ROOT),
     )
     response = result.stdout.strip()
