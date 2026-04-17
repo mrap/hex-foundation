@@ -2,6 +2,11 @@
 
 setup() {
     source "${BATS_TEST_DIRNAME}/../system/scripts/path-mapping.sh"
+    TEST_TMPDIR=$(mktemp -d)
+}
+
+teardown() {
+    rm -rf "$TEST_TMPDIR"
 }
 
 @test "v1_to_v2 maps dot-claude/scripts to system/scripts" {
@@ -65,32 +70,36 @@ setup() {
 }
 
 @test "detect_layout identifies v1 from dot-claude directory" {
-    local tmpdir
-    tmpdir=$(mktemp -d)
+    local tmpdir="$TEST_TMPDIR/v1_test"
     mkdir -p "$tmpdir/dot-claude/scripts"
     run detect_layout "$tmpdir"
     [ "$status" -eq 0 ]
     [ "$output" = "v1" ]
-    rm -rf "$tmpdir"
 }
 
 @test "detect_layout identifies v2 from system and templates directories" {
-    local tmpdir
-    tmpdir=$(mktemp -d)
+    local tmpdir="$TEST_TMPDIR/v2_test"
     mkdir -p "$tmpdir/system/scripts" "$tmpdir/templates"
     touch "$tmpdir/templates/CLAUDE.md"
     run detect_layout "$tmpdir"
     [ "$status" -eq 0 ]
     [ "$output" = "v2" ]
-    rm -rf "$tmpdir"
 }
 
 @test "detect_layout returns unknown when neither layout present" {
-    local tmpdir
-    tmpdir=$(mktemp -d)
+    local tmpdir="$TEST_TMPDIR/unknown_test"
     mkdir -p "$tmpdir/random"
     run detect_layout "$tmpdir"
     [ "$status" -eq 1 ]
     [ "$output" = "unknown" ]
-    rm -rf "$tmpdir"
+}
+
+@test "detect_layout returns v1 when both layouts coexist (v1 wins)" {
+    local tmpdir
+    tmpdir="$TEST_TMPDIR/migration"
+    mkdir -p "$tmpdir/dot-claude" "$tmpdir/system" "$tmpdir/templates"
+    touch "$tmpdir/templates/CLAUDE.md"
+    run detect_layout "$tmpdir"
+    [ "$status" -eq 0 ]
+    [ "$output" = "v1" ]
 }

@@ -4,6 +4,10 @@
 #
 # Functions are pure: no I/O, no globals. Safe to source from any script.
 
+# Note: set -euo pipefail is intentionally omitted. This file is a source-only
+# library; applying strict mode here would override the caller's error mode
+# upon sourcing.
+
 # Translate a v1 source-relative path to the v2 equivalent.
 # Prints the v2 path to stdout; returns 0 on success, 1 if path has no v2 equivalent.
 v1_to_v2() {
@@ -36,6 +40,7 @@ v2_to_v1() {
 detect_layout() {
     local root="$1"
     if [ -d "$root/dot-claude" ]; then
+        # v1 takes priority if both layouts coexist (migration state)
         echo "v1"
         return 0
     fi
