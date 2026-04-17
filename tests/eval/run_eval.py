@@ -388,7 +388,7 @@ def dry_run(cases: list[dict]) -> int:
                 if check_type not in valid_checks:
                     raise ValueError(f"invalid check type: {check_type!r}")
 
-            print(f"  {name}: valid  ✓")
+            print(f"  {name} PASS (validated)")
         except Exception as e:
             print(f"  {name}: INVALID — {e}")
             errors.append(name)
