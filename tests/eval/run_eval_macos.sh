@@ -5,18 +5,18 @@ set -euo pipefail
 #
 # Prerequisites:
 #   brew install cirruslabs/cli/tart sshpass
-#   tart clone ghcr.io/cirruslabs/macos-sequoia-base:latest hex-test-base
+#   bash tests/eval/build_tart_image.sh     # builds hex-eval-vm with Claude Code baked in
 #
 # Usage:
 #   bash tests/eval/run_eval_macos.sh                      # dry-run
-#   bash tests/eval/run_eval_macos.sh --live               # live (needs ANTHROPIC_API_KEY)
+#   bash tests/eval/run_eval_macos.sh --live               # live (reads ANTHROPIC_API_KEY from ~/.hex-test.env if unset)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 MODE="${1:---dry-run}"
-VM_NAME="hex-eval-$(date +%s)"
-BASE_IMAGE="hex-test-base"
+VM_NAME="hex-eval-run-$(date +%s)"
+BASE_IMAGE="${HEX_EVAL_BASE_IMAGE:-hex-eval-vm}"
 SSH_USER="admin"
 SSH_PASS="admin"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no"
@@ -32,19 +32,33 @@ trap cleanup EXIT
 echo "=== hex eval (macOS Tart) ==="
 echo ""
 
-# Validate
+# Validate tart
 if ! command -v tart &>/dev/null; then
     echo "ERROR: tart not installed. Run: brew install cirruslabs/cli/tart"
     exit 1
 fi
-if ! tart list | grep -q "$BASE_IMAGE"; then
+if ! tart list | awk '{print $2}' | grep -qx "$BASE_IMAGE"; then
     echo "ERROR: Base image '$BASE_IMAGE' not found."
-    echo "Run: tart clone ghcr.io/cirruslabs/macos-sequoia-base:latest $BASE_IMAGE"
+    echo "Build it first: bash tests/eval/build_tart_image.sh"
     exit 1
 fi
 
+# Load API key for live mode — try ANTHROPIC_API_KEY first, then ~/.hex-test.env
+if [ "$MODE" = "--live" ]; then
+    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -f "$HOME/.hex-test.env" ]; then
+        # shellcheck disable=SC1091
+        ANTHROPIC_API_KEY=$(grep "^ANTHROPIC_API_KEY=" "$HOME/.hex-test.env" | cut -d= -f2- | tr -d '"' | tr -d "'")
+        export ANTHROPIC_API_KEY
+    fi
+    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+        echo "ERROR: ANTHROPIC_API_KEY not set and ~/.hex-test.env missing."
+        echo "  Create ~/.hex-test.env with: ANTHROPIC_API_KEY=sk-ant-..."
+        exit 1
+    fi
+fi
+
 # Clone + start VM
-echo "[1/5] Starting macOS VM..."
+echo "[1/4] Starting macOS VM (base: $BASE_IMAGE)..."
 tart clone "$BASE_IMAGE" "$VM_NAME"
 tart run --no-graphics "$VM_NAME" &
 
@@ -68,36 +82,21 @@ vm_run() {
 
 echo "  VM IP: $VM_IP"
 echo "  Python: $(vm_run 'python3 --version 2>&1')"
+echo "  Claude: $(vm_run 'claude --version 2>&1' || echo NOT_AVAILABLE)"
 
 # Copy repo
-echo "[2/5] Copying repo into VM..."
+echo "[2/4] Copying repo into VM..."
 vm_run "mkdir -p /tmp/hex-setup"
 tar -C "$REPO_DIR" -czf - --exclude='.git' --exclude='__pycache__' --exclude='.pytest_cache' . \
     | vm_run "tar -C /tmp/hex-setup -xzf -"
 echo "  Done"
 
-# Install deps
-echo "[3/5] Installing dependencies..."
-vm_run "pip3 install pyyaml 2>/dev/null || python3 -m pip install pyyaml 2>/dev/null || true" 2>/dev/null
-
-# Install Node.js + Claude Code for live mode
-if [ "$MODE" = "--live" ]; then
-    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-        echo "ERROR: ANTHROPIC_API_KEY not set."
-        exit 1
-    fi
-    echo "  Installing Node.js + Claude Code..."
-    vm_run "brew install node 2>/dev/null || true" 2>/dev/null
-    vm_run "npm install -g @anthropic-ai/claude-code 2>/dev/null || true" 2>/dev/null
-    echo "  Claude: $(vm_run 'claude --version 2>/dev/null || echo NOT_AVAILABLE')"
-fi
-
 # Run eval
-echo "[4/5] Running eval..."
+echo "[3/4] Running eval..."
 if [ "$MODE" = "--live" ]; then
-    vm_run "cd /tmp/hex-setup && HEX_EVAL_SANDBOXED=1 ANTHROPIC_API_KEY='$ANTHROPIC_API_KEY' python3 tests/eval/run_eval.py --live --model sonnet"
+    vm_run "cd /tmp/hex-setup && HEX_EVAL_SANDBOXED=1 ANTHROPIC_API_KEY='$ANTHROPIC_API_KEY' python3 tests/eval/run_eval.py --live --model sonnet --verbose"
 else
     vm_run "cd /tmp/hex-setup && python3 tests/eval/run_eval.py --dry-run"
 fi
 
-echo "[5/5] Done"
+echo "[4/4] Done"

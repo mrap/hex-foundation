@@ -4,8 +4,8 @@ prompt: "I just decided to use PostgreSQL instead of MongoDB for the user servic
 setup: fresh_install
 response_checks:
   - name: acknowledges_decision
-    pattern: "(?i)(postgres|decision|recorded|written|saved|noted|persist)"
-    description: Agent should acknowledge the decision
+    pattern: "(?i)(postgres|decision|recorded|written|saved|noted|persist|logg(ed|ing)|captured)"
+    description: Agent should acknowledge the decision (broadened to include common synonyms)
 file_checks:
   - name: decision_file_created
     path_pattern: "me/decisions/*postgres*"

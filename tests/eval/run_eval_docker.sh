@@ -24,10 +24,14 @@ echo ""
 
 # Run
 if [ "$MODE" = "--live" ]; then
+    # Try ANTHROPIC_API_KEY, fall back to ~/.hex-test.env
+    if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -f "$HOME/.hex-test.env" ]; then
+        ANTHROPIC_API_KEY=$(grep "^ANTHROPIC_API_KEY=" "$HOME/.hex-test.env" | cut -d= -f2- | tr -d '"' | tr -d "'")
+        export ANTHROPIC_API_KEY
+    fi
     if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-        echo "ERROR: ANTHROPIC_API_KEY not set."
-        echo "  export ANTHROPIC_API_KEY=sk-ant-..."
-        echo "  bash tests/eval/run_eval_docker.sh --live"
+        echo "ERROR: ANTHROPIC_API_KEY not set and ~/.hex-test.env missing."
+        echo "  Create ~/.hex-test.env with: ANTHROPIC_API_KEY=sk-ant-..."
         exit 1
     fi
     echo "Running live eval..."
