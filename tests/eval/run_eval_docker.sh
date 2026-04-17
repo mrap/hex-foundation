@@ -36,7 +36,7 @@ if [ "$MODE" = "--live" ]; then
     fi
     # Load OPENAI_API_KEY for Codex cases (optional — skipped if not present)
     if [ -z "${OPENAI_API_KEY:-}" ] && [ -f "$HOME/.hex-test.env" ]; then
-        OPENAI_API_KEY=$(grep "^OPENAI_API_KEY=" "$HOME/.hex-test.env" | cut -d= -f2- | tr -d '"' | tr -d "'")
+        OPENAI_API_KEY=$(grep "^OPENAI_API_KEY=" "$HOME/.hex-test.env" | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
         export OPENAI_API_KEY
     fi
 

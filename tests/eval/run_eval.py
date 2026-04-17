@@ -248,6 +248,30 @@ def run_claude(prompt: str, hex_dir: Path, model: str, timeout: int) -> tuple[st
     return result.stdout, result.stderr
 
 
+# ── Codex runner ───────────────────────────────────────────────────────────────
+
+def run_codex(prompt: str, hex_dir: Path, timeout: int) -> tuple[str, str]:
+    """
+    Run `codex exec --model codex-mini-latest <prompt>` in hex_dir.
+    Returns (stdout, stderr). Returns ("", warning) if OPENAI_API_KEY is absent.
+    """
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    if not openai_key:
+        return "", "OPENAI_API_KEY not set — Codex live session skipped"
+
+    cmd = ["codex", "exec", "--model", "codex-mini-latest", prompt]
+    env = {**os.environ, "OPENAI_API_KEY": openai_key}
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=str(hex_dir),
+        env=env,
+    )
+    return result.stdout, result.stderr
+
+
 # ── YAML loader ────────────────────────────────────────────────────────────────
 
 def load_case(path: Path) -> dict:
@@ -261,6 +285,7 @@ def load_case(path: Path) -> dict:
             raise ValueError(f"Case {path.name} missing required field: {field_name!r}")
 
     # Set defaults
+    data.setdefault("agent", "claude")
     data.setdefault("setup", "fresh_install")
     data.setdefault("seed_data", {})
     data.setdefault("response_checks", [])
@@ -303,7 +328,14 @@ def dry_run(cases: list[dict]) -> int:
     if claude_available:
         print("  claude CLI found  ✓")
     else:
-        print("  claude CLI not found  (live run will fail)")
+        print("  claude CLI not found  (live Claude cases will fail)")
+
+    # Check codex CLI
+    codex_available = shutil.which("codex") is not None
+    if codex_available:
+        print("  codex CLI found  ✓")
+    else:
+        print("  codex CLI not found  (live Codex cases will fail)")
     print()
 
     # Validate each case
@@ -390,9 +422,16 @@ def live_run(cases: list[dict], model: str, timeout: int, verbose: bool = False)
     print(f"  Timeout : {timeout}s per case")
     print()
 
+    # Check required CLIs (warn, don't abort — Codex cases may be skipped gracefully)
     if not shutil.which("claude"):
-        print("ERROR: claude CLI not found. Install: npm install -g @anthropic-ai/claude-code")
-        return 1
+        claude_cases = [c for c in cases if c.get("agent", "claude") == "claude"]
+        if claude_cases:
+            print("ERROR: claude CLI not found. Install: npm install -g @anthropic-ai/claude-code")
+            return 1
+    if not shutil.which("codex"):
+        codex_cases = [c for c in cases if c.get("agent", "claude") == "codex"]
+        if codex_cases:
+            print("WARNING: codex CLI not found. Codex cases will produce empty responses.")
 
     results: list[CaseResult] = []
 
@@ -401,7 +440,8 @@ def live_run(cases: list[dict], model: str, timeout: int, verbose: bool = False)
 
         for i, case in enumerate(cases, 1):
             name = case["name"]
-            print(f"[{i}/{len(cases)}] {name} — {case['description']}")
+            agent = case.get("agent", "claude")
+            print(f"[{i}/{len(cases)}] {name} [{agent}] — {case['description']}")
 
             # Setup
             try:
@@ -417,10 +457,13 @@ def live_run(cases: list[dict], model: str, timeout: int, verbose: bool = False)
                 print(f"  ERROR (setup): {e}")
                 continue
 
-            # Run Claude
+            # Dispatch to the appropriate agent runner
             prompt = case["prompt"]
             try:
-                stdout, stderr = run_claude(prompt, hex_dir, model, timeout)
+                if agent == "codex":
+                    stdout, stderr = run_codex(prompt, hex_dir, timeout)
+                else:
+                    stdout, stderr = run_claude(prompt, hex_dir, model, timeout)
                 response_text = stdout.strip()
             except subprocess.TimeoutExpired:
                 result = CaseResult(

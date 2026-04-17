@@ -1,0 +1,18 @@
+name: codex-onboarding
+agent: codex
+description: Fresh hex v2 install with Codex — config present and AGENTS.md principles accessible
+prompt: "Read AGENTS.md and list the top 3 operating principles."
+setup: fresh_install
+response_checks:
+  - name: references_principles
+    pattern: "(?i)(Compound|Anticipate|Evolve)"
+    description: Codex output should reference known AGENTS.md principles (Compound / Anticipate / Evolve)
+file_checks:
+  - name: codex_config_exists
+    check: exists
+    path_pattern: ".codex/config.toml"
+    description: .codex/config.toml should be created by install (via doctor --fix)
+  - name: agents_md_exists
+    check: exists
+    path_pattern: "AGENTS.md"
+    description: AGENTS.md must exist for Codex to pick up operating principles

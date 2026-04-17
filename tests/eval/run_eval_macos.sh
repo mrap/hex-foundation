@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 MODE="${1:---dry-run}"
+EXTRA_ARGS="${*:2}"  # everything after $1 (e.g. --case codex-onboarding)
 VM_NAME="hex-eval-run-$(date +%s)"
 BASE_IMAGE="${HEX_EVAL_BASE_IMAGE:-hex-eval-vm}"
 SSH_USER="admin"
@@ -55,6 +56,11 @@ if [ "$MODE" = "--live" ]; then
         echo "  Create ~/.hex-test.env with: ANTHROPIC_API_KEY=sk-ant-..."
         exit 1
     fi
+    # Load OPENAI_API_KEY for Codex cases (optional — skipped if not present)
+    if [ -z "${OPENAI_API_KEY:-}" ] && [ -f "$HOME/.hex-test.env" ]; then
+        OPENAI_API_KEY=$(grep "^OPENAI_API_KEY=" "$HOME/.hex-test.env" | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
+        export OPENAI_API_KEY
+    fi
 fi
 
 # Clone + start VM
@@ -94,9 +100,11 @@ echo "  Done"
 # Run eval
 echo "[3/4] Running eval..."
 if [ "$MODE" = "--live" ]; then
-    vm_run "cd /tmp/hex-setup && HEX_EVAL_SANDBOXED=1 ANTHROPIC_API_KEY='$ANTHROPIC_API_KEY' python3 tests/eval/run_eval.py --live --model sonnet --verbose"
+    OPENAI_KEY_ENV="${OPENAI_API_KEY:+OPENAI_API_KEY='$OPENAI_API_KEY' }"
+    # shellcheck disable=SC2029
+    vm_run "cd /tmp/hex-setup && HEX_EVAL_SANDBOXED=1 ANTHROPIC_API_KEY='$ANTHROPIC_API_KEY' ${OPENAI_KEY_ENV}python3 tests/eval/run_eval.py --live --model sonnet --verbose $EXTRA_ARGS"
 else
-    vm_run "cd /tmp/hex-setup && python3 tests/eval/run_eval.py --dry-run"
+    vm_run "cd /tmp/hex-setup && python3 tests/eval/run_eval.py --dry-run $EXTRA_ARGS"
 fi
 
 echo "[4/4] Done"
