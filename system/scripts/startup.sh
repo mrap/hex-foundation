@@ -14,9 +14,6 @@
 #   0 = all steps passed (or warnings only)
 #   1 = failures (something broke)
 #
-# Feature flags (env vars, all default off):
-#   HEX_ENABLE_HINDSIGHT=1   Enable Hindsight companion health check (step 5b)
-#
 # Companion integrations (graceful degradation when absent):
 #   ~/.hex-events/   hex-events reactive automation system
 #   ~/.boi/          BOI parallel worker dispatch
@@ -163,7 +160,7 @@ step_health() {
 
     HEALTH="$MEMORY_SCRIPTS/memory_health.py"
     if [[ ! -f "$HEALTH" ]]; then
-        warn "memory_health.py not found"
+        info "memory_health.py not found (optional)"
         return
     fi
 
@@ -179,21 +176,6 @@ step_health() {
     else
         pass "All health checks passed"
     fi
-}
-
-# ─── Step: Hindsight Memory (optional companion) ─────────────────────────
-# Enable: HEX_ENABLE_HINDSIGHT=1
-step_hindsight_health() {
-    if [[ "${HEX_ENABLE_HINDSIGHT:-}" != "1" ]]; then
-        return
-    fi
-    header "5b. Hindsight Memory"
-    HINDSIGHT_HEALTH="$SCRIPTS_DIR/hindsight-health.sh"
-    if [[ ! -f "$HINDSIGHT_HEALTH" ]]; then
-        info "hindsight-health.sh not found — install Hindsight companion to enable"
-        return
-    fi
-    bash "$HINDSIGHT_HEALTH" --quiet || true
 }
 
 # ─── Step: Integrations Check ──────────────────────────────────────────────
@@ -411,8 +393,6 @@ main() {
                 echo "  --step X   Run only step X"
                 echo "  --status   Show what's been done today"
                 echo ""
-                echo "Feature flags (env vars):"
-                echo "  HEX_ENABLE_HINDSIGHT=1   Enable Hindsight companion health check"
                 exit 0
                 ;;
             *) echo "Unknown option: $1"; exit 1 ;;
@@ -470,7 +450,6 @@ main() {
     if $IS_SOLO && ! $QUICK; then
         step_index
         step_health
-        step_hindsight_health
         step_integrations
         step_evolution
         step_priorities
@@ -478,7 +457,6 @@ main() {
     elif $QUICK; then
         step_index
         step_health
-        step_hindsight_health
         step_daemon_status
         info ""
         info "Quick mode. Skipped integrations and evolution check."
