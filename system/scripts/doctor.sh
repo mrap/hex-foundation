@@ -234,15 +234,68 @@ check_6() {
   _rec 6 "CLAUDE.md exists and >1000 bytes" "error" "CLAUDE.md not found"
 }
 
-# 7: AGENTS.md exists (warning, no fix — LLM handles generation)
+# 7: Agent fleet validates + core agents healthy
 check_7() {
-  if [ -f "$HEX_DIR/AGENTS.md" ]; then
-    _pass "AGENTS.md exists"
-    _rec 7 "AGENTS.md exists" "pass" "AGENTS.md found"
+  local hex_agent="$HEX_DIR/.hex/bin/hex-agent"
+  if [ ! -x "$hex_agent" ]; then
+    _error "hex-agent binary missing at $hex_agent — cannot validate fleet"
+    _rec 7 "agent-fleet" "error" "hex-agent binary missing"
     return
   fi
-  _warn "AGENTS.md missing — run /hex-doctor to generate"
-  _rec 7 "AGENTS.md exists" "warn" "AGENTS.md not found"
+
+  # Validate all charters
+  local fleet_out
+  fleet_out=$(HEX_DIR="$HEX_DIR" "$hex_agent" fleet 2>&1)
+  local fleet_exit=$?
+  if [ $fleet_exit -ne 0 ]; then
+    _error "hex-agent fleet failed (exit $fleet_exit):"
+    echo "$fleet_out" | grep -E 'ERROR' | while read -r line; do _error "  $line"; done
+    _rec 7 "agent-fleet" "error" "fleet validation failed"
+    return
+  fi
+
+  local agent_count core_count
+  agent_count=$(HEX_DIR="$HEX_DIR" "$hex_agent" list 2>/dev/null | wc -l | tr -d ' ')
+  core_count=$(HEX_DIR="$HEX_DIR" "$hex_agent" list --core 2>/dev/null | wc -l | tr -d ' ')
+  _pass "Fleet OK — $agent_count agents ($core_count core) discovered from charters"
+  _rec 7 "agent-fleet" "pass" "$agent_count agents, $core_count core"
+
+  # Check core agents are not halted
+  local halted_core=0
+  while IFS= read -r core_id; do
+    [ -z "$core_id" ] && continue
+    if [ -f "$HOME/.hex-${core_id}-HALT" ]; then
+      _error "Core agent '$core_id' is HALTED — system operations degraded"
+      halted_core=$((halted_core + 1))
+    fi
+  done < <(HEX_DIR="$HEX_DIR" "$hex_agent" list --core 2>/dev/null)
+
+  if [ $halted_core -gt 0 ]; then
+    _rec 7 "core-agents" "error" "$halted_core core agent(s) halted"
+  elif [ "$core_count" -gt 0 ]; then
+    _pass "All $core_count core agents active"
+    _rec 7 "core-agents" "pass" "all core agents active"
+  fi
+
+  # Check for drift from reference core agents (single invocation)
+  local check_out check_rc
+  check_out=$(HEX_DIR="$HEX_DIR" "$hex_agent" check-core 2>&1)
+  check_rc=$?
+  if [ $check_rc -eq 0 ]; then
+    _pass "Core agents match reference set"
+    _rec 7 "core-reference" "pass" "no drift"
+  else
+    local missing_count broken_count
+    missing_count=$(echo "$check_out" | grep -c 'MISSING:' || true)
+    broken_count=$(echo "$check_out" | grep -c 'BROKEN:' || true)
+    if [ "$missing_count" -gt 0 ]; then
+      _error "Core agent drift: $missing_count missing — run 'hex-agent restore-core' to fix"
+    fi
+    if [ "$broken_count" -gt 0 ]; then
+      _error "Core agent drift: $broken_count broken — run 'hex-agent check-core' for details"
+    fi
+    _rec 7 "core-reference" "error" "${missing_count} missing, ${broken_count} broken"
+  fi
 }
 
 # 8: .codex/config.toml exists (warning, fix: create with CLAUDE.md fallback)
@@ -465,6 +518,12 @@ check_15() {
 check_16() {
   local hex_eventd="$HOME/.hex-events/hex_eventd.py"
   if [ ! -f "$hex_eventd" ]; then
+    # Fallback: daemon may run from repo path instead of ~/.hex-events/
+    if pgrep -f hex_eventd.py >/dev/null 2>&1; then
+      _pass "hex-events daemon running (process found, not at ~/.hex-events/)"
+      _rec 16 "hex-events reachable" "pass" "hex_eventd.py process running"
+      return
+    fi
     _info "hex-events not installed (~/.hex-events/hex_eventd.py not found)"
     _rec 16 "hex-events reachable" "warn" "hex-events not installed"
     return
@@ -579,6 +638,62 @@ check_20() {
   _rec 20 ".hex/timezone valid" "warn" "timezone '$tz_val' may be invalid"
 }
 
+# 21: Agent liveness — all wake scripts source env.sh, claude is reachable, recent logs show successes (error, fix: add source)
+check_21() {
+  local env_file="$HEX_DIR/.hex/env.sh"
+  if [ ! -f "$env_file" ]; then
+    _error ".hex/env.sh missing — agents have no shared environment"
+    _rec 21 "agent-liveness" "error" "env.sh missing"
+    return
+  fi
+
+  # Verify claude is reachable via env.sh
+  if ! bash -c "source '$env_file' && command -v claude" &>/dev/null; then
+    _error "claude not reachable after sourcing .hex/env.sh — check PATH in env.sh"
+    _rec 21 "agent-liveness" "error" "claude not on PATH via env.sh"
+    return
+  fi
+
+  # Check all agents discovered from charters (no hardcoded lists)
+  local hex_agent="$HEX_DIR/.hex/bin/hex-agent"
+  if [ ! -x "$hex_agent" ]; then
+    _warn "hex-agent binary missing — skipping per-agent liveness checks"
+    _rec 21 "agent-liveness" "warn" "hex-agent binary missing"
+    return
+  fi
+
+  local dead_agents=0
+  local total_agents=0
+  while IFS= read -r agent_id; do
+    [ -z "$agent_id" ] && continue
+    total_agents=$((total_agents + 1))
+    local adir="$HEX_DIR/projects/$agent_id"
+    local alog="$adir/log.jsonl"
+    [ -f "$alog" ] || continue
+    local fail_streak=0
+    while IFS= read -r line; do
+      if echo "$line" | grep -q '"status":"failed"\|"status":"throttled"'; then
+        fail_streak=$((fail_streak + 1))
+      else
+        fail_streak=0
+      fi
+    done < <(tail -5 "$alog")
+    if [ $fail_streak -ge 5 ]; then
+      dead_agents=$((dead_agents + 1))
+      local err_msg=""
+      [ -f "$adir/last-error.txt" ] && err_msg=$(tail -1 "$adir/last-error.txt" 2>/dev/null | head -c 120)
+      _error "Agent $agent_id: last 5+ log entries are failures${err_msg:+ — $err_msg}"
+    fi
+  done < <(HEX_DIR="$HEX_DIR" "$hex_agent" list 2>/dev/null)
+
+  if [ $dead_agents -eq 0 ]; then
+    _pass "All $total_agents agents healthy (env.sh OK, no failure streaks)"
+    _rec 21 "agent-liveness" "pass" "all $total_agents agents healthy"
+  else
+    _rec 21 "agent-liveness" "error" "$dead_agents/$total_agents agents dead"
+  fi
+}
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 if ! $JSON_MODE; then
   echo ""
@@ -608,6 +723,7 @@ check_17
 check_18
 check_19
 check_20
+check_21
 
 # ─── Output ───────────────────────────────────────────────────────────────────
 if $JSON_MODE; then
