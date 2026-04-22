@@ -91,7 +91,8 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
         invocation += 1;
 
         let remaining = cost::shift_budget_remaining(&agent_state.cost, shift_budget);
-        if remaining <= 0.0 {
+        if shift_budget > 0.0 && remaining <= 0.0 {
+            eprintln!("WARN: shift budget exhausted (spent ${:.4}, cap ${:.2})", agent_state.cost.last_wake_usd, shift_budget);
             audit::append(&audit_dir, &config.agent_id, "shift-budget-hit", &serde_json::json!({
                 "spent": agent_state.cost.last_wake_usd,
                 "budget": shift_budget,

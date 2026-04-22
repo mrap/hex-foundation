@@ -1,0 +1,38 @@
+id: test-agent
+name: Test Agent
+version: "1.0.0"
+role: Test role
+scope: Test scope
+parent: cos
+objective: Test objective
+wake:
+  triggers:
+    - timer.tick.6h
+  responsibilities:
+    - name: health-check
+      interval: 1800
+      description: Run health checks
+    - name: review
+      interval: 21600
+      description: Review initiatives
+authority:
+  green:
+    - Read files
+    - Write state
+  yellow:
+    - Modify runtime
+  red:
+    - Push to remote
+budget:
+  wakes_per_hour: 6
+  usd_per_day: 2.0
+  usd_per_shift: 0.10
+memory:
+  max_size_kb: 64
+hooks:
+  on_find: null
+  on_decide: null
+  on_act: null
+  on_verify: null
+escalation_channel: "#test"
+kill_switch: /tmp/.hex-test-agent-HALT

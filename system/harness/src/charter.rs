@@ -30,14 +30,11 @@ fn validate(charter: &Charter) -> Result<(), CharterError> {
             "id '{}' contains unsafe characters — only [a-zA-Z0-9_-] allowed", charter.id
         )));
     }
-    if charter.budget.usd_per_day <= 0.0 {
-        return Err(CharterError("budget.usd_per_day must be positive".into()));
+    if charter.budget.usd_per_day < 0.0 {
+        return Err(CharterError("budget.usd_per_day cannot be negative".into()));
     }
-    if charter.budget.usd_per_shift <= 0.0 {
-        return Err(CharterError("budget.usd_per_shift must be positive".into()));
-    }
-    if charter.budget.wakes_per_hour == 0 {
-        return Err(CharterError("budget.wakes_per_hour must be > 0".into()));
+    if charter.budget.usd_per_shift < 0.0 {
+        return Err(CharterError("budget.usd_per_shift cannot be negative".into()));
     }
     if charter.kill_switch.is_empty() {
         return Err(CharterError("kill_switch path is required".into()));

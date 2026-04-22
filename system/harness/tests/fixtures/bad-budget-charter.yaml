@@ -1,0 +1,15 @@
+id: bad-budget
+name: Bad Budget Agent
+role: Test
+wake:
+  triggers: []
+  responsibilities: []
+authority:
+  green: []
+  yellow: []
+  red: []
+budget:
+  wakes_per_hour: 6
+  usd_per_day: -1.0
+  usd_per_shift: 0.10
+kill_switch: /tmp/halt
