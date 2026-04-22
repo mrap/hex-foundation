@@ -40,14 +40,28 @@ All commands support `--json` and emit `hex.integration.{installed,uninstalled,u
 
 ## Compile-step policy coupling
 
-The hex-events daemon watches `~/.hex-events/policies/*.yaml`. Bundles live under `integrations/<name>/events/*.yaml`. Install compiles each bundle event file into a fresh `~/.hex-events/policies/<name>-<stem>.yaml` with:
+The hex-events daemon watches `~/.hex-events/policies/*.yaml`. Bundles live under `integrations/<name>/events/*.yaml`. `hex-integration install` shells out to `hex-events compile <bundle>` which runs full static analysis before writing any file.
+
+**As of hex-events v0.2.0, the compile step is a real compiler** — not just templating. It runs three validator passes:
+
+1. **Schema** — enforces canonical `rules:[{name, trigger, actions}]` shape; rejects flat `trigger:/action:` form.
+2. **Producer-check** — cross-references every subscribed event against the live catalog (`hex-events list-events`); unknown subscriptions are errors.
+3. **Dead-code** — duplicate rule/policy names, unknown action types, rules with no actions, rate-limit cadence mismatches.
+
+On compile error, `install` exits non-zero and **no files land in** `~/.hex-events/policies/`. The previously-installed version (if any) stays in place untouched.
+
+Compiled policies carry full manifest headers:
 
 ```
 # generated_from: integrations/<name>/events/<stem>.yaml
-# installed_at: <ISO-8601>
+# generated_at: <ISO-8601>
+# compiler_version: 1.0.0
+# checks_passed: schema, producer-check, dead-code
 ```
 
-This pattern gives operators an audit trail (grep for `generated_from:` to find which bundle owns any installed policy) and makes uninstall atomic (remove every file with a matching `generated_from:` header).
+This gives operators an audit trail (grep `generated_from:` to find which bundle owns any installed policy) and makes uninstall atomic (remove every file with a matching `generated_from:` header).
+
+Pre-existing non-bundle policies (no `generated_from:` header) are scanned in `--permissive` warn-only mode during the migration window.
 
 Bundle event YAMLs use the standard hex-events policy schema — a `rules:` list with `name`, `trigger`, and `actions` per rule. Do NOT use a flat top-level `trigger:` + `action:` — the daemon rejects that shape.
 
