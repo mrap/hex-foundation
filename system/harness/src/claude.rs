@@ -1,4 +1,4 @@
-use crate::types::{AgentResponse, AssessmentResponse, ClaudeOutput};
+use crate::types::{AgentResponse, AssessmentResponse, ClaudeOutput, Message, QueueUpdates, TrailEntry};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -11,8 +11,49 @@ pub fn parse_agent_response(
     result_text: &str,
 ) -> Result<AgentResponse, Box<dyn std::error::Error>> {
     let cleaned = extract_json(result_text);
-    let response: AgentResponse = serde_json::from_str(&cleaned)?;
-    Ok(response)
+    match serde_json::from_str::<AgentResponse>(&cleaned) {
+        Ok(response) => Ok(response),
+        Err(strict_err) => {
+            eprintln!("[harness] parse_agent_response: strict parse failed ({strict_err}), attempting partial recovery");
+            // Try to parse as raw JSON value and reconstruct field-by-field
+            let val: serde_json::Value = serde_json::from_str(&cleaned).map_err(|json_err| {
+                eprintln!("[harness] parse_agent_response: not valid JSON ({json_err}), discarding response");
+                json_err
+            })?;
+            let trail = val
+                .get("trail")
+                .and_then(|t| serde_json::from_value::<Vec<TrailEntry>>(t.clone()).ok())
+                .unwrap_or_else(|| {
+                    eprintln!("[harness] parse_agent_response: trail field unrecoverable");
+                    vec![]
+                });
+            let queue_updates = val
+                .get("queue_updates")
+                .and_then(|q| serde_json::from_value::<QueueUpdates>(q.clone()).ok())
+                .unwrap_or_default();
+            let memory_updates = val.get("memory_updates").cloned();
+            let outbound_messages = val
+                .get("outbound_messages")
+                .and_then(|m| serde_json::from_value::<Vec<Message>>(m.clone()).ok())
+                .unwrap_or_default();
+            let active_drained = val
+                .get("active_drained")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            eprintln!(
+                "[harness] parse_agent_response: partial recovery ({} trail entries, {} messages)",
+                trail.len(),
+                outbound_messages.len()
+            );
+            Ok(AgentResponse {
+                trail,
+                queue_updates,
+                memory_updates,
+                outbound_messages,
+                active_drained,
+            })
+        }
+    }
 }
 
 pub fn parse_assessment_response(

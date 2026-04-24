@@ -1,32 +1,66 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
+
+fn default_now() -> DateTime<Utc> {
+    Utc::now()
+}
+
+/// Deserialize a Vec<T>, skipping items that fail to parse instead of failing the whole response.
+pub fn deserialize_lenient_vec<'de, T, D>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    T: serde::de::DeserializeOwned,
+    D: Deserializer<'de>,
+{
+    let values: Vec<serde_json::Value> = Vec::deserialize(deserializer).unwrap_or_default();
+    let mut result = Vec::new();
+    for val in values {
+        match serde_json::from_value::<T>(val.clone()) {
+            Ok(item) => result.push(item),
+            Err(e) => eprintln!("[harness] lenient-parse: skipped malformed item ({e}): {val}"),
+        }
+    }
+    Ok(result)
+}
 
 // ── Queue Items ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActiveItem {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub summary: String,
+    #[serde(default)]
     pub priority: i32,
+    #[serde(default = "default_now")]
     pub created: DateTime<Utc>,
+    #[serde(default)]
     pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockedItem {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub summary: String,
+    #[serde(default)]
     pub priority: i32,
+    #[serde(default)]
     pub blocked_on: String,
+    #[serde(default)]
     pub blocked_type: String,
     pub blocked_ref: Option<String>,
+    #[serde(default = "default_now")]
     pub blocked_since: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledItem {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub summary: String,
     pub interval_seconds: u64,
     pub last_run: Option<DateTime<Utc>>,
@@ -55,14 +89,21 @@ pub struct TrailEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub from: String,
+    #[serde(default)]
     pub to: String,
+    #[serde(default)]
     pub subject: String,
+    #[serde(default)]
     pub body: String,
     pub initiative_id: Option<String>,
+    #[serde(default)]
     pub response_requested: bool,
     pub in_reply_to: Option<String>,
+    #[serde(default = "default_now")]
     pub sent_at: DateTime<Utc>,
 }
 
@@ -100,6 +141,8 @@ pub struct AgentState {
     pub cadence_overrides: HashMap<String, u64>,
     #[serde(default)]
     pub last_assessment_wake: u64,
+    #[serde(default)]
+    pub recent_action_hashes: Vec<(String, u64)>,
 }
 
 // ── Claude Output ───────────────────────────────────────────────────────────
@@ -127,24 +170,28 @@ pub struct ClaudeOutput {
 
 // ── Agent Structured Response ───────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentResponse {
+    #[serde(default)]
     pub trail: Vec<TrailEntry>,
+    #[serde(default)]
     pub queue_updates: QueueUpdates,
     pub memory_updates: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "deserialize_lenient_vec")]
     pub outbound_messages: Vec<Message>,
+    #[serde(default)]
     pub active_drained: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct QueueUpdates {
     #[serde(default)]
     pub completed: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_vec")]
     pub added_active: Vec<ActiveItem>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_vec")]
     pub moved_to_blocked: Vec<BlockedItem>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_vec")]
     pub parked: Vec<BlockedItem>,
 }
 
@@ -249,4 +296,6 @@ pub struct Charter {
     pub kill_switch: String,
     #[serde(default)]
     pub core: bool,
+    #[serde(default)]
+    pub context_files: Vec<String>,
 }

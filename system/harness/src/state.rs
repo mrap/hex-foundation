@@ -31,6 +31,7 @@ pub fn initialize(agent_id: &str, budget_usd: f64) -> AgentState {
         },
         cadence_overrides: Default::default(),
         last_assessment_wake: 0,
+        recent_action_hashes: vec![],
     }
 }
 

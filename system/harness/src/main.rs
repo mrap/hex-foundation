@@ -146,13 +146,25 @@ fn main() {
             trigger,
             payload,
         } => {
+            let hex_dir = get_hex_dir();
             match wake::run(wake::WakeConfig {
-                hex_dir: get_hex_dir(),
-                agent_id,
+                hex_dir,
+                agent_id: agent_id.clone(),
                 trigger,
                 payload,
             }) {
-                Ok(code) => std::process::exit(code),
+                Ok(code) => {
+                    // Post-wake: surface loop.detected status if HALT-loop file was written
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let halt_path = format!("{}/.hex-{}-HALT-loop", home, agent_id);
+                    if std::path::Path::new(&halt_path).exists() {
+                        eprintln!(
+                            "[{}] WARNING: loop.detected — HALT-loop file present, agent halted pending review",
+                            agent_id
+                        );
+                    }
+                    std::process::exit(code)
+                }
                 Err(e) => {
                     eprintln!("wake failed: {e}");
                     std::process::exit(1);

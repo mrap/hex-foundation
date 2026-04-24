@@ -1,5 +1,6 @@
 use crate::{audit, charter, claude, cost, gate, message, prompt, queue, state};
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 pub struct WakeConfig {
@@ -38,6 +39,36 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
     let principles_path = hex_dir.join(".hex/principles.md");
     let principles_text = std::fs::read_to_string(&principles_path).ok();
 
+    // 1c. Load context_files declared in charter (injected into prompt)
+    let mut context_files_content = String::new();
+    for pattern in &charter_data.context_files {
+        let expanded = shellexpand::tilde(pattern).to_string();
+        let full_pattern = if Path::new(&expanded).is_absolute() {
+            expanded
+        } else {
+            hex_dir.join(&expanded).to_string_lossy().to_string()
+        };
+        let matches: Vec<_> = glob::glob(&full_pattern)
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.ok())
+            .collect();
+        if matches.is_empty() {
+            if let Ok(content) = std::fs::read_to_string(&full_pattern) {
+                context_files_content.push_str(&format!("\n## {}\n\n{}\n", pattern, content));
+            }
+        } else {
+            for path in matches {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let rel = path.strip_prefix(hex_dir).unwrap_or(&path);
+                    context_files_content.push_str(
+                        &format!("\n## {}\n\n{}\n", rel.display(), content)
+                    );
+                }
+            }
+        }
+    }
+
     // 2. HALT check
     let kill_switch = shellexpand::tilde(&charter_data.kill_switch).to_string();
     if Path::new(&kill_switch).exists() {
@@ -58,6 +89,35 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
     let state_dir = hex_dir.join(format!("projects/{}", config.agent_id));
     std::fs::create_dir_all(&state_dir)?;
     let state_path = state_dir.join("state.json");
+
+    // 3a. Acquire exclusive lock to prevent concurrent wakes from corrupting state
+    let lock_path = state_dir.join("state.json.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&lock_path)
+        .map_err(|e| format!("cannot open lock file {}: {e}", lock_path.display()))?;
+    use fs2::FileExt;
+    match lock_file.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(_) => {
+            eprintln!(
+                "[{}] SKIP: another wake is already running (lock held on {})",
+                config.agent_id,
+                lock_path.display()
+            );
+            audit::append(
+                &audit_dir,
+                &config.agent_id,
+                "wake-lock-contention",
+                &serde_json::json!({"reason": "another wake holds the lock"}),
+            );
+            return Ok(0);
+        }
+    }
+    // lock_file is held until this function returns (RAII drop)
+
     let mut agent_state = if state_path.exists() {
         state::load(&state_path)?
     } else {
@@ -144,12 +204,18 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
             break;
         }
 
+        let ctx_files = if context_files_content.is_empty() {
+            None
+        } else {
+            Some(context_files_content.as_str())
+        };
         let prompt_text = prompt::build(
             &charter_text,
             &agent_state,
             &config.trigger,
             &config.payload,
             principles_text.as_deref(),
+            ctx_files,
         );
 
         let claude_output = match claude::invoke(&prompt_text, "sonnet", &allowed_tools) {
@@ -189,10 +255,12 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
         };
 
         // Validate and append trail entries
+        let mut accepted_entries: Vec<crate::types::TrailEntry> = Vec::new();
         for entry in &response.trail {
             match gate::validate(entry) {
                 Ok(()) => {
                     agent_state.trail.push(entry.clone());
+                    accepted_entries.push(entry.clone());
                     audit::append(
                         &audit_dir,
                         &config.agent_id,
@@ -212,6 +280,23 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
                     );
                 }
             }
+        }
+
+        // Loop detection: check accepted observe/verify entries for repetition
+        let interval_seconds = if charter_data.budget.wakes_per_hour > 0 {
+            3600 / charter_data.budget.wakes_per_hour as u64
+        } else {
+            3600
+        };
+        if check_and_handle_loop(
+            &mut agent_state,
+            &accepted_entries,
+            interval_seconds,
+            hex_dir,
+            &audit_dir,
+        ) {
+            state::save(&agent_state, &state_path)?;
+            return Ok(0);
         }
 
         // Apply queue updates
@@ -423,4 +508,85 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
     );
 
     Ok(0)
+}
+
+pub fn compute_action_hash(agent_id: &str, trail_type: &str, detail: &serde_json::Value) -> String {
+    let sorted_detail = if let Some(obj) = detail.as_object() {
+        let mut keys: Vec<&String> = obj.keys().collect();
+        keys.sort();
+        let sorted: serde_json::Map<String, serde_json::Value> =
+            keys.iter().map(|k| (k.to_string(), obj[*k].clone())).collect();
+        serde_json::to_string(&serde_json::Value::Object(sorted)).unwrap_or_default()
+    } else {
+        detail.to_string()
+    };
+    let input = format!("{}:{}:{}", agent_id, trail_type, sorted_detail);
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(result)[..16].to_string()
+}
+
+pub fn check_and_handle_loop(
+    agent_state: &mut crate::types::AgentState,
+    new_entries: &[crate::types::TrailEntry],
+    interval_seconds: u64,
+    hex_dir: &Path,
+    audit_dir: &Path,
+) -> bool {
+    let now_unix = Utc::now().timestamp() as u64;
+
+    for entry in new_entries {
+        if entry.entry_type == "observe" || entry.entry_type == "verify" {
+            let hash = compute_action_hash(&agent_state.agent_id, &entry.entry_type, &entry.detail);
+            agent_state.recent_action_hashes.push((hash, now_unix));
+        }
+    }
+
+    let prune_cutoff = now_unix.saturating_sub(interval_seconds * 10);
+    agent_state.recent_action_hashes.retain(|(_, ts)| *ts >= prune_cutoff);
+
+    let loop_cutoff = now_unix.saturating_sub(interval_seconds * 6);
+    let hashes_snapshot: Vec<String> = agent_state
+        .recent_action_hashes
+        .iter()
+        .map(|(h, _)| h.clone())
+        .collect();
+
+    for candidate_hash in &hashes_snapshot {
+        let count = agent_state
+            .recent_action_hashes
+            .iter()
+            .filter(|(h, ts)| h == candidate_hash && *ts >= loop_cutoff)
+            .count();
+        if count >= 3 {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let halt_path = format!("{}/.hex-{}-HALT-loop", home, agent_state.agent_id);
+            let _ = std::fs::write(&halt_path, "Loop detected: same action repeated 3x. Manual review required.");
+
+            let emit_script = hex_dir.join(".hex/bin/hex-emit.sh");
+            let payload = serde_json::json!({
+                "agent_id": agent_state.agent_id,
+                "action_hash": candidate_hash,
+                "count": count,
+            });
+            let _ = std::process::Command::new(&emit_script)
+                .arg("hex.agent.loop.detected")
+                .arg(payload.to_string())
+                .status();
+
+            audit::append(
+                audit_dir,
+                &agent_state.agent_id,
+                "loop-halt",
+                &serde_json::json!({
+                    "hash": candidate_hash,
+                    "count": count,
+                    "action_sample": format!("observe/verify:{}", candidate_hash),
+                }),
+            );
+            return true;
+        }
+    }
+    false
 }

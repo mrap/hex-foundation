@@ -4,7 +4,7 @@ use hex_agent::prompt;
 fn test_prompt_contains_charter_and_state() {
     let charter_text = "id: test\nrole: Test Agent\nobjective: Be useful";
     let state = hex_agent::state::initialize("test", 2.0);
-    let p = prompt::build(charter_text, &state, "timer.tick.30m", "{}", None);
+    let p = prompt::build(charter_text, &state, "timer.tick.30m", "{}", None, None);
     assert!(
         p.contains("Test Agent"),
         "prompt should contain charter text"
@@ -23,7 +23,7 @@ fn test_prompt_contains_charter_and_state() {
 #[test]
 fn test_prompt_includes_response_schema() {
     let state = hex_agent::state::initialize("test", 2.0);
-    let p = prompt::build("id: test", &state, "manual", "{}", None);
+    let p = prompt::build("id: test", &state, "manual", "{}", None, None);
     assert!(p.contains("trail"), "must describe trail");
     assert!(p.contains("queue_updates"), "must describe queue_updates");
     assert!(p.contains("active_drained"), "must describe active_drained");
@@ -41,6 +41,7 @@ fn test_prompt_includes_principles_when_provided() {
         "manual",
         "{}",
         Some("## Self-Tuning Cadence\nYou own the tempo."),
+        None,
     );
     assert!(
         p.contains("Self-Tuning Cadence"),
@@ -55,7 +56,7 @@ fn test_prompt_includes_principles_when_provided() {
 #[test]
 fn test_prompt_works_without_principles() {
     let state = hex_agent::state::initialize("test", 2.0);
-    let p = prompt::build("id: test", &state, "manual", "{}", None);
+    let p = prompt::build("id: test", &state, "manual", "{}", None, None);
     assert!(!p.contains("Self-Tuning"), "no principles text when None");
 }
 

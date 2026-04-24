@@ -1,29 +1,42 @@
 use crate::types::{AgentState, Charter};
 
+fn serialize_or_loud(label: &str, val: &impl serde::Serialize) -> String {
+    serde_json::to_string_pretty(val).unwrap_or_else(|e| {
+        eprintln!("[harness][prompt] serialization failed for {label}: {e}");
+        String::new()
+    })
+}
+
 pub fn build(
     charter_text: &str,
     state: &AgentState,
     trigger: &str,
     payload: &str,
     principles_text: Option<&str>,
+    context_files: Option<&str>,
 ) -> String {
     let trail_recent: Vec<_> = state.trail.iter().rev().take(20).collect();
-    let trail_json = serde_json::to_string_pretty(&trail_recent).unwrap_or_default();
-    let queue_json = serde_json::to_string_pretty(&state.queue).unwrap_or_default();
-    let memory_json = serde_json::to_string_pretty(&state.memory).unwrap_or_default();
-    let inbox_json = serde_json::to_string_pretty(&state.inbox).unwrap_or_default();
-    let cost_json = serde_json::to_string_pretty(&state.cost).unwrap_or_default();
-    let initiatives_json = serde_json::to_string_pretty(&state.initiatives).unwrap_or_default();
+    let trail_json = serialize_or_loud("trail", &trail_recent);
+    let queue_json = serialize_or_loud("queue", &state.queue);
+    let memory_json = serialize_or_loud("memory", &state.memory);
+    let inbox_json = serialize_or_loud("inbox", &state.inbox);
+    let cost_json = serialize_or_loud("cost", &state.cost);
+    let initiatives_json = serialize_or_loud("initiatives", &state.initiatives);
 
     let principles_section = principles_text
         .map(|p| format!("\n---\n\n{p}\n"))
-        .unwrap_or_default();
+        .unwrap_or_else(String::new);
+
+    let context_section = context_files
+        .filter(|s| !s.is_empty())
+        .map(|c| format!("\n---\n\n# Context Files\n{c}\n"))
+        .unwrap_or_else(String::new);
 
     format!(
         r#"# Charter
 
 {charter_text}
-{principles_section}
+{principles_section}{context_section}
 ---
 
 # Wake Context
@@ -130,10 +143,10 @@ pub fn build_assessment(
     principles_text: Option<&str>,
 ) -> String {
     let trail_recent: Vec<_> = state.trail.iter().rev().take(50).collect();
-    let trail_json = serde_json::to_string_pretty(&trail_recent).unwrap_or_default();
-    let memory_json = serde_json::to_string_pretty(&state.memory).unwrap_or_default();
-    let cost_json = serde_json::to_string_pretty(&state.cost).unwrap_or_default();
-    let cadence_json = serde_json::to_string_pretty(&state.cadence_overrides).unwrap_or_default();
+    let trail_json = serialize_or_loud("trail", &trail_recent);
+    let memory_json = serialize_or_loud("memory", &state.memory);
+    let cost_json = serialize_or_loud("cost", &state.cost);
+    let cadence_json = serialize_or_loud("cadence_overrides", &state.cadence_overrides);
 
     let kpis_section = charter
         .kpis
@@ -175,7 +188,7 @@ pub fn build_assessment(
 
     let principles_section = principles_text
         .map(|p| format!("\n---\n\n{p}\n"))
-        .unwrap_or_default();
+        .unwrap_or_else(String::new);
 
     format!(
         r#"# Self-Assessment Phase
