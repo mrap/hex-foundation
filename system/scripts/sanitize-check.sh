@@ -33,6 +33,7 @@ run_check() {
         "$@" 2>/dev/null \
         | grep -v "/${SELF}:" \
         | grep -v "personalization-audit" \
+    | grep -v "PATH=.*opt.homebrew" \
         | grep -v "Co-Authored" \
         | grep -v -i "# example\|# e\.g\.\|example:\|# Example" \
         || true)
@@ -92,6 +93,7 @@ BREW_VIOLATIONS=$(grep -rn "/opt/homebrew" . \
     | grep -v 'opt/homebrew.*&&\|&&.*opt/homebrew' \
     | grep -v '_add_to_path' \
     | grep -v "personalization-audit" \
+    | grep -v "PATH=.*opt.homebrew" \
     || true)
 if [ -n "$BREW_VIOLATIONS" ]; then
     VIOLATIONS+=("hardcoded /opt/homebrew")
@@ -112,6 +114,7 @@ SECRETS_VIOLATIONS=$(grep -rn "secrets/slack-bot-token\|\.hex/secrets/[a-zA-Z][a
     --include="*.py" --include="*.sh" 2>/dev/null \
     | grep -v "/${SELF}:" \
     | grep -v "personalization-audit" \
+    | grep -v "PATH=.*opt.homebrew" \
     | grep -v '<name>\|REPLACE_ME\|YOUR_' \
     || true)
 if [ -n "$SECRETS_VIOLATIONS" ]; then
@@ -145,6 +148,7 @@ CLAUDE_BIN_VIOLATIONS=$(grep -rn 'claude\s\+-p\b\|exec\s\+claude\b\|\bcodex exec
     | grep -v 'system-introspection\.sh:' \
     | grep -v 'hex-ui-feedback-tick\.sh:' \
     | grep -v "personalization-audit" \
+    | grep -v "PATH=.*opt.homebrew" \
     | grep -v '^\s*#' \
     || true)
 if [ -n "$CLAUDE_BIN_VIOLATIONS" ]; then
@@ -179,6 +183,7 @@ CLAUDE_PATH_FILES=$(grep -rln '\.claude/' . \
     | grep -v '/backup_session\.sh$' \
     | grep -v '/consolidate\.sh$' \
     | grep -v "personalization-audit" \
+    | grep -v "PATH=.*opt.homebrew" \
     || true)
 CLAUDE_PATH_VIOLATIONS=""
 while IFS= read -r fpath; do

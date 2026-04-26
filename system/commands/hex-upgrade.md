@@ -30,7 +30,7 @@ If the upgrade script reports that the CLAUDE.md template has changed:
 2. Read the current `$AGENT_DIR/CLAUDE.md`
 
 3. Detect the user's `{{NAME}}` and `{{AGENT}}` values from the current CLAUDE.md:
-   - `{{NAME}}` = the name used throughout (e.g., "Mike Rapadas")
+   - `{{NAME}}` = the name used throughout (e.g., "Your Name")
    - `{{AGENT}}` = the agent name from the file index section or title
 
 4. Merge intelligently:

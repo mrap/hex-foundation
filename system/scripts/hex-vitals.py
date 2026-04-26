@@ -289,8 +289,8 @@ def save_cache(data: dict) -> None:
 
 # ── Slack ──────────────────────────────────────────────────────────────────
 SLACK_SECRET_FILES = [
-    "/Users/mrap/hex/.hex/secrets/slack-bot-token.env",  # spec path
-    "/Users/mrap/hex/.hex/secrets/slack-bot.env",        # actual path
+    os.path.join(_HEX_ROOT, ".hex", "secrets", "slack-bot-token.env"),  # spec path
+    os.path.join(_HEX_ROOT, ".hex", "secrets", "slack-bot.env"),        # actual path
 ]
 SLACK_CHANNEL = "hex-vitals"
 

@@ -7,7 +7,7 @@
 # On healthy system: removes any stale doctor-alert (startup stays silent).
 # On issues:         writes summary to doctor-alert (startup surfaces it).
 #
-# Called by: launchd com.mrap.hex-doctor-watchdog (every 15min + at load)
+# Called by: launchd com.hex.doctor-watchdog (every 15min + at load)
 # Surfaced by: startup.sh's existing doctor-alert check
 
 set -uo pipefail
