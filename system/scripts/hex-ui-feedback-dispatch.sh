@@ -107,7 +107,7 @@ pitch-site API at `/visions/api/comments`.
 
 - Only modify files under `projects/hex-ui/vision-pitch-site/`.
 - Respect `projects/hex-ui/design-principles-2026-04-21.md` and the
-  rejected-patterns memory (`~/.claude/projects/from the Claude project memory/memory/feedback_hex_ui_rejected_patterns.md`).
+  rejected-patterns memory (`the Claude project memory feedback_hex_ui_rejected_patterns.md`).
 - Light mode default. Tailscale URLs only.
 - Do NOT modify `projects/hex-ui/feedback/comments.json`.
 - If the comment is ambiguous, POST a clarifying reply and leave status as `new`.
