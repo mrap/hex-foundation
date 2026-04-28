@@ -51,7 +51,7 @@ def save(content, tags="", source=""):
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     conn.execute(
-        "INSERT INTO memories (content, tags, source, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO memories (content, tags, source, timestamp) VALUES (?, ?, ?, ?)",
         (content, tags, source, ts),
     )
     mem_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
