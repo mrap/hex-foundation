@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-AGENT_DIR = os.environ.get("AGENT_DIR", os.path.expanduser("~/mrap-hex"))
+AGENT_DIR = os.environ.get("AGENT_DIR", os.path.expanduser("~/hex"))
 MANIFESTS_DIR = Path(AGENT_DIR) / ".hex" / "sse" / "topics"
 BUS_URL = os.environ.get("SSE_BUS_URL", "http://127.0.0.1:8880")
 

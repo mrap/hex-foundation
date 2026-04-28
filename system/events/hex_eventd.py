@@ -28,7 +28,7 @@ from actions import get_action_handler
 from adapters.scheduler import SchedulerAdapter
 from policy_validator import validate_policy
 
-os.environ.setdefault("HEX_ROOT", str(Path.home() / "mrap-hex"))
+os.environ.setdefault("HEX_ROOT", str(Path.home() / "hex"))
 
 BASE_DIR = os.path.expanduser("~/.hex-events")
 DB_PATH = os.path.join(BASE_DIR, "events.db")

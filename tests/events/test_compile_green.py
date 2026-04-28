@@ -87,7 +87,7 @@ def test_synthetic_good_policy_no_warnings(tmp_path):
 # Override-able for forks / CI. Skips cleanly when the dev-only path is absent.
 KALSHI_POLICY = os.environ.get(
     "HEX_EVENTS_TEST_KALSHI_POLICY",
-    os.path.expanduser("~/mrap-hex/integrations/kalshi/events/key-rotation-reminder.yaml"),
+    os.path.expanduser("~/hex/integrations/kalshi/events/key-rotation-reminder.yaml"),
 )
 
 

@@ -10,7 +10,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-AGENT_DIR = Path(os.environ.get("AGENT_DIR", Path.home() / "mrap-hex"))
+AGENT_DIR = Path(os.environ.get("AGENT_DIR", Path.home() / "hex"))
 
 # Import hex-asset module (filename has dash, so use importlib)
 _scripts_dir = Path(__file__).parent
@@ -109,7 +109,7 @@ def discover_proposals():
             f"proposal:{stem}",
             title,
             f"projects/brand/proposals/{f.name}",
-            url=f"https://mac-mini.tailbd5748.ts.net/proposals/{stem}",
+            url=f"https://HEX_TAILSCALE_HOST/proposals/{stem}",
             owner="brand",
         ))
 

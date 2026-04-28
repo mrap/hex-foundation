@@ -2,11 +2,11 @@
 hex-router — tiny path-routing reverse proxy for named local services.
 
 Runs on 127.0.0.1:8880. Tailscale Serve fronts it on :443 so users get:
-  https://mac-mini.tailbd5748.ts.net/ui        → hex-ui MVP
-  https://mac-mini.tailbd5748.ts.net/boi       → BOI live status
-  https://mac-mini.tailbd5748.ts.net/visions   → UX vision pitch site
-  https://mac-mini.tailbd5748.ts.net/demos     → demos page
-  https://mac-mini.tailbd5748.ts.net/          → landing page
+  https://HEX_TAILSCALE_HOST/ui        → hex-ui MVP
+  https://HEX_TAILSCALE_HOST/boi       → BOI live status
+  https://HEX_TAILSCALE_HOST/visions   → UX vision pitch site
+  https://HEX_TAILSCALE_HOST/demos     → demos page
+  https://HEX_TAILSCALE_HOST/          → landing page
 
 To add a new named service, add an entry to ROUTES.
 """

@@ -626,7 +626,7 @@ def _run_contract_check(policy_paths: list) -> None:
 
     scripts_dirs = [
         os.path.expanduser("~/.boi/src"),
-        os.path.expanduser("~/mrap-hex/.hex/scripts"),
+        os.path.expanduser("~/hex/.hex/scripts"),
         os.path.join(BASE_DIR, "scripts") if os.path.isdir(os.path.join(BASE_DIR, "scripts")) else "",
     ]
     scripts_dirs = [d for d in scripts_dirs if d and os.path.isdir(d)]
@@ -1252,10 +1252,10 @@ def _is_already_compiled(out_path: str, src_path: str) -> bool:
 
 def _build_compiled_content(src_path: str, bundle_name: str, checks_passed: list[str]) -> str:
     """Return the compiled YAML content with manifest headers."""
-    # Derive the generated_from path relative to mrap-hex integrations root
-    # e.g. /Users/mrap/mrap-hex/integrations/kalshi/events/foo.yaml → integrations/kalshi/events/foo.yaml
+    # Derive the generated_from path relative to hex integrations root
+    # e.g. /Users/mrap/hex/integrations/kalshi/events/foo.yaml → integrations/kalshi/events/foo.yaml
     abs_path = os.path.abspath(src_path)
-    mrap_hex = os.path.expanduser("~/mrap-hex")
+    mrap_hex = os.path.expanduser("~/hex")
     if abs_path.startswith(mrap_hex + os.sep):
         rel = abs_path[len(mrap_hex) + 1:]
     else:

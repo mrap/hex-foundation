@@ -8,7 +8,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-AGENT_DIR = Path(os.environ.get("AGENT_DIR", Path.home() / "mrap-hex"))
+AGENT_DIR = Path(os.environ.get("AGENT_DIR", Path.home() / "hex"))
 REGISTRY = AGENT_DIR / ".hex" / "data" / "assets.json"
 EVENTS_LOG = AGENT_DIR / ".hex" / "logs" / "hex-events.log"
 
