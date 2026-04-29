@@ -1,6 +1,6 @@
 # Multi-Agent System
 
-hex runs a fleet of autonomous agents. Each agent has a charter (what it does), state (what it's working on), and wakes on events to do its work. The **hex-agent harness** (a compiled Rust binary at `.hex/bin/hex-agent`) is the single entry point for all agent operations. Agents cannot bypass it.
+hex runs a fleet of autonomous agents. Each agent has a charter (what it does), state (what it's working on), and wakes on events to do its work. The **hex harness** (a compiled Rust binary at `.hex/bin/hex`) is the single entry point for all agent operations. Agents cannot bypass it.
 
 ## Registration
 
@@ -9,11 +9,11 @@ hex runs a fleet of autonomous agents. Each agent has a charter (what it does), 
 Rules:
 - Directory name must match `charter.id` exactly — the harness validates and rejects mismatches
 - One canonical path: `projects/{agent-id}/charter.yaml` — no prefix fallbacks or aliases
-- Shell scripts use `hex-agent list` to discover agents — never hardcoded IDs
+- Shell scripts use `hex agent list` to discover agents — never hardcoded IDs
 
 ## How It Works
 
-Agents are event-driven. hex-events fires a trigger (timer tick, BOI completion, attention request). The trigger invokes `hex-agent wake <agent-id>`. The harness:
+Agents are event-driven. hex-events fires a trigger (timer tick, BOI completion, attention request). The trigger invokes `hex agent wake <agent-id>`. The harness:
 
 1. Loads the agent's charter and validates `charter.id` matches the directory name
 2. Checks HALT file (kill switch) — if halted, audit and exit without touching state
@@ -30,12 +30,12 @@ Agents are event-driven. hex-events fires a trigger (timer tick, BOI completion,
 
 Agents marked `core: true` in their charter are load-bearing for system operation. The system actively protects them:
 
-- `hex-agent fleet` shows a `●` marker and warns if any core agent is HALTED
-- `hex-agent check-core` compares the actual fleet against reference charters in `.hex/reference/core-agents/`
-- `hex-agent restore-core` restores missing core agents from reference — never overwrites existing charters or user agents
+- `hex agent fleet` shows a `●` marker and warns if any core agent is HALTED
+- `hex agent check-core` compares the actual fleet against reference charters in `.hex/reference/core-agents/`
+- `hex agent restore-core` restores missing core agents from reference — never overwrites existing charters or user agents
 - Doctor check_7 detects core agent drift and surfaces it as an ERROR
 
-Reference charters ship with hex at `.hex/reference/core-agents/`. When the user's instance diverges (missing or broken core agent), the system detects it and offers `hex-agent restore-core` as a one-command fix.
+Reference charters ship with hex at `.hex/reference/core-agents/`. When the user's instance diverges (missing or broken core agent), the system detects it and offers `hex agent restore-core` as a one-command fix.
 
 ## State Model
 
@@ -96,21 +96,21 @@ Gates are types, not a sequence. Agents choose their own workflow. The harness g
 ## CLI
 
 ```bash
-hex-agent fleet                                   # Fleet overview (core markers, status)
-hex-agent list                                    # Agent IDs, one per line
-hex-agent list --core                             # Core agent IDs only
-hex-agent status <agent-id>                       # Single agent detail
-hex-agent wake <agent-id> --trigger <event>       # Run agent shift
-hex-agent check-core                              # Compare fleet against reference set
-hex-agent restore-core                            # Restore missing core agents
-hex-agent message <from> <to> --subject "..." --body "..."  # Async message
+hex agent fleet                                   # Fleet overview (core markers, status)
+hex agent list                                    # Agent IDs, one per line
+hex agent list --core                             # Core agent IDs only
+hex agent status <agent-id>                       # Single agent detail
+hex agent wake <agent-id> --trigger <event>       # Run agent shift
+hex agent check-core                              # Compare fleet against reference set
+hex agent restore-core                            # Restore missing core agents
+hex agent message <from> <to> --subject "..." --body "..."  # Async message
 ```
 
 ## Creating New Agents
 
 1. Write `projects/<agent-id>/charter.yaml` (see any existing charter or `.hex/skills/hex-agents/SKILL.md` for schema)
 2. Create `~/.hex-events/policies/<agent-id>-agent.yaml` with wake triggers
-3. Verify: `hex-agent fleet` — agent appears, charter validates
+3. Verify: `hex agent fleet` — agent appears, charter validates
 4. Activate: `rm ~/.hex-<agent-id>-HALT` (agents start halted by default)
 
 For the full decision framework (when to use agents vs BOI vs hex-events), see the hex-agents skill.
@@ -179,6 +179,6 @@ evolution:
 ## Source
 
 - Rust harness: `.hex/harness/` (11 modules)
-- Compiled binary: `.hex/bin/hex-agent`
+- Compiled binary: `.hex/bin/hex` (`.hex/bin/hex-agent` is a backward-compat symlink)
 - Agent skill: `.hex/skills/hex-agents/SKILL.md`
 - Reference core charters: `.hex/reference/core-agents/`

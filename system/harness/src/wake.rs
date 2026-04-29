@@ -425,6 +425,11 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
                             agent_state
                                 .cadence_overrides
                                 .insert(change.responsibility.clone(), change.new_interval);
+                            let scheduled_id = format!("s-{}", change.responsibility);
+                            if let Some(item) = agent_state.queue.scheduled.iter_mut()
+                                .find(|s| s.id == scheduled_id) {
+                                item.interval_seconds = change.new_interval;
+                            }
                             audit::append(
                                 &audit_dir,
                                 &config.agent_id,

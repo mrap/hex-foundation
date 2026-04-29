@@ -20,20 +20,26 @@ pub fn auto_seed_from_charter(
             None => continue,
         };
         let scheduled_id = format!("s-{}", responsibility.name);
-        if !queue.scheduled.iter().any(|s| s.id == scheduled_id) {
-            let interval = cadence_overrides
-                .get(&responsibility.name)
-                .copied()
-                .unwrap_or(base_interval);
-            queue.scheduled.push(ScheduledItem {
-                id: scheduled_id,
-                summary: responsibility.description.clone(),
-                interval_seconds: interval,
-                last_run: None,
-                next_due: now,
-            });
-            added += 1;
+        if let Some(existing) = queue.scheduled.iter_mut().find(|s| s.id == scheduled_id) {
+            if let Some(&override_interval) = cadence_overrides.get(&responsibility.name) {
+                if existing.interval_seconds != override_interval {
+                    existing.interval_seconds = override_interval;
+                }
+            }
+            continue;
         }
+        let interval = cadence_overrides
+            .get(&responsibility.name)
+            .copied()
+            .unwrap_or(base_interval);
+        queue.scheduled.push(ScheduledItem {
+            id: scheduled_id,
+            summary: responsibility.description.clone(),
+            interval_seconds: interval,
+            last_run: None,
+            next_due: now,
+        });
+        added += 1;
     }
     added
 }
