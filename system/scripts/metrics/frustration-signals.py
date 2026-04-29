@@ -24,7 +24,8 @@ FRUSTRATION_PATTERNS = [
 
 COMPILED = [(p, re.compile(p, re.IGNORECASE)) for p in FRUSTRATION_PATTERNS]
 
-SUMMARIES_DIR = Path.home() / "mrap-hex" / ".hex" / "sessions" / "summaries"
+_HEX_ROOT = Path(os.environ.get("AGENT_DIR", "").strip() or (Path.home() / "hex"))
+SUMMARIES_DIR = _HEX_ROOT / ".hex" / "sessions" / "summaries"
 AUDIT_DIR = Path.home() / ".hex" / "audit"
 OUTPUT_FILE = AUDIT_DIR / "frustration-signals.jsonl"
 THRESHOLD = 4
@@ -92,7 +93,7 @@ def main():
 
 
 def _emit_frustration_event(n: int, hits: list) -> None:
-    telemetry_path = Path.home() / "mrap-hex" / ".hex" / "telemetry"
+    telemetry_path = _HEX_ROOT / ".hex" / "telemetry"
     import sys as _sys
     _sys.path.insert(0, str(telemetry_path))
     try:

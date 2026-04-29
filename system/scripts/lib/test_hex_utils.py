@@ -35,17 +35,17 @@ def test_get_hex_root_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_get_hex_root_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Falls back to ~/mrap-hex when AGENT_DIR is absent."""
+    """Falls back to ~/hex when AGENT_DIR is absent."""
     monkeypatch.delenv("AGENT_DIR", raising=False)
     result = get_hex_root()
-    assert result == Path.home() / "mrap-hex"
+    assert result == Path.home() / "hex"
 
 
 def test_get_hex_root_empty_env_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Empty AGENT_DIR string is treated the same as unset."""
     monkeypatch.setenv("AGENT_DIR", "")
     result = get_hex_root()
-    assert result == Path.home() / "mrap-hex"
+    assert result == Path.home() / "hex"
 
 
 # ---------------------------------------------------------------------------

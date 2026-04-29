@@ -9,7 +9,8 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-SUMMARIES_DIR = Path.home() / "mrap-hex" / ".hex" / "sessions" / "summaries"
+_HEX_ROOT = Path(os.environ.get("AGENT_DIR", "").strip() or (Path.home() / "hex"))
+SUMMARIES_DIR = _HEX_ROOT / ".hex" / "sessions" / "summaries"
 AUDIT_DIR = Path.home() / ".hex" / "audit"
 OUTPUT_FILE = AUDIT_DIR / "loop-detections.jsonl"
 WINDOW_SECONDS = 48 * 3600

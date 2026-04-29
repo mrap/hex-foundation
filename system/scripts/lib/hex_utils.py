@@ -17,7 +17,7 @@ from typing import Union
 def get_hex_root() -> Path:
     """Return the hex workspace root directory.
 
-    Reads the AGENT_DIR environment variable first; falls back to ~/mrap-hex
+    Reads the AGENT_DIR environment variable first; falls back to ~/hex
     when the variable is absent or empty.
 
     Returns:
@@ -26,7 +26,7 @@ def get_hex_root() -> Path:
     agent_dir = os.environ.get("AGENT_DIR", "").strip()
     if agent_dir:
         return Path(agent_dir)
-    return Path.home() / "mrap-hex"
+    return Path.home() / "hex"
 
 
 def load_yaml(path: Union[str, Path]) -> dict:
