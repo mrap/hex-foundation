@@ -240,6 +240,62 @@ else
 fi
 TOTAL=$((TOTAL + 1))
 
+# ── Test 18: Install sets AGENT_DIR in shell rc ──────────────────
+echo "[18] Install sets AGENT_DIR"
+if grep -q 'export AGENT_DIR=' "$HOME/.zshrc" 2>/dev/null || \
+   grep -q 'export AGENT_DIR=' "$HOME/.bashrc" 2>/dev/null; then
+    echo "  PASS: AGENT_DIR found in shell rc"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: AGENT_DIR not set in shell rc after install"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+
+if grep -q 'export HEX_DIR=' "$HOME/.zshrc" 2>/dev/null || \
+   grep -q 'export HEX_DIR=' "$HOME/.bashrc" 2>/dev/null; then
+    echo "  PASS: HEX_DIR found in shell rc"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: HEX_DIR not set in shell rc after install"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+
+# ── Test 19: Doctor check 23 detects missing AGENT_DIR ───────────
+echo "[19] Doctor AGENT_DIR check"
+cd /tmp/test-hex
+DOCTOR_JSON=$(HEX_DIR=/tmp/test-hex bash .hex/scripts/doctor.sh --json 2>&1 || true)
+if echo "$DOCTOR_JSON" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+found = any(c.get('id') == 23 and c.get('name') == 'agent-dir-set' for c in data.get('checks', []))
+sys.exit(0 if found else 1)
+" 2>/dev/null; then
+    echo "  PASS: Doctor includes AGENT_DIR check (check 23)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: Doctor missing AGENT_DIR check 23"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+
+# Verify it passes when AGENT_DIR is set correctly
+DOCTOR_JSON2=$(AGENT_DIR=/tmp/test-hex HEX_DIR=/tmp/test-hex bash .hex/scripts/doctor.sh --json 2>&1 || true)
+if echo "$DOCTOR_JSON2" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+c23 = next((c for c in data.get('checks', []) if c.get('id') == 23), None)
+sys.exit(0 if c23 and c23.get('status') == 'pass' else 1)
+" 2>/dev/null; then
+    echo "  PASS: Doctor check 23 passes when AGENT_DIR set"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: Doctor check 23 should pass when AGENT_DIR set"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+
 # ── Summary ─────────────────────────────────────────────────────────
 echo ""
 echo "========================================="

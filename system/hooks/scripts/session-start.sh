@@ -9,7 +9,30 @@
 
 set -uo pipefail
 
-HEX_DIR="${CLAUDE_PROJECT_DIR:-${HEX_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}}"
+# ── AGENT_DIR guard ─────────────────────────────────────────────────────────
+# Hex refuses to start without AGENT_DIR. Add to your shell rc:
+#   export AGENT_DIR="$HEX_DIR"
+if [[ -z "${AGENT_DIR:-}" ]]; then
+  python3 -c "
+import json
+msg = (
+    '*** AGENT_DIR IS NOT SET — HEX CANNOT START ***\n\n'
+    'AGENT_DIR must be exported in your shell environment.\n'
+    'Add this to your shell rc and restart your terminal:\n\n'
+    '  export AGENT_DIR=\"\$HEX_DIR\"\n\n'
+    'Hex will not operate until this is fixed.'
+)
+print(json.dumps({
+    'hookSpecificOutput': {
+        'hookEventName': 'SessionStart',
+        'additionalContext': msg
+    }
+}))
+"
+  exit 0
+fi
+
+HEX_DIR="${CLAUDE_PROJECT_DIR:-${HEX_DIR:-$AGENT_DIR}}"
 
 {
   _ch="${CC_SESSION_KEY:-local-dev}"

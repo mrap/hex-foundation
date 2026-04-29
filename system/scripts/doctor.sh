@@ -697,6 +697,21 @@ check_21() {
   fi
 }
 
+check_23() {
+  if [[ -z "${AGENT_DIR:-}" ]]; then
+    _error "AGENT_DIR not set — add 'export AGENT_DIR=\"\$HEX_DIR\"' to your shell rc"
+    _rec 23 "agent-dir-set" "error" "AGENT_DIR not exported"
+    return
+  fi
+  if [[ ! -d "$AGENT_DIR/.hex" ]]; then
+    _error "AGENT_DIR=$AGENT_DIR does not contain .hex/ — wrong path"
+    _rec 23 "agent-dir-set" "error" "invalid path"
+    return
+  fi
+  _pass "AGENT_DIR=$AGENT_DIR"
+  _rec 23 "agent-dir-set" "pass" "$AGENT_DIR"
+}
+
 check_22() {
   local hex_bin="$HEX_DIR/.hex/bin/hex"
   if [ ! -x "$hex_bin" ]; then
@@ -750,6 +765,7 @@ check_19
 check_20
 check_21
 check_22
+check_23
 
 # ─── Output ───────────────────────────────────────────────────────────────────
 if $JSON_MODE; then

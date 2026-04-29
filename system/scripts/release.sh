@@ -40,6 +40,18 @@ bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 GATE_PASS=true
 gate_fail() { GATE_PASS=false; red "GATE FAIL: $1"; }
 
+semver_valid() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+
+semver_gt() {
+  local IFS=.
+  local -a a=($1) b=($2)
+  for i in 0 1 2; do
+    if (( a[i] > b[i] )); then return 0; fi
+    if (( a[i] < b[i] )); then return 1; fi
+  done
+  return 1
+}
+
 cd "$REPO_DIR"
 
 SHA=$(git rev-parse --short HEAD)
@@ -62,8 +74,24 @@ else
   green "  Working tree clean ✓"
 fi
 
-# ── Gate 2: Docker E2E ──────────────────────────────────────────────────────
-bold "Gate 2: Docker E2E"
+# ── Gate 2: Version bump ────────────────────────────────────────────────────
+bold "Gate 2: Version bump"
+LATEST_TAG=$(git tag --sort=-version:refname | head -1 | sed 's/^v//')
+if [ -z "$LATEST_TAG" ]; then
+  green "  No prior tags — first release ✓"
+elif ! semver_valid "$VERSION"; then
+  gate_fail "Invalid semver in system/version.txt: '$VERSION' (expected X.Y.Z)"
+elif [ "$VERSION" = "$LATEST_TAG" ]; then
+  COMMITS_SINCE=$(git rev-list "v$LATEST_TAG"..HEAD --count 2>/dev/null || echo "?")
+  gate_fail "Version $VERSION matches latest tag v$LATEST_TAG but there are $COMMITS_SINCE unpublished commit(s). Bump system/version.txt (at minimum patch: $(echo "$LATEST_TAG" | awk -F. '{print $1"."$2"."$3+1}'))"
+elif ! semver_gt "$VERSION" "$LATEST_TAG"; then
+  gate_fail "Version $VERSION is not greater than latest tag v$LATEST_TAG"
+else
+  green "  $LATEST_TAG → $VERSION ✓"
+fi
+
+# ── Gate 3: Docker E2E ──────────────────────────────────────────────────────
+bold "Gate 3: Docker E2E"
 if $SKIP_E2E; then
   red "  SKIPPED (--skip-e2e) — emergency bypass"
 else
@@ -94,16 +122,16 @@ else
   fi
 fi
 
-# ── Gate 3: Sanitize check ──────────────────────────────────────────────────
-bold "Gate 3: Sanitize check"
+# ── Gate 4: Sanitize check ──────────────────────────────────────────────────
+bold "Gate 4: Sanitize check"
 if bash "$SCRIPT_DIR/sanitize-check.sh" 2>&1; then
   green "  No personalization violations ✓"
 else
   gate_fail "personalization violations found — run 'bash system/scripts/sanitize-check.sh --verbose' for details"
 fi
 
-# ── Gate 4: Codex parity ────────────────────────────────────────────────────
-bold "Gate 4: Codex parity"
+# ── Gate 5: Codex parity ────────────────────────────────────────────────────
+bold "Gate 5: Codex parity"
 if $SKIP_PARITY; then
   red "  SKIPPED (--skip-parity) — emergency bypass"
 elif $SKIP_E2E; then
@@ -138,8 +166,8 @@ else
   fi
 fi
 
-# ── Gate 5: Ahead of remote ─────────────────────────────────────────────────
-bold "Gate 5: Commits to push"
+# ── Gate 6: Ahead of remote ─────────────────────────────────────────────────
+bold "Gate 6: Commits to push"
 REMOTE_SHA=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
 if [ "$FULL_SHA" = "$REMOTE_SHA" ]; then
   green "  Already up to date — nothing to push"
@@ -184,6 +212,16 @@ if [ "$FULL_SHA" = "$REMOTE_SHA_POST" ]; then
   green "  SHA verified on remote ✓"
 else
   red "  SHA mismatch! Local: $FULL_SHA Remote: $REMOTE_SHA_POST"
+fi
+
+# ── Tag ─────────────────────────────────────────────────────────────────────
+bold "Tag"
+if git rev-parse "v$VERSION" >/dev/null 2>&1; then
+  green "  Tag v$VERSION already exists ✓"
+else
+  git tag "v$VERSION" "$FULL_SHA"
+  git push origin "v$VERSION" 2>&1
+  green "  Tagged and pushed v$VERSION ✓"
 fi
 
 # ── Fleet notification ───────────────────────────────────────────────────────

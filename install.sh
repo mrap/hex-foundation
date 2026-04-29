@@ -506,6 +506,45 @@ else
     echo "  hex binary          ⚠ (install Rust to enable agent fleet + server)"
 fi
 
+# ── Phase 8: Shell environment setup ─────────────────────────────
+
+SHELL_RC=""
+if [[ -n "${ZSH_VERSION:-}" ]] || [[ "$SHELL" == */zsh ]]; then
+    SHELL_RC="$HOME/.zshrc"
+elif [[ -n "${BASH_VERSION:-}" ]] || [[ "$SHELL" == */bash ]]; then
+    SHELL_RC="$HOME/.bashrc"
+fi
+
+if [[ -n "$SHELL_RC" ]]; then
+    NEEDS_WRITE=false
+    if ! grep -q 'export AGENT_DIR=' "$SHELL_RC" 2>/dev/null; then
+        NEEDS_WRITE=true
+    fi
+
+    if $NEEDS_WRITE; then
+        echo "Setting up shell environment in $SHELL_RC..."
+        cat >> "$SHELL_RC" << RCEOF
+
+# =====================
+# Hex Agent
+# =====================
+export HEX_DIR="$TARGET_DIR"
+export AGENT_DIR="\$HEX_DIR"
+export PATH="\$HEX_DIR/.hex/bin:\$PATH"
+RCEOF
+        echo "  AGENT_DIR, HEX_DIR, PATH added to $SHELL_RC ✓"
+        echo "  Run 'source $SHELL_RC' or restart your terminal to activate."
+    else
+        echo "  AGENT_DIR already in $SHELL_RC ✓"
+    fi
+else
+    echo ""
+    echo "Add these to your shell rc file:"
+    echo "  export HEX_DIR=\"$TARGET_DIR\""
+    echo "  export AGENT_DIR=\"\$HEX_DIR\""
+    echo "  export PATH=\"\$HEX_DIR/.hex/bin:\$PATH\""
+fi
+
 echo ""
 echo "========================================="
 echo " hex installed at $TARGET_DIR"

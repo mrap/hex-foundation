@@ -760,6 +760,16 @@ if [ -n "$RC_FILE" ]; then
     pass "Removed old hex alias from $RC_FILE"
   fi
 
+  # --- AGENT_DIR + HEX_DIR ---
+  if grep -q 'export AGENT_DIR=' "$RC_FILE" 2>/dev/null; then
+    pass "AGENT_DIR already in $RC_FILE"
+  else
+    echo "" >> "$RC_FILE"
+    echo "export HEX_DIR=\"$HEX_DIR\"" >> "$RC_FILE"
+    echo 'export AGENT_DIR="$HEX_DIR"' >> "$RC_FILE"
+    pass "Added AGENT_DIR + HEX_DIR to $RC_FILE"
+  fi
+
   # --- hex binary on PATH ---
   if grep -qF ".hex/bin" "$RC_FILE" 2>/dev/null; then
     pass "hex binary PATH already in $RC_FILE"
