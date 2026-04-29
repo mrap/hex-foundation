@@ -323,37 +323,49 @@ BOI_REPO="${HEX_BOI_REPO:-https://github.com/mrap/boi.git}"
 # Fresh install: clone at pinned version, then run the project's own installer.
 # Existing install: fetch latest tag and upgrade in place.
 install_or_upgrade_boi() {
-    if [ -d "$HOME/.boi" ]; then
-        echo "  BOI exists — upgrading to $BOI_VERSION..."
-        if [ -d "$HOME/.boi/.git" ]; then
-            ( cd "$HOME/.boi" && git fetch --tags --depth 1 origin 2>/dev/null && \
-              git checkout "$BOI_VERSION" 2>/dev/null ) || true
-        elif [ -d "$HOME/.boi/src/.git" ]; then
-            ( cd "$HOME/.boi/src" && git fetch --tags --depth 1 origin 2>/dev/null && \
-              git checkout "$BOI_VERSION" 2>/dev/null ) || true
-        fi
-        # Re-run BOI's own installer to rebuild venv/symlinks
-        if [ -f "$HOME/.boi/src/install-public.sh" ]; then
-            BOI_CONTEXT_ROOT="$TARGET_DIR" bash "$HOME/.boi/src/install-public.sh" --update 2>/dev/null || true
-        fi
-        echo "  BOI upgraded ($BOI_VERSION)  ✓"
+    local boi_src="$HOME/github.com/mrap/boi"
+    mkdir -p "$HOME/.boi/bin" "$HOME/.boi/pids" "$HOME/.boi/logs" "$HOME/.boi/worktrees"
+
+    # Clone or update the BOI repo
+    if [ -d "$boi_src/.git" ]; then
+        echo "  BOI repo exists — fetching $BOI_VERSION..."
+        ( cd "$boi_src" && git fetch --tags origin 2>/dev/null && \
+          git checkout "$BOI_VERSION" 2>/dev/null ) || true
     else
-        if git clone --depth 1 --branch "$BOI_VERSION" "$BOI_REPO" "$HOME/.boi" 2>/dev/null; then
-            # Run BOI's own installer for venv setup and PATH symlink
-            if [ -f "$HOME/.boi/src/install-public.sh" ]; then
-                BOI_CONTEXT_ROOT="$TARGET_DIR" bash "$HOME/.boi/src/install-public.sh" 2>/dev/null || true
-            fi
-            echo "  BOI installed ($BOI_VERSION)  ✓"
-        else
-            echo "  BOI: failed to clone $BOI_REPO @ $BOI_VERSION (will install on next upgrade)"
-        fi
+        echo "  Cloning BOI repo..."
+        mkdir -p "$(dirname "$boi_src")"
+        git clone --branch "$BOI_VERSION" "$BOI_REPO" "$boi_src" 2>/dev/null || {
+            echo "  BOI: failed to clone $BOI_REPO @ $BOI_VERSION"
+            return
+        }
     fi
 
-    # Verify boi is on PATH
-    if ! command -v boi &>/dev/null; then
-        echo "  ⚠️  'boi' not found on PATH. Add ~/bin to your PATH:"
-        echo "     export PATH=\"\$HOME/bin:\$PATH\""
+    # Build the Rust binary
+    if command -v cargo &>/dev/null; then
+        echo "  Building BOI binary..."
+        ( cd "$boi_src" && cargo build --release 2>/dev/null ) || {
+            echo "  BOI: cargo build failed"
+            return
+        }
+        # Symlink binary
+        ln -sf "$boi_src/target/release/boi" "$HOME/.boi/bin/boi"
+        echo "  BOI $BOI_VERSION built and linked  ✓"
+    else
+        echo "  ⚠️  Rust/cargo not found — cannot build BOI binary"
+        echo "     Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+        return
     fi
+
+    # Create boi.sh wrapper for shell alias
+    cat > "$boi_src/boi.sh" << 'BOISH'
+#!/bin/bash
+if [ -x "$HOME/.boi/bin/boi" ]; then
+    exec "$HOME/.boi/bin/boi" "$@"
+fi
+echo "error: BOI binary not found at ~/.boi/bin/boi"
+exit 1
+BOISH
+    chmod +x "$boi_src/boi.sh"
 }
 install_or_upgrade_boi
 
