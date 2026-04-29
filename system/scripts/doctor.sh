@@ -236,27 +236,27 @@ check_6() {
 
 # 7: Agent fleet validates + core agents healthy
 check_7() {
-  local hex_agent="$HEX_DIR/.hex/bin/hex-agent"
+  local hex_agent="$HEX_DIR/.hex/bin/hex"
   if [ ! -x "$hex_agent" ]; then
-    _error "hex-agent binary missing at $hex_agent — cannot validate fleet"
-    _rec 7 "agent-fleet" "error" "hex-agent binary missing"
+    _error "hex binary missing at $hex_agent — cannot validate fleet"
+    _rec 7 "agent-fleet" "error" "hex binary missing"
     return
   fi
 
   # Validate all charters
   local fleet_out
-  fleet_out=$(HEX_DIR="$HEX_DIR" "$hex_agent" fleet 2>&1)
+  fleet_out=$(HEX_DIR="$HEX_DIR" "$hex_agent" agent fleet 2>&1)
   local fleet_exit=$?
   if [ $fleet_exit -ne 0 ]; then
-    _error "hex-agent fleet failed (exit $fleet_exit):"
+    _error "hex agent fleet failed (exit $fleet_exit):"
     echo "$fleet_out" | grep -E 'ERROR' | while read -r line; do _error "  $line"; done
     _rec 7 "agent-fleet" "error" "fleet validation failed"
     return
   fi
 
   local agent_count core_count
-  agent_count=$(HEX_DIR="$HEX_DIR" "$hex_agent" list 2>/dev/null | wc -l | tr -d ' ')
-  core_count=$(HEX_DIR="$HEX_DIR" "$hex_agent" list --core 2>/dev/null | wc -l | tr -d ' ')
+  agent_count=$(HEX_DIR="$HEX_DIR" "$hex_agent" agent list 2>/dev/null | wc -l | tr -d ' ')
+  core_count=$(HEX_DIR="$HEX_DIR" "$hex_agent" agent list --core 2>/dev/null | wc -l | tr -d ' ')
   _pass "Fleet OK — $agent_count agents ($core_count core) discovered from charters"
   _rec 7 "agent-fleet" "pass" "$agent_count agents, $core_count core"
 
@@ -268,7 +268,7 @@ check_7() {
       _error "Core agent '$core_id' is HALTED — system operations degraded"
       halted_core=$((halted_core + 1))
     fi
-  done < <(HEX_DIR="$HEX_DIR" "$hex_agent" list --core 2>/dev/null)
+  done < <(HEX_DIR="$HEX_DIR" "$hex_agent" agent list --core 2>/dev/null)
 
   if [ $halted_core -gt 0 ]; then
     _rec 7 "core-agents" "error" "$halted_core core agent(s) halted"
@@ -279,7 +279,7 @@ check_7() {
 
   # Check for drift from reference core agents (single invocation)
   local check_out check_rc
-  check_out=$(HEX_DIR="$HEX_DIR" "$hex_agent" check-core 2>&1)
+  check_out=$(HEX_DIR="$HEX_DIR" "$hex_agent" agent check-core 2>&1)
   check_rc=$?
   if [ $check_rc -eq 0 ]; then
     _pass "Core agents match reference set"
@@ -658,10 +658,10 @@ check_21() {
   fi
 
   # Check all agents discovered from charters (no hardcoded lists)
-  local hex_agent="$HEX_DIR/.hex/bin/hex-agent"
+  local hex_agent="$HEX_DIR/.hex/bin/hex"
   if [ ! -x "$hex_agent" ]; then
-    _warn "hex-agent binary missing — skipping per-agent liveness checks"
-    _rec 21 "agent-liveness" "warn" "hex-agent binary missing"
+    _warn "hex binary missing — skipping per-agent liveness checks"
+    _rec 21 "agent-liveness" "warn" "hex binary missing"
     return
   fi
 
@@ -687,13 +687,35 @@ check_21() {
       [ -f "$adir/last-error.txt" ] && err_msg=$(tail -1 "$adir/last-error.txt" 2>/dev/null | head -c 120)
       _error "Agent $agent_id: last 5+ log entries are failures${err_msg:+ — $err_msg}"
     fi
-  done < <(HEX_DIR="$HEX_DIR" "$hex_agent" list 2>/dev/null)
+  done < <(HEX_DIR="$HEX_DIR" "$hex_agent" agent list 2>/dev/null)
 
   if [ $dead_agents -eq 0 ]; then
     _pass "All $total_agents agents healthy (env.sh OK, no failure streaks)"
     _rec 21 "agent-liveness" "pass" "all $total_agents agents healthy"
   else
     _rec 21 "agent-liveness" "error" "$dead_agents/$total_agents agents dead"
+  fi
+}
+
+check_22() {
+  local hex_bin="$HEX_DIR/.hex/bin/hex"
+  if [ ! -x "$hex_bin" ]; then
+    _error "hex binary not found at $hex_bin"
+    _rec 22 "hex-binary-on-path" "error" "binary missing"
+    return
+  fi
+
+  local resolved
+  resolved="$(command -v hex 2>/dev/null || true)"
+  if [ -z "$resolved" ]; then
+    _error "'hex' not on PATH — add $HEX_DIR/.hex/bin to PATH in your shell rc"
+    _rec 22 "hex-binary-on-path" "error" "not on PATH"
+  elif [ "$resolved" = "$hex_bin" ] || [ "$(readlink -f "$resolved" 2>/dev/null)" = "$(readlink -f "$hex_bin" 2>/dev/null)" ]; then
+    _pass "hex binary on PATH ($resolved)"
+    _rec 22 "hex-binary-on-path" "pass" "$resolved"
+  else
+    _warn "'hex' resolves to $resolved (expected $hex_bin) — stale alias or wrong PATH order"
+    _rec 22 "hex-binary-on-path" "warn" "wrong target: $resolved"
   fi
 }
 
@@ -727,6 +749,7 @@ check_18
 check_19
 check_20
 check_21
+check_22
 
 # ─── Output ───────────────────────────────────────────────────────────────────
 if $JSON_MODE; then

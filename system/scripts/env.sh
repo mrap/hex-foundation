@@ -60,6 +60,9 @@ if [[ -d "$HOME/.pyenv/shims" ]]; then
   _add_to_path "$HOME/.pyenv/shims"
 fi
 
+# hex binary
+_add_to_path "$HEX_DIR/.hex/bin"
+
 # BOI and hex-events bin directories
 _add_to_path "$HOME/.boi/bin"
 if [[ -d "$HOME/.hex-events/venv/bin" ]]; then

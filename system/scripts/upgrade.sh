@@ -735,7 +735,7 @@ fi
 # ─── Step 4: Ensure shell alias & skip-permissions ──────────────────────────
 header "5. Shell Setup"
 
-ALIAS_LINE="alias hex='bash $HEX_DIR/.hex/scripts/workspace.sh'"
+HEX_PATH_LINE="export PATH=\"$HEX_DIR/.hex/bin:\$PATH\""
 
 # Detect shell rc file from $SHELL (not $BASH_VERSION, since this runs under bash)
 USER_SHELL="$(basename "${SHELL:-}")"
@@ -754,17 +754,20 @@ fi
 if [ -n "$RC_FILE" ]; then
   [ -f "$RC_FILE" ] || touch "$RC_FILE"
 
-  # --- hex alias (three-tier: exact match, any alias hex=, or append) ---
-  if grep -qF "$ALIAS_LINE" "$RC_FILE" 2>/dev/null; then
-    pass "hex alias already up to date in $RC_FILE"
-  elif grep -qF "alias hex=" "$RC_FILE" 2>/dev/null; then
-    sed -e "s|^alias hex=.*|$ALIAS_LINE|" "$RC_FILE" > "$RC_FILE.tmp" && mv "$RC_FILE.tmp" "$RC_FILE"
-    pass "Updated hex alias in $RC_FILE"
+  # --- Migrate: remove old workspace.sh alias if present ---
+  if grep -qF "alias hex=" "$RC_FILE" 2>/dev/null; then
+    sed -e "/^alias hex=/d" "$RC_FILE" > "$RC_FILE.tmp" && mv "$RC_FILE.tmp" "$RC_FILE"
+    pass "Removed old hex alias from $RC_FILE"
+  fi
+
+  # --- hex binary on PATH ---
+  if grep -qF ".hex/bin" "$RC_FILE" 2>/dev/null; then
+    pass "hex binary PATH already in $RC_FILE"
   else
     echo "" >> "$RC_FILE"
-    echo "# Hexagon" >> "$RC_FILE"
-    echo "$ALIAS_LINE" >> "$RC_FILE"
-    pass "Added hex alias to $RC_FILE"
+    echo "# hex binary" >> "$RC_FILE"
+    echo "$HEX_PATH_LINE" >> "$RC_FILE"
+    pass "Added hex binary PATH to $RC_FILE"
   fi
 
   # --- hex-ui alias ---
