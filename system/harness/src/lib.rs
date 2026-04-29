@@ -1,5 +1,6 @@
 pub mod assets;
 pub mod audit;
+pub mod extensions;
 pub mod charter;
 pub mod claude;
 pub mod cost;

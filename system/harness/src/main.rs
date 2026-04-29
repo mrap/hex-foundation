@@ -52,6 +52,11 @@ enum Commands {
         #[command(subcommand)]
         command: MemoryCommands,
     },
+    /// Extension management
+    Extension {
+        #[command(subcommand)]
+        command: ExtensionCommands,
+    },
     /// System health check
     Doctor {
         #[arg(long)]
@@ -268,6 +273,221 @@ enum MemoryCommands {
         #[arg(long)]
         full: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ExtensionCommands {
+    /// List installed extensions
+    List,
+    /// Validate an extension manifest
+    Validate { path: PathBuf },
+    /// Show full manifest for an extension
+    Info { name: String },
+    /// Enable a disabled extension
+    Enable { name: String },
+    /// Disable an installed extension
+    Disable { name: String },
+}
+
+/// Parse a single top-level `key: value` from raw YAML text (no nesting).
+fn yaml_get<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("{}: ", key);
+    text.lines()
+        .find(|l| l.starts_with(&prefix))
+        .map(|l| l[prefix.len()..].trim_matches('"').trim_matches('\'').trim())
+}
+
+/// Scan extension dirs and return (path, enabled) pairs.
+fn scan_extension_dirs(hex_dir: &Path) -> Vec<(PathBuf, bool)> {
+    let search_dirs = [
+        hex_dir.join("extensions"),
+        hex_dir.join(".hex/extensions"),
+    ];
+    let mut results = Vec::new();
+    for base in &search_dirs {
+        let entries = match std::fs::read_dir(base) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            if name.is_empty() {
+                continue;
+            }
+            // .disabled suffix marks disabled extensions
+            let enabled = !name.ends_with(".disabled");
+            // Only consider dirs that contain extension.yaml (or would after enabling)
+            let manifest = if enabled {
+                path.join("extension.yaml")
+            } else {
+                path.join("extension.yaml")
+            };
+            if manifest.exists() {
+                results.push((path, enabled));
+            }
+        }
+    }
+    results
+}
+
+fn run_extension_command(command: ExtensionCommands) {
+    let hex_dir = get_hex_dir();
+    match command {
+        ExtensionCommands::List => {
+            let exts = scan_extension_dirs(&hex_dir);
+            if exts.is_empty() {
+                println!("No extensions found.");
+                return;
+            }
+            println!("{:<24} {:<10} {:<10} {}", "NAME", "VERSION", "TYPE", "STATUS");
+            println!("{}", "-".repeat(60));
+            for (path, enabled) in &exts {
+                let manifest_path = path.join("extension.yaml");
+                let text = std::fs::read_to_string(&manifest_path).unwrap_or_default();
+                let name = yaml_get(&text, "name").unwrap_or("?").to_string();
+                let version = yaml_get(&text, "version").unwrap_or("?").to_string();
+                let ext_type = yaml_get(&text, "type").unwrap_or("?").to_string();
+                let status = if *enabled { "enabled" } else { "disabled" };
+                println!("{:<24} {:<10} {:<10} {}", name, version, ext_type, status);
+            }
+            println!("\n{} extension(s)", exts.len());
+        }
+
+        ExtensionCommands::Validate { path } => {
+            let script = hex_dir.join("system/scripts/extension-validate.py");
+            let status = std::process::Command::new("python3")
+                .arg(&script)
+                .arg(&path)
+                .env("HEX_DIR", &hex_dir)
+                .status()
+                .unwrap_or_else(|e| {
+                    eprintln!("hex extension validate: failed to run validator: {e}");
+                    std::process::exit(1);
+                });
+            std::process::exit(status.code().unwrap_or(1));
+        }
+
+        ExtensionCommands::Info { name } => {
+            let exts = scan_extension_dirs(&hex_dir);
+            let found = exts.iter().find(|(path, _)| {
+                let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let bare = dir_name.trim_end_matches(".disabled");
+                // Match by directory name or by manifest name field
+                bare == name || {
+                    let text = std::fs::read_to_string(path.join("extension.yaml")).unwrap_or_default();
+                    yaml_get(&text, "name").unwrap_or("") == name
+                }
+            });
+            match found {
+                Some((path, enabled)) => {
+                    let manifest_path = path.join("extension.yaml");
+                    let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+                        eprintln!("Cannot read extension manifest: {e}");
+                        std::process::exit(1);
+                    });
+                    let status = if *enabled { "enabled" } else { "disabled" };
+                    println!("# Extension: {} ({})\n", name, status);
+                    println!("{}", text);
+                }
+                None => {
+                    eprintln!("Extension '{}' not found.", name);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        ExtensionCommands::Disable { name } => {
+            let exts = scan_extension_dirs(&hex_dir);
+            let found = exts.iter().find(|(path, enabled)| {
+                if !enabled {
+                    return false;
+                }
+                let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if dir_name == name {
+                    return true;
+                }
+                let text = std::fs::read_to_string(path.join("extension.yaml")).unwrap_or_default();
+                yaml_get(&text, "name").unwrap_or("") == name
+            });
+            match found {
+                Some((path, _)) => {
+                    let disabled_path = {
+                        let parent = path.parent().unwrap_or(path);
+                        let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        parent.join(format!("{}.disabled", dir_name))
+                    };
+                    std::fs::rename(path, &disabled_path).unwrap_or_else(|e| {
+                        eprintln!("Cannot disable extension '{}': {e}", name);
+                        std::process::exit(1);
+                    });
+                    println!("Extension '{}' disabled.", name);
+                }
+                None => {
+                    eprintln!("Extension '{}' not found or already disabled.", name);
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        ExtensionCommands::Enable { name } => {
+            // Find a .disabled directory matching the name
+            let search_dirs = [
+                hex_dir.join("extensions"),
+                hex_dir.join(".hex/extensions"),
+            ];
+            let mut found_path: Option<PathBuf> = None;
+            'outer: for base in &search_dirs {
+                let entries = match std::fs::read_dir(base) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                    if !dir_name.ends_with(".disabled") {
+                        continue;
+                    }
+                    let bare = dir_name.trim_end_matches(".disabled");
+                    let manifest = path.join("extension.yaml");
+                    let manifest_name = if manifest.exists() {
+                        let text = std::fs::read_to_string(&manifest).unwrap_or_default();
+                        yaml_get(&text, "name").unwrap_or("").to_string()
+                    } else {
+                        String::new()
+                    };
+                    if bare == name || manifest_name == name {
+                        found_path = Some(path);
+                        break 'outer;
+                    }
+                }
+            }
+            match found_path {
+                Some(path) => {
+                    let enabled_path = {
+                        let parent = path.parent().unwrap_or(&path);
+                        let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        parent.join(dir_name.trim_end_matches(".disabled"))
+                    };
+                    std::fs::rename(&path, &enabled_path).unwrap_or_else(|e| {
+                        eprintln!("Cannot enable extension '{}': {e}", name);
+                        std::process::exit(1);
+                    });
+                    println!("Extension '{}' enabled.", name);
+                }
+                None => {
+                    eprintln!("No disabled extension '{}' found.", name);
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
 }
 
 fn get_hex_dir() -> PathBuf {
@@ -734,6 +954,7 @@ fn main() {
 
     match cli.command {
         Commands::Agent { command } => run_agent_command(command),
+        Commands::Extension { command } => run_extension_command(command),
         Commands::Server { command } => match command {
             ServerCommands::Start { port } => {
                 let hex_dir = get_hex_dir();
@@ -759,7 +980,13 @@ fn main() {
                     std::sync::Arc::clone(&bus),
                     std::sync::Arc::clone(&telemetry),
                 );
-                let server = hex::server::HexServer::new(port, hex_dir, bus, telemetry, events, messaging, assets);
+                let ext_db = hex::extensions::ExtensionDb::open(&hex_dir)
+                    .unwrap_or_else(|e| {
+                        eprintln!("hex server: extension db init failed: {e}");
+                        std::process::exit(1);
+                    });
+                ext_db.scan_and_migrate(&hex_dir);
+                let server = hex::server::HexServer::new(port, hex_dir, bus, telemetry, events, messaging, assets, ext_db);
                 server.start();
             }
             ServerCommands::Health => {

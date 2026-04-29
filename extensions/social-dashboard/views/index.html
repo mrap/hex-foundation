@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hex social</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;700&family=Work+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0/dist/chartjs-plugin-annotation.min.js"></script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #faf7f0; color: #1c1a16;
+  font-family: 'Work Sans', -apple-system, sans-serif;
+  line-height: 1.5;
+}
+.header {
+  max-width: 780px; margin: 0 auto; padding: 3rem 2rem 1.5rem;
+}
+.header h1 {
+  font-family: 'Fraunces', serif; font-size: 1.8rem;
+  font-weight: 700; letter-spacing: -0.02em; margin: 0 0 0.2rem;
+}
+.header h1 span { color: #c4553a; }
+.header .sub { color: #6e695f; font-size: 0.9rem; }
+.refresh-note { font-size: 0.72rem; color: #a09a90; margin-top: 0.4rem; }
+.content { max-width: 780px; margin: 0 auto; padding: 0 2rem 3rem; }
+.stats-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 2rem; }
+.stat-pill {
+  background: #fff; border: 1px solid #e8e0d0; border-radius: 10px;
+  padding: 12px 18px; display: flex; flex-direction: column; align-items: center;
+  min-width: 100px; flex: 1;
+}
+.stat-pill .num {
+  font-family: 'Fraunces', serif; font-size: 1.5rem; font-weight: 700; color: #1c1a16;
+}
+.stat-pill .label { font-size: 0.72rem; color: #8a8880; margin-top: 2px; }
+.section-label {
+  font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.1em; color: #8a8880; margin: 2.5rem 0 0.8rem;
+}
+.chart-card {
+  background: #fff; border: 1px solid #e8e0d0; border-radius: 12px;
+  padding: 20px; margin-bottom: 12px;
+}
+.chart-card .chart-title {
+  font-family: 'Fraunces', serif; font-size: 1rem; font-weight: 600;
+  margin-bottom: 4px;
+}
+.chart-card .chart-sub { font-size: 0.78rem; color: #8a8880; margin-bottom: 14px; }
+.chart-card canvas { width: 100% !important; max-height: 220px; }
+.post-card {
+  background: #fff; border: 1px solid #e8e0d0; border-radius: 10px;
+  padding: 14px 18px; margin-bottom: 8px; display: flex; gap: 12px; align-items: flex-start;
+  transition: border-color 0.15s;
+}
+.post-card:hover { border-color: #c4553a; }
+.plat-icon { font-size: 1.2rem; flex-shrink: 0; width: 28px; text-align: center; margin-top: 1px; }
+.post-body { flex: 1; min-width: 0; }
+.post-summary {
+  font-size: 0.9rem; font-weight: 500; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.post-meta { display: flex; align-items: center; gap: 10px; margin-top: 4px; flex-wrap: wrap; }
+.post-meta span { font-size: 0.75rem; color: #8a8880; }
+.exp-tag {
+  font-size: 0.68rem; padding: 1px 6px; background: #f0ebe3; border-radius: 4px;
+  color: #c4553a; font-weight: 600;
+}
+.exp-card {
+  background: #fff; border: 1px solid #e8e0d0; border-radius: 10px;
+  padding: 14px 18px; margin-bottom: 8px; transition: border-color 0.15s;
+}
+.exp-card:hover { border-color: #c4553a; }
+.exp-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.exp-name { font-weight: 600; font-size: 0.9rem; flex: 1; }
+.status-badge {
+  font-size: 0.68rem; padding: 1px 8px; border-radius: 4px;
+  font-weight: 600; background: #f0ebe3;
+}
+.status-badge.running { color: #b85c14; }
+.status-badge.launching { color: #8a8880; }
+.status-badge.ready { color: #2d7a3a; }
+.exp-hypothesis { font-size: 0.82rem; color: #6e695f; margin-bottom: 6px; }
+.exp-footer { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.verdict { font-size: 0.78rem; font-weight: 700; }
+.verdict.scale { color: #2d7a3a; }
+.verdict.iterate { color: #b85c14; }
+.verdict.kill { color: #b94040; }
+.days-left { font-size: 0.72rem; color: #a09a90; }
+.exp-progress-wrap {
+  margin-top: 8px; height: 6px; background: #f0ebe3; border-radius: 3px; overflow: hidden;
+}
+.exp-progress-bar { height: 100%; border-radius: 3px; transition: width 0.5s; }
+.eng-row {
+  font-size: 0.8rem; color: #6e695f; padding: 3px 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.eng-row .handle { font-weight: 600; color: #1c1a16; }
+.eng-row .followers { color: #a09a90; }
+.eng-row .action-type { color: #8a8880; }
+.eng-row .eng-date { color: #a09a90; }
+.pipeline-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.pipe-pill {
+  background: #fff; border: 1px solid #e8e0d0; border-radius: 8px;
+  padding: 4px 12px; font-size: 0.8rem; color: #6e695f;
+}
+.pipe-pill .pipe-num { font-weight: 700; color: #1c1a16; }
+footer {
+  max-width: 780px; margin: 0 auto; padding: 1rem 2rem 2rem;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.7rem; color: #a09a90;
+}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1><span>hex</span> social</h1>
+  <p class="sub">Public interactions, trends, and trajectory toward goals.</p>
+  <p class="refresh-note">Auto-refreshes every 60s</p>
+</div>
+<div class="content" id="content">
+  <p style="color:#a09a90;">Loading...</p>
+</div>
+<footer>hex-router /social</footer>
+<script src="/comments/widget.js"></script>
+<script>
+const ACCENT = '#c4553a';
+const ACCENT2 = '#b85c14';
+const GREEN = '#2d7a3a';
+const MUTED = '#a09a90';
+const GOAL_COLOR = 'rgba(45,122,58,0.35)';
+const PROJ_COLOR = 'rgba(196,85,58,0.4)';
+const BAR_COLOR = 'rgba(184,92,20,0.7)';
+const chartInstances = {};
+
+function destroyChart(id) {
+  if (chartInstances[id]) { chartInstances[id].destroy(); delete chartInstances[id]; }
+}
+
+const chartDefaults = {
+  responsive: true,
+  maintainAspectRatio: false,
+  plugins: {
+    legend: { display: false },
+    tooltip: {
+      backgroundColor: '#1c1a16', titleFont: { family: 'Work Sans', size: 12 },
+      bodyFont: { family: 'Work Sans', size: 11 }, cornerRadius: 6, padding: 8,
+    },
+  },
+  scales: {
+    x: {
+      grid: { display: false },
+      ticks: { font: { family: 'Work Sans', size: 10 }, color: '#a09a90' },
+    },
+    y: {
+      grid: { color: '#f0ebe3' },
+      ticks: { font: { family: 'Work Sans', size: 10 }, color: '#a09a90' },
+      beginAtZero: true,
+    },
+  },
+};
+
+function makeGoalAnnotation(value, label) {
+  return {
+    type: 'line', yMin: value, yMax: value,
+    borderColor: GOAL_COLOR, borderWidth: 2, borderDash: [6, 4],
+    label: { display: true, content: label, position: 'end',
+      font: { family: 'Work Sans', size: 10, weight: '600' },
+      color: GREEN, backgroundColor: 'rgba(255,255,255,0.85)',
+      padding: { top: 2, bottom: 2, left: 6, right: 6 },
+    },
+  };
+}
+
+function relDate(d) {
+  const ms = Date.now() - new Date(d).getTime();
+  if (isNaN(ms)) return d;
+  const days = Math.floor(ms / 86400000);
+  if (days === 0) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 7) return days + 'd ago';
+  if (days < 30) return Math.floor(days / 7) + 'w ago';
+  return Math.floor(days / 30) + 'mo ago';
+}
+function daysUntil(d) {
+  if (!d) return null;
+  const ms = new Date(d).getTime() - Date.now();
+  if (isNaN(ms)) return null;
+  return Math.max(0, Math.ceil(ms / 86400000));
+}
+function daysBetween(a, b) {
+  return Math.max(0, Math.round((new Date(b) - new Date(a)) / 86400000));
+}
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function fmtFollowers(n) {
+  if (n == null) return '';
+  return n >= 1000 ? (n/1000).toFixed(1) + 'k' : String(n);
+}
+function platIcon(p) {
+  p = p.toLowerCase();
+  if (p.includes('x') || p.includes('twitter')) return '𝕏';
+  if (p.includes('linkedin')) return 'in';
+  return p.slice(0, 2);
+}
+function verdictClass(v) {
+  if (!v) return '';
+  v = v.toUpperCase();
+  if (v.includes('SCALE')) return 'scale';
+  if (v.includes('KILL')) return 'kill';
+  return 'iterate';
+}
+function statusClass(s) {
+  s = s.toUpperCase();
+  if (s === 'RUNNING') return 'running';
+  if (s === 'LAUNCHING') return 'launching';
+  if (s === 'READY') return 'ready';
+  return '';
+}
+function shortDate(d) {
+  try { return new Date(d).toLocaleDateString('en-US', {month:'short', day:'numeric'}); }
+  catch { return d; }
+}
+
+function renderCharts(trends) {
+  // --- Impressions per post with projection + goal ---
+  if (trends.impressions_per_post.length >= 2) {
+    destroyChart('impChart');
+    const actual = trends.impressions_per_post;
+    const proj = trends.impressions_projection || [];
+    const allDates = [...actual.map(d => d.date), ...proj.map(d => d.date)];
+    const labels = allDates.map(shortDate);
+    const actualData = actual.map(d => d.value);
+    const projData = new Array(actual.length).fill(null);
+    projData[projData.length - 1] = actual[actual.length - 1].value;
+    for (const p of proj) projData.push(p.value);
+    const datasets = [
+      {
+        label: 'Impressions', data: [...actualData, ...new Array(proj.length).fill(null)],
+        borderColor: ACCENT, backgroundColor: ACCENT + '22', tension: 0.3,
+        pointRadius: 4, pointBackgroundColor: ACCENT, fill: true,
+      },
+      {
+        label: 'Projection', data: projData,
+        borderColor: PROJ_COLOR, borderDash: [6, 4], tension: 0.3,
+        pointRadius: 0, fill: false,
+      },
+    ];
+    const ctx = document.getElementById('impChart').getContext('2d');
+    chartInstances['impChart'] = new Chart(ctx, {
+      type: 'line',
+      data: { labels, datasets },
+      options: {
+        ...chartDefaults,
+        plugins: {
+          ...chartDefaults.plugins,
+          annotation: {
+            annotations: { goal: makeGoalAnnotation(trends.goals.impressions_per_post, 'SCALE: 500 imp') },
+          },
+        },
+      },
+    });
+  }
+
+  // --- Posts per week with goal ---
+  if (trends.posts_per_week.length >= 1) {
+    destroyChart('weekChart');
+    const weeks = trends.posts_per_week;
+    const ctx = document.getElementById('weekChart').getContext('2d');
+    chartInstances['weekChart'] = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: weeks.map(w => w.week),
+        datasets: [{
+          label: 'Posts', data: weeks.map(w => w.value),
+          backgroundColor: BAR_COLOR, borderRadius: 4, barPercentage: 0.6,
+        }],
+      },
+      options: {
+        ...chartDefaults,
+        plugins: {
+          ...chartDefaults.plugins,
+          annotation: {
+            annotations: { goal: makeGoalAnnotation(trends.goals.posts_per_week, 'Target: 5/week') },
+          },
+        },
+      },
+    });
+  }
+
+  // --- Engagement actions per day ---
+  if (trends.engagement_per_day.length >= 1) {
+    destroyChart('engChart');
+    const eng = trends.engagement_per_day;
+    const ctx = document.getElementById('engChart').getContext('2d');
+    chartInstances['engChart'] = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: eng.map(e => shortDate(e.date)),
+        datasets: [{
+          label: 'Actions', data: eng.map(e => e.value),
+          backgroundColor: ACCENT2 + 'aa', borderRadius: 4, barPercentage: 0.6,
+        }],
+      },
+      options: chartDefaults,
+    });
+  }
+
+  // --- Follower growth with projection + goal ---
+  if (trends.follower_series.length >= 2) {
+    destroyChart('followChart');
+    const actual = trends.follower_series;
+    const proj = trends.follower_projection || [];
+    const allDates = [...actual.map(d => d.date), ...proj.map(d => d.date)];
+    const labels = allDates.map(shortDate);
+    const actualData = actual.map(d => d.value);
+    const projData = new Array(actual.length).fill(null);
+    projData[projData.length - 1] = actual[actual.length - 1].value;
+    for (const p of proj) projData.push(p.value);
+    const ctx = document.getElementById('followChart').getContext('2d');
+    chartInstances['followChart'] = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'Followers', data: [...actualData, ...new Array(proj.length).fill(null)],
+            borderColor: GREEN, backgroundColor: GREEN + '18', tension: 0.3,
+            pointRadius: 3, pointBackgroundColor: GREEN, fill: true,
+          },
+          {
+            label: 'Projection', data: projData,
+            borderColor: PROJ_COLOR, borderDash: [6, 4], tension: 0.3,
+            pointRadius: 0, fill: false,
+          },
+        ],
+      },
+      options: {
+        ...chartDefaults,
+        plugins: {
+          ...chartDefaults.plugins,
+          annotation: {
+            annotations: { goal: makeGoalAnnotation(trends.goals.followers, 'Target: 530') },
+          },
+        },
+      },
+    });
+  }
+}
+
+function render(data) {
+  const h = data.headline;
+  const el = document.getElementById('content');
+  let out = '';
+
+  // Stats row
+  out += '<div class="stats-row">';
+  for (const [val, label] of [[h.followers,'followers'],[h.posts_this_week,'posts this week'],[h.total_impressions,'impressions'],[h.active_experiments,'experiments']]) {
+    out += '<div class="stat-pill"><span class="num">' + val + '</span><span class="label">' + label + '</span></div>';
+  }
+  out += '</div>';
+
+  // Trend charts section
+  out += '<div class="section-label">Trends</div>';
+  out += '<div class="chart-card"><div class="chart-title">Impressions per Post</div>';
+  out += '<div class="chart-sub">Each post\'s reach vs. 500 SCALE target. Dashed line = linear projection.</div>';
+  out += '<div style="height:220px"><canvas id="impChart"></canvas></div></div>';
+
+  out += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">';
+  out += '<div class="chart-card"><div class="chart-title">Posts per Week</div>';
+  out += '<div class="chart-sub">Publishing cadence vs. 5/week target.</div>';
+  out += '<div style="height:180px"><canvas id="weekChart"></canvas></div></div>';
+  out += '<div class="chart-card"><div class="chart-title">Engagement Actions</div>';
+  out += '<div class="chart-sub">Follows + likes per day.</div>';
+  out += '<div style="height:180px"><canvas id="engChart"></canvas></div></div>';
+  out += '</div>';
+
+  // Follower chart (only if snapshots exist)
+  const hasFollowers = data.trends.follower_series && data.trends.follower_series.length >= 2;
+  if (hasFollowers) {
+    out += '<div class="chart-card"><div class="chart-title">Follower Growth</div>';
+    out += '<div class="chart-sub">Daily follower count vs. 530 target (+50 from baseline). Dashed = projection.</div>';
+    out += '<div style="height:220px"><canvas id="followChart"></canvas></div></div>';
+  } else {
+    out += '<div class="chart-card" style="border-style:dashed;opacity:0.7">';
+    out += '<div class="chart-title">Follower Growth</div>';
+    out += '<div class="chart-sub">Collecting daily snapshots. Chart appears after 2+ data points. ';
+    out += 'Trigger snapshot: <code>POST api/snapshot</code></div></div>';
+  }
+
+  // Experiment progress bars
+  const active = data.experiments.filter(e => ['RUNNING','LAUNCHING','READY'].includes(e.status.toUpperCase()));
+  if (active.length) {
+    out += '<div class="section-label">Experiment Progress</div>';
+    for (const e of active) {
+      const hyp = e.hypothesis.length > 100 ? e.hypothesis.slice(0, 100) + '…' : e.hypothesis;
+      const days = daysUntil(e.ends);
+      const totalDays = (e.launched && e.ends) ? daysBetween(e.launched, e.ends) : null;
+      const elapsed = e.launched ? daysBetween(e.launched, new Date().toISOString().slice(0,10)) : null;
+      const pct = (totalDays && elapsed != null) ? Math.min(100, Math.round(elapsed / totalDays * 100)) : null;
+      let barColor = ACCENT2;
+      if (e.verdict_trending) {
+        const v = e.verdict_trending.toUpperCase();
+        if (v.includes('SCALE')) barColor = GREEN;
+        else if (v.includes('KILL')) barColor = '#b94040';
+      }
+      out += '<div class="exp-card">';
+      out += '<div class="exp-header"><span class="exp-name">' + esc(e.name) + '</span>';
+      out += '<span class="status-badge ' + statusClass(e.status) + '">' + e.status.toUpperCase() + '</span></div>';
+      out += '<div class="exp-hypothesis">' + esc(hyp) + '</div>';
+      if (pct != null) {
+        out += '<div class="exp-progress-wrap"><div class="exp-progress-bar" style="width:' + pct + '%;background:' + barColor + '"></div></div>';
+      }
+      out += '<div class="exp-footer">';
+      if (e.verdict_trending) out += '<span class="verdict ' + verdictClass(e.verdict_trending) + '">→ ' + e.verdict_trending.toUpperCase() + '</span>';
+      if (e.scale_target) out += '<span style="font-size:0.72rem;color:#6e695f">Goal: ' + esc(e.scale_target) + '</span>';
+      if (days != null) out += '<span class="days-left">' + (days === 0 ? 'ends today' : days + 'd left') + '</span>';
+      if (pct != null) out += '<span class="days-left">' + pct + '% elapsed</span>';
+      out += '</div></div>';
+    }
+  }
+
+  // Queued posts
+  if (data.queued && data.queued.length) {
+    out += '<div class="section-label">Queued (' + data.queued.length + ')</div>';
+    const sectionOrder = {'priority': 0, 'product': 1, 'ready': 2, 'drafting': 3};
+    const sorted = [...data.queued].sort((a, b) => (sectionOrder[a.section] ?? 9) - (sectionOrder[b.section] ?? 9));
+    for (const q of sorted) {
+      const sectionColors = {
+        'priority': '#c4553a', 'product': '#b85c14',
+        'ready': '#2d7a3a', 'drafting': '#8a8880',
+      };
+      const sectionLabels = {
+        'priority': 'PRIORITY', 'product': 'PRODUCT',
+        'ready': 'READY', 'drafting': 'DRAFTING',
+      };
+      const color = sectionColors[q.section] || '#8a8880';
+      const badge = sectionLabels[q.section] || q.section.toUpperCase();
+      const hasDraft = q.draft && q.draft.length > 0;
+      const preview = hasDraft ? q.draft[0].split('\n')[0].replace(/^\d+\/\s*/, '').slice(0, 80) : '';
+      out += '<a href="post/' + encodeURIComponent(q.id) + '" style="text-decoration:none;color:inherit;display:block">';
+      out += '<div class="post-card" style="cursor:pointer">';
+      out += '<span class="plat-icon" style="font-size:0.9rem;color:' + color + '">';
+      out += q.platform ? platIcon(q.platform) : '—';
+      out += '</span>';
+      out += '<div class="post-body">';
+      out += '<div class="post-summary">' + esc(q.id) + ': ' + esc(q.title.length > 60 ? q.title.slice(0,60) + '…' : q.title) + '</div>';
+      if (preview) {
+        out += '<div style="font-size:0.82rem;color:#6e695f;margin-top:3px;font-style:italic;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">"' + esc(preview) + '…"</div>';
+      }
+      out += '<div class="post-meta">';
+      out += '<span style="font-size:0.68rem;padding:1px 6px;border-radius:4px;font-weight:600;background:#f0ebe3;color:' + color + '">' + badge + '</span>';
+      if (q.status) out += '<span>' + esc(q.status) + '</span>';
+      if (hasDraft) out += '<span style="color:#2d7a3a">' + q.draft.length + (q.draft.length === 1 ? ' tweet' : ' tweets') + '</span>';
+      out += '</div></div></div></a>';
+    }
+  }
+
+  // Recent posts (published)
+  if (data.posts.length) {
+    out += '<div class="section-label">Published</div>';
+    for (const p of data.posts.slice(0, 10)) {
+      const summary = p.summary.length > 90 ? p.summary.slice(0, 90) + '…' : p.summary;
+      const hasUrl = p.url != null;
+      if (hasUrl) out += '<a href="' + p.url + '" target="_blank" style="text-decoration:none;color:inherit;display:block">';
+      out += '<div class="post-card"' + (hasUrl ? ' style="cursor:pointer"' : '') + '>';
+      out += '<span class="plat-icon">' + platIcon(p.platform) + '</span>';
+      out += '<div class="post-body"><div class="post-summary">' + esc(summary) + '</div>';
+      out += '<div class="post-meta"><span>' + relDate(p.date) + '</span>';
+      out += '<span>' + (p.impressions != null ? p.impressions + ' imp' : '—') + '</span>';
+      out += '<span>' + (p.likes != null ? p.likes + ' ♥' : '—') + '</span>';
+      if (p.bookmarks > 0) out += '<span>' + p.bookmarks + ' bk</span>';
+      if (p.experiment) out += '<span class="exp-tag">' + esc(p.experiment) + '</span>';
+      if (hasUrl) out += '<span style="color:#c4553a;font-size:0.72rem">↗</span>';
+      out += '</div></div></div>';
+      if (hasUrl) out += '</a>';
+    }
+  }
+
+  // Engagement
+  if (data.engagement.length) {
+    out += '<div class="section-label">Recent Engagement</div>';
+    for (const a of data.engagement.slice(0, 10)) {
+      const fw = a.followers != null ? ' <span class="followers">(' + fmtFollowers(a.followers) + ')</span>' : '';
+      out += '<div class="eng-row"><span class="handle">@' + esc(a.username) + '</span>' + fw;
+      out += ' <span class="action-type">— ' + esc(a.action) + '</span>';
+      out += ' <span class="eng-date">· ' + relDate(a.date) + '</span></div>';
+    }
+  }
+
+  // Pipeline
+  const pp = data.pipeline || {};
+  const pipes = Object.entries(pp).filter(([k, v]) => v > 0 && k !== 'unknown').map(([k, v]) => [v, k]);
+  if (pipes.length) {
+    out += '<div class="section-label">Pipeline</div><div class="pipeline-row">';
+    for (const [n, label] of pipes) {
+      out += '<div class="pipe-pill"><span class="pipe-num">' + n + '</span> ' + label + '</div>';
+    }
+    out += '</div>';
+  }
+
+  el.innerHTML = out;
+  renderCharts(data.trends);
+}
+
+async function load() {
+  try {
+    const r = await fetch('api/data');
+    if (r.ok) render(await r.json());
+  } catch(e) { console.error('social fetch failed', e); }
+}
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>

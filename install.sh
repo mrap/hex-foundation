@@ -72,6 +72,23 @@ echo "  Python $PY_VERSION  ✓"
 echo "  git               ✓"
 echo ""
 
+# ── ZONES — Core vs user-space ─────────────────────────────────────
+#
+# CORE (overwritten by hex upgrade):
+#   $TARGET_DIR/.hex/           ← installed from system/ in hex-foundation repo
+#
+# USER SPACE (never touched by hex upgrade):
+#   $TARGET_DIR/.hex/extensions/  ← user-installed extensions
+#   $TARGET_DIR/projects/
+#   $TARGET_DIR/me/
+#   $TARGET_DIR/evolution/
+#   $TARGET_DIR/templates/
+#   $TARGET_DIR/integrations/
+#   $TARGET_DIR/extensions/
+#
+# hex upgrade writes only to the core zone. User space is preserved.
+# See ZONES.md in the hex-foundation repo for the full boundary spec.
+
 # ── Phase 2: Create instance directory structure ───────────────────
 
 echo "Creating hex instance at $TARGET_DIR..."
@@ -82,8 +99,11 @@ mkdir -p "$TARGET_DIR"/landings/weekly
 mkdir -p "$TARGET_DIR"/raw/{transcripts,handoffs}
 mkdir -p "$TARGET_DIR"/specs/_archive
 
-# Copy system files → .hex/
+# Copy system files → .hex/   (CORE zone)
 cp -r "$SCRIPT_DIR/system" "$TARGET_DIR/.hex"
+
+# Create user-space extensions directory (never overwritten by hex upgrade)
+mkdir -p "$TARGET_DIR/.hex/extensions"
 
 # Copy root templates
 cp "$SCRIPT_DIR/templates/CLAUDE.md"  "$TARGET_DIR/CLAUDE.md"

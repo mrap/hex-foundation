@@ -1,0 +1,21 @@
+name: proposals
+version: "1.0.0"
+description: "Brand proposals gallery — decks, pitch materials, and content samples"
+type: full
+engines:
+  hex: ">=0.8.0"
+
+views:
+  - name: proposals
+    path: /proposals
+    title: "Proposals Gallery"
+    entry: views/index.html
+
+server:
+  command: "python3 server.py"
+  port: auto
+  health_check: "/health"
+  restart_policy: on-failure
+
+requires:
+  capabilities: [assets]

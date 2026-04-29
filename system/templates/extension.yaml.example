@@ -1,0 +1,46 @@
+name: my-extension
+version: "1.0.0"
+description: "What this extension does"
+author: "name"
+engines:
+  hex: ">=0.8.0"
+type: full  # static | reactive | full
+
+# What this extension provides (all optional)
+views:
+  - name: dashboard
+    path: /ext/dashboard
+    title: "My Dashboard"
+    entry: views/index.html
+    sse_topics: [content.messages]
+
+commands:
+  - name: my-cmd
+    entry: commands/my-cmd
+    description: "Does a thing"
+
+policies:
+  - events/my-policy.yaml
+
+skills:
+  - skills/my-skill/SKILL.md
+
+sse_topics:
+  - topics/my-topic.yaml
+
+agents:
+  - agents/my-agent/charter.yaml
+
+# For full-tier extensions
+server:
+  command: "python3 server.py"
+  port: auto
+  health_check: "/health"
+  restart_policy: on-failure
+
+# For reactive-tier extensions (Gap 1 fix)
+tables:
+  - migrations/001_create_tables.sql
+
+requires:
+  capabilities: [events, messaging, assets]

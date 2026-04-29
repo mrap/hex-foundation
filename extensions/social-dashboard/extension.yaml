@@ -1,0 +1,22 @@
+name: social-dashboard
+version: "1.0.0"
+description: "Live social dashboard — posts, experiments, engagement"
+type: full
+engines:
+  hex: ">=0.8.0"
+
+views:
+  - name: social
+    path: /social
+    title: "Social Dashboard"
+    entry: views/index.html
+    sse_topics: [content.messages, content.assets]
+
+server:
+  command: "python3 server.py"
+  port: auto
+  health_check: "/health"
+  restart_policy: on-failure
+
+requires:
+  capabilities: [events, messaging, assets]

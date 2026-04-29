@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use crate::assets::AssetsHandler;
 use crate::events::EventEngine;
+use crate::extensions::ExtensionDb;
 use crate::messaging::MessagingHandler;
 use crate::sse::SseBus;
 use crate::telemetry::Telemetry;
@@ -21,6 +22,8 @@ pub struct HexServer {
     pub events: Arc<EventEngine>,
     pub messaging: Arc<MessagingHandler>,
     pub assets: Arc<AssetsHandler>,
+    // Extension-owned tables are tracked in _ext_migrations (see extensions.rs)
+    pub ext_db: Arc<ExtensionDb>,
 }
 
 pub struct Request {
@@ -47,8 +50,9 @@ impl HexServer {
         events: Arc<EventEngine>,
         messaging: Arc<MessagingHandler>,
         assets: Arc<AssetsHandler>,
+        ext_db: Arc<ExtensionDb>,
     ) -> Self {
-        Self { port, hex_dir, bus, telemetry, events, messaging, assets }
+        Self { port, hex_dir, bus, telemetry, events, messaging, assets, ext_db }
     }
 
     pub fn start(&self) {
@@ -81,12 +85,13 @@ impl HexServer {
             let events = Arc::clone(&self.events);
             let messaging = Arc::clone(&self.messaging);
             let assets = Arc::clone(&self.assets);
+            let ext_db = Arc::clone(&self.ext_db);
             std::thread::spawn(move || loop {
                 let stream = match rx.lock().unwrap().recv() {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                handle_connection(stream, &bus, &telemetry, &hex_dir, &events, &messaging, &assets);
+                handle_connection(stream, &bus, &telemetry, &hex_dir, &events, &messaging, &assets, &ext_db);
             });
         }
 
@@ -132,6 +137,7 @@ fn handle_connection(
     events: &Arc<EventEngine>,
     messaging: &Arc<MessagingHandler>,
     assets: &Arc<AssetsHandler>,
+    ext_db: &Arc<ExtensionDb>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
 
@@ -167,7 +173,7 @@ fn handle_connection(
     }
 
     let start = std::time::Instant::now();
-    let resp = route_request(&req, bus, hex_dir, events, messaging, assets);
+    let resp = route_request(&req, bus, hex_dir, events, messaging, assets, ext_db);
     let duration_ms = start.elapsed().as_millis();
     telemetry.emit("hex.server.request", &serde_json::json!({
         "method": req.method,
@@ -286,6 +292,7 @@ fn route_request(
     events: &Arc<EventEngine>,
     messaging: &Arc<MessagingHandler>,
     assets: &Arc<AssetsHandler>,
+    ext_db: &Arc<ExtensionDb>,
 ) -> Response {
     let path = req.path.as_str();
 
@@ -315,6 +322,19 @@ fn route_request(
 
     if path.starts_with("/assets") {
         return assets.handle(req);
+    }
+
+    // Extension data query endpoint: GET /ext/<name>/api/query?sql=SELECT...
+    // Extension tables are tracked in _ext_migrations; only SELECT on ext_{name}_ tables allowed.
+    if path.starts_with("/ext/") && req.method == "GET" {
+        let parts: Vec<&str> = path.splitn(5, '/').collect();
+        // path = "/ext/<name>/api/query" → ["", "ext", "<name>", "api", "query"]
+        if parts.len() == 5 && parts[3] == "api" && parts[4] == "query" {
+            let ext_name = parts[2];
+            if !ext_name.is_empty() {
+                return ext_db.handle_query(req, ext_name);
+            }
+        }
     }
 
     // Reverse proxy routes (longest prefix first)

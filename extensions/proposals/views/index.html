@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>hex proposals</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;700&family=Work+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+body {
+  background: #faf7f0; color: #1c1a16; margin: 0; min-height: 100vh;
+  font-family: 'Work Sans', -apple-system, sans-serif;
+  display: flex; align-items: center; justify-content: center;
+}
+main { max-width: 640px; padding: 3rem 2rem; width: 100%; }
+h1 {
+  font-family: 'Fraunces', serif; font-size: 1.8rem;
+  font-weight: 700; letter-spacing: -0.02em; margin: 0 0 0.3rem;
+}
+h1 span { color: #c4553a; }
+.sub { color: #6e695f; font-size: 0.9rem; margin: 0 0 2rem; }
+.list { display: grid; gap: 0; border: 1px solid #e8e0d0; border-radius: 8px; overflow: hidden; background: #fff; }
+a.card {
+  display: block; padding: 1.1rem 1.3rem;
+  text-decoration: none; color: #1c1a16;
+  border-bottom: 1px solid #e8e0d0; transition: background 0.15s;
+}
+a.card:last-child { border-bottom: 0; }
+a.card:hover { background: #fcf5e5; }
+a.card .title {
+  font-family: 'Fraunces', serif; font-size: 1.05rem;
+  font-weight: 600; margin: 0 0 0.2rem; color: #1c1a16;
+}
+a.card .meta { font-size: 0.78rem; color: #8a8880; }
+a.card .arrow { float: right; color: #c4553a; opacity: 0.6; font-size: 1.1rem; margin-top: 0.2rem; }
+.loading { color: #8a8880; font-style: italic; font-size: 0.9rem; }
+footer {
+  margin-top: 1.5rem;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.7rem; color: #8a8880;
+}
+</style>
+</head><body>
+<main>
+  <h1><span>hex</span> proposals</h1>
+  <p class="sub">Brand strategy decks and pitch materials.</p>
+  <div id="content"><p class="loading">Loading proposals…</p></div>
+  <footer>hex-router /proposals · proposals extension v1.0.0</footer>
+</main>
+<script>
+fetch('/proposals/api/list')
+  .then(r => r.json())
+  .then(data => {
+    const el = document.getElementById('content');
+    if (!data.proposals || data.proposals.length === 0) {
+      el.innerHTML = '<p class="loading">No proposals yet.</p>';
+      return;
+    }
+    const cards = data.proposals.map(p =>
+      `<a class="card" href="/proposals/${p.filename}">
+        <span class="arrow">→</span>
+        <div class="title">${p.title}</div>
+        <div class="meta">${p.date} · ${p.size_kb} KB</div>
+      </a>`
+    ).join('');
+    el.innerHTML = '<div class="list">' + cards + '</div>';
+  })
+  .catch(() => {
+    document.getElementById('content').innerHTML =
+      '<p class="loading">Server unavailable — start with: <code>hex extension enable proposals</code></p>';
+  });
+</script>
+</body></html>
