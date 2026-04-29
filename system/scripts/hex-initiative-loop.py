@@ -397,7 +397,7 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
                 })
                 _emit("initiative.at_risk", {
                     "initiative_id": init_id, "days_remaining": days_left,
-                    "unmet_krs": unmet, "channel": os.environ.get("HEX_ESCALATION_CHANNEL", "#from-mrap-hex"),
+                    "unmet_krs": unmet, "channel": os.environ.get("HEX_ESCALATION_CHANNEL", "#hex-announcements"),
                 }, dry_run=dry_run)
 
     return summary

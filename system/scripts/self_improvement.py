@@ -632,7 +632,7 @@ def _escalate_kr(initiative, kr, pivot_history, dry_run):
     if not dry_run:
         try:
             subprocess.run(
-                ["hex-notify", "--channel", "#from-mrap-hex", "--message", msg],
+                ["hex-notify", "--channel", os.environ.get("HEX_NOTIFY_CHANNEL", "#hex-announcements"), "--message", msg],
                 capture_output=True, timeout=10,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):

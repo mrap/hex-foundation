@@ -740,7 +740,7 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
                     _emit("initiative.pivot.escalation", {
                         "initiative_id": init_id, "kr_id": linked_kr_id,
                         "experiment_id": exp_id, "pivot_count": total_pivot_count,
-                        "channel": "#from-mrap-hex", "message": msg,
+                        "channel": os.environ.get("HEX_NOTIFY_CHANNEL", "#hex-announcements"), "message": msg,
                     }, dry_run=dry_run)
                 elif kr_obj:
                     pivot_spec_data = {
@@ -929,7 +929,7 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
                 })
                 _emit("initiative.at_risk", {
                     "initiative_id": init_id, "days_remaining": days_left,
-                    "unmet_krs": unmet, "channel": "#from-mrap-hex",
+                    "unmet_krs": unmet, "channel": os.environ.get("HEX_NOTIFY_CHANNEL", "#hex-announcements"),
                 }, dry_run=dry_run)
 
     # ── Step 8: Budget escalation ─────────────────────────────────────────────
@@ -940,7 +940,7 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
         })
         _emit("hex.budget.escalation", {
             "agent": agent_id,
-            "channel": "#from-mrap-hex",
+            "channel": os.environ.get("HEX_NOTIFY_CHANNEL", "#hex-announcements"),
             "message": f"Initiative loop for {agent_id} hit budget limit. Dispatches blocked.",
         }, dry_run=dry_run)
 
