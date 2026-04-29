@@ -50,7 +50,7 @@ fi
 # If an agent self-halted via circuit breaker, verify the underlying issue is
 # fixed (claude binary reachable via env.sh), then remove HALT to let it retry.
 # Agent list is discovered from charters via hex-agent list — no hardcoded IDs.
-HEX_AGENT="$AGENT_DIR/.hex/bin/hex-agent"
+HEX_AGENT="$AGENT_DIR/.hex/bin/hex"
 if [ ! -x "$HEX_AGENT" ]; then
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] hex-agent binary not found at $HEX_AGENT — skipping agent recovery" >&2
 fi
@@ -68,7 +68,7 @@ while IFS= read -r _aid; do
   else
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] agent $_aid halted — claude still not reachable, keeping HALT" >&2
   fi
-done < <([ -x "$HEX_AGENT" ] && "$HEX_AGENT" list 2>/dev/null)
+done < <([ -x "$HEX_AGENT" ] && "$HEX_AGENT" agent list 2>/dev/null)
 
 # ── Run doctor checks ────────────────────────────────────────────────────────
 doctor_out=""

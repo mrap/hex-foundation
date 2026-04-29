@@ -12,8 +12,13 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from lib.hex_utils import get_hex_root
 
 AUDIT_DIR = os.path.expanduser("~/.hex/audit")
 PIVOTS_LOG = os.path.join(AUDIT_DIR, "pivots.jsonl")
@@ -192,7 +197,7 @@ def generate_pivot_spec(kr, initiative, diagnosis, past_pivots, pivot_num, patte
     metric_cmd = (kr.get("metric") or {}).get("command", "echo 0")
     return f"""# KR Pivot: {initiative.get('id')}/{kr.get('id')} (attempt {pivot_num})
 
-**Workspace:** {os.environ.get('HEX_ROOT', os.path.expanduser('~/hex'))}
+**Workspace:** {str(get_hex_root())}
 **Mode:** execute
 
 ## Context
@@ -392,7 +397,7 @@ def _load_all_active_initiatives():
     except ImportError:
         return []
     initiatives_dir = os.path.join(
-        os.environ.get("HEX_ROOT", os.path.expanduser("~/hex")),
+        str(get_hex_root()),
         "initiatives",
     )
     results = []
@@ -589,7 +594,7 @@ tasks:
 """
 
     # Write spec to specs/ directory
-    hex_root = os.environ.get("HEX_ROOT", os.path.expanduser("~/hex"))
+    hex_root = str(get_hex_root())
     specs_dir = os.path.join(hex_root, "specs")
     os.makedirs(specs_dir, exist_ok=True)
     spec_filename = f"redesign-{init_id}-{kr_id}-{ts}.yaml"
@@ -627,7 +632,7 @@ def _escalate_kr(initiative, kr, pivot_history, dry_run):
     if not dry_run:
         try:
             subprocess.run(
-                ["hex-notify", "--channel", "#from-hex", "--message", msg],
+                ["hex-notify", "--channel", "#from-mrap-hex", "--message", msg],
                 capture_output=True, timeout=10,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):

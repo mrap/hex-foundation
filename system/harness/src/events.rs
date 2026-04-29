@@ -123,12 +123,28 @@ impl EventEngine {
         }
 
         let count = loaded.len();
-        *self.policies.write().unwrap() = loaded;
+        match self.policies.write() {
+            Ok(mut guard) => *guard = loaded,
+            Err(e) => {
+                eprintln!("events: policies write lock poisoned: {e}");
+                return;
+            }
+        }
         eprintln!("events: loaded {count} policies from {:?}", self.policies_dir);
     }
 
     pub fn reload_policies(&self) {
         self.load_policies();
+    }
+
+    pub fn policy_count(&self) -> usize {
+        match self.policies.read() {
+            Ok(guard) => guard.len(),
+            Err(e) => {
+                eprintln!("events: policies lock poisoned: {e}");
+                0
+            }
+        }
     }
 
     /// Ingest an event: write to DB, match policies, execute actions.
@@ -138,7 +154,13 @@ impl EventEngine {
         let payload_str = payload.to_string();
 
         let event_id = {
-            let db = self.db.lock().unwrap();
+            let db = match self.db.lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    eprintln!("events: db lock poisoned: {e}");
+                    return -1;
+                }
+            };
             match db.execute(
                 "INSERT INTO events (event_type, payload, source, created_at) VALUES (?1, ?2, ?3, ?4)",
                 params![event_type, payload_str, source, now],
@@ -151,9 +173,18 @@ impl EventEngine {
             }
         };
 
-        *self.events_processed.lock().unwrap() += 1;
+        match self.events_processed.lock() {
+            Ok(mut guard) => *guard += 1,
+            Err(e) => eprintln!("events: events_processed lock poisoned: {e}"),
+        }
 
-        let policies = self.policies.read().unwrap().clone();
+        let policies = match self.policies.read() {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                eprintln!("events: policies read lock poisoned: {e}");
+                return -1;
+            }
+        };
         for policy in &policies {
             for rule in &policy.rules {
                 if !wildcard_matches(&rule.trigger.event, event_type) {
@@ -280,13 +311,17 @@ impl EventEngine {
                 } else {
                     ("error".to_string(), "no command specified".to_string())
                 };
-                let db = self.db.lock().unwrap();
-                let _ = db.execute(
-                    "INSERT INTO action_log \
-                     (event_id, policy_name, rule_name, action_type, status, error, created_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![event_id, policy_name, rule_name, "shell", status, error, now],
-                );
+                match self.db.lock() {
+                    Ok(db) => {
+                        let _ = db.execute(
+                            "INSERT INTO action_log \
+                             (event_id, policy_name, rule_name, action_type, status, error, created_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![event_id, policy_name, rule_name, "shell", status, error, now],
+                        );
+                    }
+                    Err(e) => eprintln!("events: db lock poisoned in execute_action(shell): {e}"),
+                }
             }
             "emit" => {
                 if let Some(emit_event) = &action.event {
@@ -298,13 +333,17 @@ impl EventEngine {
                 eprintln!(
                     "events: [notify] policy={policy_name} rule={rule_name} event={event_type}"
                 );
-                let db = self.db.lock().unwrap();
-                let _ = db.execute(
-                    "INSERT INTO action_log \
-                     (event_id, policy_name, rule_name, action_type, status, error, created_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![event_id, policy_name, rule_name, "notify", "ok", "", now],
-                );
+                match self.db.lock() {
+                    Ok(db) => {
+                        let _ = db.execute(
+                            "INSERT INTO action_log \
+                             (event_id, policy_name, rule_name, action_type, status, error, created_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![event_id, policy_name, rule_name, "notify", "ok", "", now],
+                        );
+                    }
+                    Err(e) => eprintln!("events: db lock poisoned in execute_action(notify): {e}"),
+                }
             }
             other => eprintln!("events: unknown action type '{other}'"),
         }
@@ -390,7 +429,10 @@ impl EventEngine {
             .and_then(|s| s.parse().ok())
             .unwrap_or(20);
 
-        let db = self.db.lock().unwrap();
+        let db = match self.db.lock() {
+            Ok(g) => g,
+            Err(e) => return json_error(500, &format!("db lock poisoned: {e}")),
+        };
         let mut stmt = match db.prepare(
             "SELECT id, event_type, payload, source, created_at \
              FROM events ORDER BY id DESC LIMIT ?1",
@@ -426,8 +468,14 @@ impl EventEngine {
     }
 
     fn http_status(&self) -> Response {
-        let policy_count = self.policies.read().unwrap().len();
-        let events_processed = *self.events_processed.lock().unwrap();
+        let policy_count = match self.policies.read() {
+            Ok(guard) => guard.len(),
+            Err(e) => return json_error(500, &format!("policies lock poisoned: {e}")),
+        };
+        let events_processed = match self.events_processed.lock() {
+            Ok(guard) => *guard,
+            Err(e) => return json_error(500, &format!("events_processed lock poisoned: {e}")),
+        };
         let uptime_secs = self.start_time.elapsed().as_secs();
 
         json_ok(&serde_json::json!({
@@ -441,13 +489,21 @@ impl EventEngine {
 
     // ── CLI ───────────────────────────────────────────────────────────────────
 
-    pub fn policy_count(&self) -> usize {
-        self.policies.read().map(|p| p.len()).unwrap_or(0)
-    }
-
     pub fn cli_status(&self) {
-        let policy_count = self.policies.read().unwrap().len();
-        let events_processed = *self.events_processed.lock().unwrap();
+        let policy_count = match self.policies.read() {
+            Ok(guard) => guard.len(),
+            Err(e) => {
+                eprintln!("events: policies lock poisoned: {e}");
+                0
+            }
+        };
+        let events_processed = match self.events_processed.lock() {
+            Ok(guard) => *guard,
+            Err(e) => {
+                eprintln!("events: events_processed lock poisoned: {e}");
+                0
+            }
+        };
         let uptime_secs = self.start_time.elapsed().as_secs();
 
         println!("hex events status");
@@ -473,7 +529,13 @@ impl EventEngine {
     }
 
     pub fn cli_trace(&self, event_id: i64) {
-        let db = self.db.lock().unwrap();
+        let db = match self.db.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("events: db lock poisoned: {e}");
+                return;
+            }
+        };
 
         let ev = db.query_row(
             "SELECT event_type, payload, source, created_at FROM events WHERE id = ?1",
@@ -541,7 +603,13 @@ impl EventEngine {
     }
 
     pub fn cli_policies(&self) {
-        let policies = self.policies.read().unwrap();
+        let policies = match self.policies.read() {
+            Ok(guard) => guard,
+            Err(e) => {
+                eprintln!("events: policies lock poisoned: {e}");
+                return;
+            }
+        };
         if policies.is_empty() {
             println!("No policies loaded (dir: {:?})", self.policies_dir);
             return;
@@ -554,7 +622,13 @@ impl EventEngine {
 
     pub fn cli_reload(&self) {
         self.reload_policies();
-        let count = self.policies.read().unwrap().len();
+        let count = match self.policies.read() {
+            Ok(guard) => guard.len(),
+            Err(e) => {
+                eprintln!("events: policies lock poisoned: {e}");
+                return;
+            }
+        };
         println!("Reloaded {count} policies");
     }
 }

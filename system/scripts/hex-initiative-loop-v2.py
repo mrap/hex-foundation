@@ -41,7 +41,10 @@ except ImportError:
     print("ERROR: PyYAML not installed. Run: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
 
-HEX_ROOT = os.environ.get("HEX_ROOT", os.path.expanduser("~/hex"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lib.hex_utils import get_hex_root
+
+HEX_ROOT = os.environ.get("HEX_ROOT", str(get_hex_root()))
 INITIATIVES_DIR = os.path.join(HEX_ROOT, "initiatives")
 EXPERIMENTS_DIR = os.path.join(HEX_ROOT, "experiments")
 SCRIPTS_DIR = os.path.join(HEX_ROOT, ".hex", "scripts")
@@ -737,7 +740,7 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
                     _emit("initiative.pivot.escalation", {
                         "initiative_id": init_id, "kr_id": linked_kr_id,
                         "experiment_id": exp_id, "pivot_count": total_pivot_count,
-                        "channel": "#from-hex", "message": msg,
+                        "channel": "#from-mrap-hex", "message": msg,
                     }, dry_run=dry_run)
                 elif kr_obj:
                     pivot_spec_data = {
@@ -770,8 +773,8 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
                                 f"6. Add the new experiment ID to the initiative's experiments list"
                             ),
                             "verify": (
-                                f"python3 .hex/scripts/hex-experiment.py list 2>&1 | "
-                                f"grep -c ACTIVE | xargs test 1 -le"
+                                "python3 .hex/scripts/hex-experiment.py list 2>&1 | "
+                                "grep -c ACTIVE | xargs test 1 -le"
                             ),
                         }],
                     }
@@ -926,7 +929,7 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
                 })
                 _emit("initiative.at_risk", {
                     "initiative_id": init_id, "days_remaining": days_left,
-                    "unmet_krs": unmet, "channel": "#from-hex",
+                    "unmet_krs": unmet, "channel": "#from-mrap-hex",
                 }, dry_run=dry_run)
 
     # ── Step 8: Budget escalation ─────────────────────────────────────────────
@@ -937,7 +940,7 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
         })
         _emit("hex.budget.escalation", {
             "agent": agent_id,
-            "channel": "#from-hex",
+            "channel": "#from-mrap-hex",
             "message": f"Initiative loop for {agent_id} hit budget limit. Dispatches blocked.",
         }, dry_run=dry_run)
 

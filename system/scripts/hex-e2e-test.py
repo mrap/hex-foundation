@@ -20,9 +20,12 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lib.hex_utils import get_hex_root
+
 CC_SOCK = os.path.expanduser("~/.cc-connect/run/api.sock")
 CC_PROJECT = "hex"
-AGENT_DIR = os.path.expanduser("~/hex")
+AGENT_DIR = str(get_hex_root())
 CHECKPOINT_DIR = os.path.join(AGENT_DIR, "projects/hex-e2e-test")
 CHECKPOINT_FILE = os.path.join(CHECKPOINT_DIR, "checkpoint.md")
 RESET_SCRIPT = os.path.join(AGENT_DIR, ".hex/scripts/hex-session-reset.sh")

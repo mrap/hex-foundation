@@ -17,8 +17,11 @@ import argparse
 from pathlib import Path
 from typing import Optional
 
+sys.path.insert(0, str(Path(__file__).parent))
+from lib.hex_utils import get_hex_root
+
 # --- Paths ---
-HEX_ROOT = Path(os.environ.get("HEX_ROOT", Path(os.environ.get("AGENT_DIR", str(Path.home() / "hex")))))
+HEX_ROOT = Path(os.environ.get("HEX_ROOT", str(get_hex_root())))
 INITIATIVES_DIR = HEX_ROOT / "initiatives"
 EXPERIMENTS_DIR = HEX_ROOT / "experiments"
 BOI_QUEUE_DIR = Path.home() / ".boi" / "queue"
@@ -320,7 +323,7 @@ def cmd_all(args):
 
     if issues_found:
         print()
-        print(f"SPECS WITH ISSUES:")
+        print("SPECS WITH ISSUES:")
         for qid, issues in issues_found:
             print(f"  {qid}:")
             for iss in issues:
@@ -418,7 +421,7 @@ def cmd_map(args):
             has_active_work = True
 
         if not has_active_work:
-            print(f"  WARNING: no active specs or experiments for this initiative")
+            print("  WARNING: no active specs or experiments for this initiative")
 
         print()
 

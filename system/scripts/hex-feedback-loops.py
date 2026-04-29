@@ -18,7 +18,10 @@ import sys
 import time
 from datetime import datetime, timezone
 
-HEX_ROOT = os.environ.get("HEX_ROOT", os.path.expanduser("~/hex"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lib.hex_utils import get_hex_root
+
+HEX_ROOT = str(get_hex_root())
 AUDIT_DIR = os.path.expanduser("~/.hex/audit")
 TELEMETRY_PATH = os.path.join(HEX_ROOT, ".hex", "telemetry")
 

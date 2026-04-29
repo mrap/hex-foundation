@@ -18,7 +18,10 @@ from datetime import datetime, timezone
 
 import yaml
 
-HEX_ROOT = os.environ.get("HEX_ROOT", os.path.expanduser("~/hex"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lib.hex_utils import get_hex_root
+
+HEX_ROOT = str(get_hex_root())
 INITIATIVES_DIR = os.path.join(HEX_ROOT, "initiatives")
 EXPERIMENTS_DIR = os.path.join(HEX_ROOT, "experiments")
 

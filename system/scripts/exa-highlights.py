@@ -18,7 +18,10 @@ import os
 import sys
 import urllib.request
 
-SECRETS_PATH = os.path.join(os.environ.get("AGENT_DIR", os.path.expanduser("~/hex")), ".hex", "secrets", "mcp-exa.env")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lib.hex_utils import get_hex_root
+
+SECRETS_PATH = os.path.join(str(get_hex_root()), ".hex", "secrets", "mcp-exa.env")
 
 def load_api_key():
     key = os.environ.get("EXA_API_KEY")

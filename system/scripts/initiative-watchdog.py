@@ -44,7 +44,10 @@ try:
 except ImportError:
     _YAML_AVAILABLE = False
 
-HEX_ROOT = os.environ.get("HEX_ROOT", os.path.expanduser("~/hex"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lib.hex_utils import get_hex_root
+
+HEX_ROOT = str(get_hex_root())
 HOME_HEX = os.path.expanduser("~/.hex")
 AUDIT_DIR = os.path.join(HOME_HEX, "audit")
 INITIATIVES_DIR = os.path.join(HEX_ROOT, "initiatives")

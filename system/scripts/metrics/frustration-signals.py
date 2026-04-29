@@ -24,10 +24,11 @@ FRUSTRATION_PATTERNS = [
 
 COMPILED = [(p, re.compile(p, re.IGNORECASE)) for p in FRUSTRATION_PATTERNS]
 
-SUMMARIES_DIR = Path(os.environ.get("AGENT_DIR", os.environ.get("HEX_DIR", "."))) / ".hex" / "sessions" / "summaries"
+SUMMARIES_DIR = Path.home() / "mrap-hex" / ".hex" / "sessions" / "summaries"
 AUDIT_DIR = Path.home() / ".hex" / "audit"
 OUTPUT_FILE = AUDIT_DIR / "frustration-signals.jsonl"
 THRESHOLD = 4
+CRITICAL_THRESHOLD = 8
 WINDOW_SECONDS = 24 * 3600
 
 
@@ -84,7 +85,27 @@ def main():
     n = len(sessions_with_hits)
     print(f"Frustration signals: {n} sessions in 24h (threshold: {THRESHOLD})")
 
+    if n >= THRESHOLD:
+        _emit_frustration_event(n, all_hits)
+
     sys.exit(2 if n >= THRESHOLD else 0)
+
+
+def _emit_frustration_event(n: int, hits: list) -> None:
+    telemetry_path = Path.home() / "mrap-hex" / ".hex" / "telemetry"
+    import sys as _sys
+    _sys.path.insert(0, str(telemetry_path))
+    try:
+        from emit import emit
+        event = "hex.user.frustration.critical" if n >= CRITICAL_THRESHOLD else "hex.user.frustration.warning"
+        emit(event, {
+            "session_count": n,
+            "threshold": THRESHOLD,
+            "critical_threshold": CRITICAL_THRESHOLD,
+            "sample_patterns": list({h["pattern"] for h in hits})[:5],
+        }, source="frustration-signals")
+    except Exception as exc:
+        print(f"[frustration-signals] telemetry warn: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

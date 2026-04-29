@@ -5,7 +5,7 @@
 set -uo pipefail
 
 HEX_DIR="${HEX_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-HEX_AGENT="$HEX_DIR/.hex/bin/hex-agent"
+HEX_AGENT="$HEX_DIR/.hex/bin/hex"
 
 _check_claude_on_path() {
   if command -v claude &>/dev/null; then
@@ -64,5 +64,5 @@ else
   while IFS= read -r agent_id; do
     [[ -z "$agent_id" ]] && continue
     _check_agent_liveness "$agent_id"
-  done < <(HEX_DIR="$HEX_DIR" "$HEX_AGENT" list 2>/dev/null)
+  done < <(HEX_DIR="$HEX_DIR" "$HEX_AGENT" agent list 2>/dev/null)
 fi

@@ -18,7 +18,10 @@ import tempfile
 import textwrap
 from datetime import datetime, timedelta, timezone
 
-HEX_ROOT = os.environ.get("HEX_ROOT", os.path.expanduser("~/hex"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from lib.hex_utils import get_hex_root
+
+HEX_ROOT = str(get_hex_root())
 TELEMETRY_DB = os.path.join(HEX_ROOT, ".hex", "telemetry", "events.db")
 TELEMETRY_DIR = os.path.join(HEX_ROOT, ".hex", "telemetry")
 sys.path.insert(0, TELEMETRY_DIR)

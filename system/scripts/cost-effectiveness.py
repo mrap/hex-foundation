@@ -18,7 +18,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-AGENT_DIR = os.environ.get("AGENT_DIR", os.path.expanduser("~/hex"))
+sys.path.insert(0, str(Path(__file__).parent))
+from lib.hex_utils import get_hex_root
+
+AGENT_DIR = str(get_hex_root())
 LEDGER_PATH = os.path.join(AGENT_DIR, ".hex/cost/ledger.jsonl")
 KR_SNAPSHOTS_PATH = os.path.expanduser("~/.hex/audit/kr-snapshots.jsonl")
 INITIATIVES_DIR = os.path.join(AGENT_DIR, "initiatives")

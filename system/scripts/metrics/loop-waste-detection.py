@@ -6,9 +6,10 @@ import os
 import re
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
-SUMMARIES_DIR = Path(os.environ.get("AGENT_DIR", os.environ.get("HEX_DIR", "."))) / ".hex" / "sessions" / "summaries"
+SUMMARIES_DIR = Path.home() / "mrap-hex" / ".hex" / "sessions" / "summaries"
 AUDIT_DIR = Path.home() / ".hex" / "audit"
 OUTPUT_FILE = AUDIT_DIR / "loop-detections.jsonl"
 WINDOW_SECONDS = 48 * 3600
@@ -17,6 +18,14 @@ MIN_COMBINED_TASKS = 3
 
 URL_RE = re.compile(r"https?://\S+|www\.\S+")
 TIMESTAMP_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?\b|\b\d{1,2}:\d{2}(:\d{2})?\b")
+
+# BOI worker sessions share a long common preamble as their first task entry;
+# they are distinct workers on distinct specs and must not be treated as duplicates.
+BOI_WORKER_RE = re.compile(r"#\s*BOI\s+Worker", re.IGNORECASE)
+
+
+def is_boi_worker_session(tasks):
+    return bool(tasks) and bool(BOI_WORKER_RE.match(tasks[0]))
 
 
 def extract_tasks_section(text):
@@ -43,13 +52,6 @@ def normalize(text):
     text = TIMESTAMP_RE.sub("", text)
     text = re.sub(r"[^\w\s]", " ", text)
     return text
-
-
-def trigrams(tokens):
-    """Return set of word trigrams from token list."""
-    if len(tokens) < 3:
-        return set(tokens)
-    return set(zip(tokens[i], tokens[i+1], tokens[i+2]) for i in range(len(tokens) - 2))
 
 
 def task_list_trigrams(tasks):
@@ -85,6 +87,8 @@ def load_summaries():
         tasks = extract_tasks_section(text)
         if not tasks:
             continue
+        if is_boi_worker_session(tasks):
+            continue
         results.append({
             "session_id": path.stem,
             "mtime": mtime,
@@ -95,9 +99,28 @@ def load_summaries():
 
 
 def detect_loops(summaries):
-    """Return list of loop detection records."""
-    loops = []
+    """Return one record per cluster of similar sessions (not one per pair).
+
+    Groups similar sessions into connected components via union-find, then
+    reports each cluster as a single loop waste event.  This prevents a
+    group of N identical sessions from inflating the count by C(N,2).
+    """
     n = len(summaries)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x, y):
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    # Pass 1: collect all similar pairs and union them
+    similar_pairs = []
     for i in range(n):
         for j in range(i + 1, n):
             a = summaries[i]
@@ -109,15 +132,36 @@ def detect_loops(summaries):
             tg_b = task_list_trigrams(b["tasks"])
             sim = jaccard(tg_a, tg_b)
             if sim > SIMILARITY_THRESHOLD:
-                preview_a = a["tasks"][0][:80] if a["tasks"] else ""
-                preview_b = b["tasks"][0][:80] if b["tasks"] else ""
-                loops.append({
-                    "ts": max(a["mtime"], b["mtime"]),
-                    "session_a": a["session_id"],
-                    "session_b": b["session_id"],
-                    "similarity": round(sim, 4),
-                    "task_preview": f"{preview_a} | {preview_b}",
-                })
+                similar_pairs.append((i, j, sim))
+                union(i, j)
+
+    if not similar_pairs:
+        return []
+
+    # Pass 2: find representative (highest-sim) pair per cluster using final roots
+    best_pair: dict[int, tuple] = {}
+    for i, j, sim in similar_pairs:
+        root = find(i)
+        prev = best_pair.get(root)
+        if prev is None or sim > prev[2]:
+            best_pair[root] = (i, j, sim)
+
+    loops = []
+    for root, (i, j, sim) in best_pair.items():
+        cluster_size = sum(1 for k in range(n) if find(k) == root)
+        a = summaries[i]
+        b = summaries[j]
+        preview_a = a["tasks"][0][:80] if a["tasks"] else ""
+        preview_b = b["tasks"][0][:80] if b["tasks"] else ""
+        loops.append({
+            "ts": max(a["mtime"], b["mtime"]),
+            "session_a": a["session_id"],
+            "session_b": b["session_id"],
+            "similarity": round(sim, 4),
+            "task_preview": f"{preview_a} | {preview_b}",
+            "cluster_size": cluster_size,
+        })
+
     return loops
 
 

@@ -10,7 +10,6 @@ Provides:
 """
 
 import hashlib
-import json
 import math
 import os
 import re
@@ -19,9 +18,13 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-HEX_ROOT = os.environ.get("HEX_ROOT", os.path.expanduser("~/hex"))
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+from lib.hex_utils import get_hex_root
+
+HEX_ROOT = os.environ.get("HEX_ROOT", str(get_hex_root()))
 MEMORY_DB = os.path.join(HEX_ROOT, ".hex", "memory.db")
-_AGENT_DIR = os.environ.get("AGENT_DIR", os.path.expanduser("~/hex"))
+_AGENT_DIR = os.environ.get("AGENT_DIR", str(get_hex_root()))
 FEEDBACK_DIR = Path(os.environ.get(
     "CLAUDE_PROJECT_MEMORY",
     str(Path.home() / ".claude" / "projects" / ("-" + _AGENT_DIR.replace("/", "-").lstrip("-")) / "memory")

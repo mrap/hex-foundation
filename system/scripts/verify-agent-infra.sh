@@ -76,33 +76,33 @@ fi
 # ── 4. hex-agent binary exists and fleet validates ───────────────────────────
 bold "4. hex-agent binary + fleet validation"
 
-HEX_AGENT_BIN="$HEX_DIR/.hex/bin/hex-agent"
+HEX_AGENT_BIN="$HEX_DIR/.hex/bin/hex"
 if [ -x "$HEX_AGENT_BIN" ]; then
-  assert_pass "hex-agent binary exists and is executable"
-  if HEX_DIR="$HEX_DIR" "$HEX_AGENT_BIN" fleet >/dev/null 2>&1; then
-    AGENT_COUNT=$(HEX_DIR="$HEX_DIR" "$HEX_AGENT_BIN" list 2>/dev/null | wc -l | tr -d ' ')
+  assert_pass "hex binary exists and is executable"
+  if HEX_DIR="$HEX_DIR" "$HEX_AGENT_BIN" agent fleet >/dev/null 2>&1; then
+    AGENT_COUNT=$(HEX_DIR="$HEX_DIR" "$HEX_AGENT_BIN" agent list 2>/dev/null | wc -l | tr -d ' ')
     assert_pass "fleet validates — $AGENT_COUNT agents discovered from charters"
   else
-    assert_fail "hex-agent fleet failed — charter validation errors (run: hex-agent fleet)"
+    assert_fail "hex agent fleet failed — charter validation errors (run: hex agent fleet)"
   fi
 else
-  assert_fail "hex-agent binary missing at $HEX_AGENT_BIN"
+  assert_fail "hex binary missing at $HEX_AGENT_BIN"
 fi
 
-# ── 5. hex-agent rejects unregistered agents ─────────────────────────────────
-bold "5. hex-agent rejects unregistered agents"
+# ── 5. hex agent rejects unregistered agents ─────────────────────────────────
+bold "5. hex agent rejects unregistered agents"
 
-_wake_out=$(HEX_DIR="$HEX_DIR" "$HEX_AGENT_BIN" wake nonexistent-test --trigger test 2>&1) || true
+_wake_out=$(HEX_DIR="$HEX_DIR" "$HEX_AGENT_BIN" agent wake nonexistent-test --trigger test 2>&1) || true
 if echo "$_wake_out" | grep -q "not registered"; then
-  assert_pass "hex-agent wake rejects unregistered agent with clear error"
+  assert_pass "hex agent wake rejects unregistered agent with clear error"
 else
-  assert_fail "hex-agent wake did not reject unregistered agent"
+  assert_fail "hex agent wake did not reject unregistered agent"
 fi
 
-# ── 6. hex-agent validates charter id matches directory ──────────────────────
+# ── 6. hex validates charter id matches directory ──────────────────────
 bold "6. Charter id validation"
 
-if HEX_DIR="$HEX_DIR" "$HEX_AGENT_BIN" fleet 2>&1 | grep -q "ERROR"; then
+if HEX_DIR="$HEX_DIR" "$HEX_AGENT_BIN" agent fleet 2>&1 | grep -q "ERROR"; then
   assert_fail "fleet has charter validation errors — run hex-agent fleet for details"
 else
   assert_pass "all charters pass validation (id matches directory)"
@@ -145,7 +145,7 @@ bold "8. Budget tracking via hex-agent status"
 
 # agent.py was archived when the Rust harness took over budget tracking.
 # Verify the Rust harness correctly reports cost/budget fields.
-_budget_out=$(HEX_DIR="$HEX_DIR" "$HEX_AGENT_BIN" status hex-ops 2>&1) || true
+_budget_out=$(HEX_DIR="$HEX_DIR" "$HEX_AGENT_BIN" agent status hex-ops 2>&1) || true
 if echo "$_budget_out" | grep -qE "^Cost \(lifetime\):"; then
   assert_pass "hex-agent reports cost tracking (lifetime field present)"
 else
@@ -203,7 +203,7 @@ while IFS= read -r agent; do
     assert_fail "agent $agent is HALTED"
     HALTED=$((HALTED + 1))
   fi
-done < <(HEX_DIR="$HEX_DIR" "$HEX_DIR/.hex/bin/hex-agent" list 2>/dev/null)
+done < <(HEX_DIR="$HEX_DIR" "$HEX_DIR/.hex/bin/hex" agent list 2>/dev/null)
 if [ $HALTED -eq 0 ]; then
   assert_pass "all $AGENT_COUNT agents active (no HALT files)"
 fi
@@ -228,7 +228,7 @@ while IFS= read -r agent; do
   else
     assert_fail "${agent}-agent.yaml missing"
   fi
-done < <(HEX_DIR="$HEX_DIR" "$HEX_DIR/.hex/bin/hex-agent" list 2>/dev/null)
+done < <(HEX_DIR="$HEX_DIR" "$HEX_DIR/.hex/bin/hex" agent list 2>/dev/null)
 
 # ── 14. User-outcome metrics ─────────────────────────────────────────────────
 bold "14. User-outcome metrics"

@@ -2,11 +2,11 @@
 hex-router — tiny path-routing reverse proxy for named local services.
 
 Runs on 127.0.0.1:8880. Tailscale Serve fronts it on :443 so users get:
-  https://HEX_TAILSCALE_HOST/ui        → hex-ui MVP
-  https://HEX_TAILSCALE_HOST/boi       → BOI live status
-  https://HEX_TAILSCALE_HOST/visions   → UX vision pitch site
-  https://HEX_TAILSCALE_HOST/demos     → demos page
-  https://HEX_TAILSCALE_HOST/          → landing page
+  https://mac-mini.tailbd5748.ts.net/ui        → hex-ui MVP
+  https://mac-mini.tailbd5748.ts.net/boi       → BOI live status
+  https://mac-mini.tailbd5748.ts.net/visions   → UX vision pitch site
+  https://mac-mini.tailbd5748.ts.net/demos     → demos page
+  https://mac-mini.tailbd5748.ts.net/          → landing page
 
 To add a new named service, add an entry to ROUTES.
 """
@@ -40,7 +40,6 @@ ROUTES = [
     ("/social",   "127.0.0.1", 8899, "http",  True),
     ("/comments", "127.0.0.1", 8901, "http",  True),
     ("/wit",      "127.0.0.1", 3457, "http",  True),
-    ("/cc",       "127.0.0.1", 3458, "http",  True),
 ]
 
 # Convenience redirects: /alias  →  /target
@@ -93,7 +92,6 @@ footer { margin-top: 1.5rem; font-family: "SF Mono", Menlo, Consolas, monospace;
     <a class="row" href="/fleet">      <span class="name">/fleet</span>  <span class="desc">Live agent fleet org chart</span> <span class="arrow">→</span></a>
     <a class="row" href="/proposals">  <span class="name">/proposals</span><span class="desc">Brand strategy decks and proposals</span> <span class="arrow">→</span></a>
     <a class="row" href="/social">    <span class="name">/social</span>  <span class="desc">Live social dashboard — posts, experiments, engagement</span> <span class="arrow">→</span></a>
-    <a class="row" href="/cc/">       <span class="name">/cc</span>     <span class="desc">CloudCLI — web UI for Claude Code</span> <span class="arrow">→</span></a>
   </div>
   <footer>hex-router · tailscale-served · light mode</footer>
 </main>
