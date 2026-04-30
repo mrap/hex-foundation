@@ -286,7 +286,7 @@ hex-foundation/
 │   │                    route-comment.py, hex-asset.py, hex-asset-discover.py, ...
 │   │   ├── comments-service/  comment widget (widget.js) + Python fallback server
 │   │   └── sse-bus/           hex-events → SSE bridge script
-│   ├── commands/        → copied to ~/hex/.claude/commands/ (Claude Code slash commands)
+│   ├── commands/        → copied to ~/hex/.claude/commands/ (Claude Code) and ~/hex/.hex/commands/ (doctor/tooling)
 │   ├── skills/          memory/ (index+search+save), landings, hex-reflect, hex-decide,
 │   │                    hex-debrief, hex-consolidate, hex-doctor, hex-checkpoint,
 │   │                    hex-shutdown, hex-startup, hex-triage
