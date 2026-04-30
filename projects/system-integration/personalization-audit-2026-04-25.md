@@ -11,14 +11,14 @@ user-specific identifiers, and machine-specific assumptions.
 
 | File | Line | Pattern | Value | Fix |
 |------|------|---------|-------|-----|
-| system/commands/bet-status.md | 33 | hardcoded path | `/Users/mrap/mrap-hex` | use `AGENT_DIR` env var or `$HOME` |
+| system/commands/bet-status.md | 33 | hardcoded path | `/Users/mrap/mrap-hex` | use `HEX_DIR` env var or `$HOME` |
 | system/skills/secret-intake/scripts/server.py | 12 | hardcoded path (default) | `"/Users/mrap/mrap-hex"` | use `os.environ.get("HEX_DIR", os.path.expanduser("~"))` or require env var |
 | system/skills/secret-intake/SKILL.md | 88 | hardcoded path (example default) | `/Users/mrap/mrap-hex` | replace with generic `~/your-hex-dir` |
-| system/scripts/consolidate.sh | 8 | hardcoded default dir | `$HOME/mrap-hex` | use `${AGENT_DIR:-$HOME/hex}` |
-| system/scripts/consolidate.sh | 22 | hardcoded Claude project path | `-Users-mrap-mrap-hex` | derive from `AGENT_DIR` at runtime |
-| system/scripts/consolidate.sh | 52 | hardcoded Claude project path | `-Users-mrap-mrap-hex` | derive from `AGENT_DIR` at runtime |
-| system/scripts/consolidate.sh | 53 | hardcoded Claude project path | `-Users-mrap-mrap-hex` | derive from `AGENT_DIR` at runtime |
-| system/scripts/release.sh | 119 | hardcoded default dir | `$HOME/mrap-hex` | use `${AGENT_DIR:-$HOME/hex}` |
+| system/scripts/consolidate.sh | 8 | hardcoded default dir | `$HOME/mrap-hex` | use `${HEX_DIR:-$HOME/hex}` |
+| system/scripts/consolidate.sh | 22 | hardcoded Claude project path | `-Users-mrap-mrap-hex` | derive from `HEX_DIR` at runtime |
+| system/scripts/consolidate.sh | 52 | hardcoded Claude project path | `-Users-mrap-mrap-hex` | derive from `HEX_DIR` at runtime |
+| system/scripts/consolidate.sh | 53 | hardcoded Claude project path | `-Users-mrap-mrap-hex` | derive from `HEX_DIR` at runtime |
+| system/scripts/release.sh | 119 | hardcoded default dir | `$HOME/mrap-hex` | use `${HEX_DIR:-$HOME/hex}` |
 | system/reference/core-agents/boi-optimizer.yaml | 73 | Slack channel (personalized name) | `#from-mrap-hex` | use configurable channel `${SLACK_ESCALATION_CHANNEL:-#hex-escalations}` |
 | system/reference/core-agents/boi-optimizer.yaml | 111 | Slack channel (personalized name) | `#from-mrap-hex` | use configurable channel `${SLACK_ESCALATION_CHANNEL:-#hex-escalations}` |
 | system/reference/core-agents/hex-ops.yaml | 70 | Slack channel (personalized name) | `#from-mrap-hex` | use configurable channel `${SLACK_ESCALATION_CHANNEL:-#hex-escalations}` |

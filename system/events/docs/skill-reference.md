@@ -128,7 +128,7 @@ Execute a shell command.
 
 ```yaml
 - type: shell
-  command: "bash $AGENT_DIR/scripts/run.sh"
+  command: "bash $HEX_DIR/scripts/run.sh"
   timeout: 120
   retries: 0
   on_success:

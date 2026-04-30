@@ -35,6 +35,8 @@ fi
 
 HEX_SYSTEM_DIR="$HEX_DIR/.hex"
 SCRIPTS_DIR="$HEX_SYSTEM_DIR/scripts"
+# shellcheck source=./env.sh
+[[ -f "$SCRIPTS_DIR/env.sh" ]] && source "$SCRIPTS_DIR/env.sh" 2>/dev/null || true
 
 # Colors
 GREEN='\033[32m'
