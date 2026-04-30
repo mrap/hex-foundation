@@ -376,16 +376,16 @@ for t in "${SED_TARGETS[@]}"; do
     # Escape the target (it has no special chars in practice but be safe)
     escaped=$(printf '%s' "$t" | sed 's/[][\\/.^$*]/\\&/g')
     SED_SCRIPT+="s|\\.claude/${escaped}|.hex/${escaped}|g; "
-    SED_SCRIPT+="s|\\\$AGENT_DIR/\\.claude/${escaped}|\\\$HEX_DIR/.hex/${escaped}|g; "
+    SED_SCRIPT+="s|\\\$HEX_DIR/\\.claude/${escaped}|\\\$HEX_DIR/.hex/${escaped}|g; "
     SED_SCRIPT+="s|\\\$CLAUDE_PROJECT_DIR/\\.claude/${escaped}|\\\$CLAUDE_PROJECT_DIR/.hex/${escaped}|g; "
 done
 # Evolution rename: .claude/evolution → .hex/evolution-scripts
 SED_SCRIPT+="s|\\.claude/evolution/|.hex/evolution-scripts/|g; "
-SED_SCRIPT+="s|\\\$AGENT_DIR/\\.claude/evolution/|\\\$HEX_DIR/.hex/evolution-scripts/|g; "
+SED_SCRIPT+="s|\\\$HEX_DIR/\\.claude/evolution/|\\\$HEX_DIR/.hex/evolution-scripts/|g; "
 
-# Also AGENT_DIR → HEX_DIR where it's clearly the hex root variable (common pattern)
-# Narrow: only in contexts where AGENT_DIR immediately precedes a .claude or .hex ref.
-# This sed keeps other AGENT_DIR uses alone.
+# Also AGENT_DIR (legacy name) → HEX_DIR where it's clearly the hex root variable (common pattern)
+# Narrow: only in contexts where AGENT_DIR (legacy) immediately precedes a .claude or .hex ref.
+# This sed keeps other AGENT_DIR (legacy) uses alone.
 
 # Apply sed to every tracked file that isn't binary
 if ! $DRY_RUN; then

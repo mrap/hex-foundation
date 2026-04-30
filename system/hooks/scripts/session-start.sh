@@ -9,17 +9,21 @@
 
 set -uo pipefail
 
-# ── AGENT_DIR guard ─────────────────────────────────────────────────────────
-# Hex refuses to start without AGENT_DIR. Add to your shell rc:
-#   export AGENT_DIR="$HEX_DIR"
-if [[ -z "${AGENT_DIR:-}" ]]; then
-  python3 -c "
+# ── HEX_DIR guard ───────────────────────────────────────────────────────────
+# Hex refuses to start without HEX_DIR. Add to your shell rc:
+#   export HEX_DIR="/path/to/your/hex"
+if [[ -z "${HEX_DIR:-}" ]]; then
+  # Backwards compat: fall back to deprecated AGENT_DIR
+  if [[ -n "${AGENT_DIR:-}" ]]; then
+    export HEX_DIR="$AGENT_DIR"
+  else
+    python3 -c "
 import json
 msg = (
-    '*** AGENT_DIR IS NOT SET — HEX CANNOT START ***\n\n'
-    'AGENT_DIR must be exported in your shell environment.\n'
+    '*** HEX_DIR IS NOT SET — HEX CANNOT START ***\n\n'
+    'HEX_DIR must be exported in your shell environment.\n'
     'Add this to your shell rc and restart your terminal:\n\n'
-    '  export AGENT_DIR=\"\$HEX_DIR\"\n\n'
+    '  export HEX_DIR=\"/path/to/your/hex\"\n\n'
     'Hex will not operate until this is fixed.'
 )
 print(json.dumps({
@@ -29,10 +33,11 @@ print(json.dumps({
     }
 }))
 "
-  exit 0
+    exit 0
+  fi
 fi
 
-HEX_DIR="${CLAUDE_PROJECT_DIR:-${HEX_DIR:-$AGENT_DIR}}"
+HEX_DIR="${CLAUDE_PROJECT_DIR:-${HEX_DIR:-$AGENT_DIR}}"  # fallback: AGENT_DIR is deprecated legacy alias
 
 {
   _ch="${CC_SESSION_KEY:-local-dev}"

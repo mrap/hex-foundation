@@ -6,21 +6,21 @@
 #   Revive candidates: Items with dates 14-21 days old that are still open
 #   Active:            Items under 14 days old (skipped)
 #
-# Usage: bash $AGENT_DIR/.hex/scripts/stale-reaper.sh
+# Usage: bash $HEX_DIR/.hex/scripts/stale-reaper.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENT_DIR="${AGENT_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+HEX_DIR="${HEX_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
 # Use configured timezone (SO #17)
-if [ -f "$AGENT_DIR/.hex/timezone" ]; then
-  TZ="$(tr -d '[:space:]' < "$AGENT_DIR/.hex/timezone")"; export TZ
+if [ -f "$HEX_DIR/.hex/timezone" ]; then
+  TZ="$(tr -d '[:space:]' < "$HEX_DIR/.hex/timezone")"; export TZ
 fi
 
 TODAY=$(date +%Y-%m-%d)
 TODAY_EPOCH=$(date -j -f "%Y-%m-%d" "$TODAY" "+%s" 2>/dev/null || date -d "$TODAY" "+%s")
 
-TODO_FILE="$AGENT_DIR/todo.md"
-REPORT_DIR="$AGENT_DIR/raw/research/stale-reaper"
+TODO_FILE="$HEX_DIR/todo.md"
+REPORT_DIR="$HEX_DIR/raw/research/stale-reaper"
 REPORT_FILE="$REPORT_DIR/$TODAY.md"
 
 mkdir -p "$REPORT_DIR"

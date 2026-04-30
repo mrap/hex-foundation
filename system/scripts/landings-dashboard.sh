@@ -4,28 +4,28 @@
 # Usage: bash landings-dashboard.sh --watch
 #    or: watch -t -n 2 -c bash landings-dashboard.sh
 
-# Auto-detect AGENT_DIR: walk up from script location to find CLAUDE.md
+# Auto-detect HEX_DIR: walk up from script location to find CLAUDE.md
 # Resolve before any cd changes the working directory
-if [ -z "${AGENT_DIR:-}" ]; then
+if [ -z "${HEX_DIR:-}" ]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   candidate="$SCRIPT_DIR"
   while [ "$candidate" != "/" ]; do
     if [ -f "$candidate/CLAUDE.md" ]; then
-      AGENT_DIR="$candidate"
+      HEX_DIR="$candidate"
       break
     fi
     candidate="$(dirname "$candidate")"
   done
-  AGENT_DIR="${AGENT_DIR:-$HOME/hex}"
+  HEX_DIR="${HEX_DIR:-$HOME/hex}"
 fi
 
 # Use configured timezone from .hex/timezone (if set)
-if [ -z "${TZ:-}" ] && [ -f "$AGENT_DIR/.hex/timezone" ]; then
-  TZ="$(cat "$AGENT_DIR/.hex/timezone" | tr -d '[:space:]')"; export TZ
+if [ -z "${TZ:-}" ] && [ -f "$HEX_DIR/.hex/timezone" ]; then
+  TZ="$(cat "$HEX_DIR/.hex/timezone" | tr -d '[:space:]')"; export TZ
 fi
 
 TODAY=$(date +%Y-%m-%d)
-FILE="$AGENT_DIR/landings/$TODAY.md"
+FILE="$HEX_DIR/landings/$TODAY.md"
 MAX=50
 
 # Colors — ANSI codes
@@ -42,7 +42,7 @@ TEXT="\033[90m"
 RESET="\033[0m"
 
 if [[ "${1:-}" == "--watch" ]]; then
-  exec watch -t -n 2 -c "AGENT_DIR='$AGENT_DIR' bash '$0'"
+  exec watch -t -n 2 -c "HEX_DIR='$HEX_DIR' bash '$0'"
 fi
 
 # Truncate helper
@@ -62,7 +62,7 @@ SHOW_WEEKLY="${SHOW_WEEKLY:-false}"
 echo -e "${BOLD}${MAUVE}═══ LANDINGS $(date +%a\ %b\ %d) ═══${RESET}"
 
 # Current mission
-MISSION_FILE="$AGENT_DIR/.hex/mission"
+MISSION_FILE="$HEX_DIR/.hex/mission"
 if [[ -f "$MISSION_FILE" ]]; then
   MISSION=$(head -1 "$MISSION_FILE")
   if [[ -n "$MISSION" ]]; then
@@ -75,7 +75,7 @@ echo ""
 if [[ "$SHOW_WEEKLY" == "true" ]]; then
   WEEK_NUM=$(date +%V)
   YEAR=$(date +%G)
-  WEEKLY_FILE="$AGENT_DIR/landings/weekly/${YEAR}-W${WEEK_NUM}.md"
+  WEEKLY_FILE="$HEX_DIR/landings/weekly/${YEAR}-W${WEEK_NUM}.md"
 
   if [[ -f "$WEEKLY_FILE" ]]; then
     echo -e "${LAVENDER}── W${WEEK_NUM} Targets ──${RESET}"

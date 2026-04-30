@@ -5,14 +5,14 @@
 set -uo pipefail
 
 CLAUDE_BIN="$HOME/.local/bin/claude"
-AGENT_DIR="${AGENT_DIR:-${AGENT_DIR:-$HOME/hex}}"
-REPORT_DIR="$AGENT_DIR/raw/research/introspection"
-LOG_DIR="$AGENT_DIR/raw/research/introspection/logs"
+HEX_DIR="${HEX_DIR:-${HEX_DIR:-$HOME/hex}}"
+REPORT_DIR="$HEX_DIR/raw/research/introspection"
+LOG_DIR="$HEX_DIR/raw/research/introspection/logs"
 mkdir -p "$REPORT_DIR" "$LOG_DIR"
 
 # Use configured timezone (SO #17)
-if [ -z "${TZ:-}" ] && [ -f "$AGENT_DIR/.hex/timezone" ]; then
-  TZ="$(tr -d '[:space:]' < "$AGENT_DIR/.hex/timezone")"; export TZ
+if [ -z "${TZ:-}" ] && [ -f "$HEX_DIR/.hex/timezone" ]; then
+  TZ="$(tr -d '[:space:]' < "$HEX_DIR/.hex/timezone")"; export TZ
 fi
 DATE=$(date +%Y-%m-%d)
 REPORT="$REPORT_DIR/$DATE.md"
@@ -28,14 +28,14 @@ if [ ! -x "$CLAUDE_BIN" ]; then
     exit 1
 fi
 
-PROMPT="You are hex's system introspection agent. Perform a thorough nightly audit. Your working directory is $AGENT_DIR.
+PROMPT="You are hex's system introspection agent. Perform a thorough nightly audit. Your working directory is $HEX_DIR.
 
 Audit checklist:
 1. Log Audit: Read the last 50 lines of the 3 most recent files in ~/.boi/logs/ and ~/github.com/mrap/hex-events/daemon.log. Flag errors, crashes, recurring warnings.
 2. Repo Hygiene: For each repo in ~/github.com/mrap/ (hex, hex-core, hex-ui, hex-events, boi), run git status --short. Flag uncommitted changes.
-3. Daemon Health: Run bash $AGENT_DIR/.hex/scripts/hex-daemons.sh status. Flag daemons down.
-4. Research Feed Health: Check $AGENT_DIR/raw/research/bookmarks/ and $AGENT_DIR/raw/research/scout/ for files modified in last 48h.
-5. Stale Work: Check $AGENT_DIR/todo.md for items with stale since older than 30 days.
+3. Daemon Health: Run bash $HEX_DIR/.hex/scripts/hex-daemons.sh status. Flag daemons down.
+4. Research Feed Health: Check $HEX_DIR/raw/research/bookmarks/ and $HEX_DIR/raw/research/scout/ for files modified in last 48h.
+5. Stale Work: Check $HEX_DIR/todo.md for items with stale since older than 30 days.
 
 Output a markdown report with: date, issues found (CRITICAL/WARNING/INFO), recommendations, and a health score 1-10. Be concise — max 100 lines."
 

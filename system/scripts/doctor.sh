@@ -20,6 +20,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # HEX_DIR may be injected by the caller (e.g. in tests); fall back to the
 # directory two levels above this script (.hex/scripts/ → .hex/ → HEX_DIR/).
 HEX_DIR="${HEX_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+
+if [[ ! -f "$HEX_DIR/CLAUDE.md" ]] && [[ ! -f "$HEX_DIR/AGENTS.md" ]]; then
+  echo "ERROR: HEX_DIR=$HEX_DIR does not contain CLAUDE.md — not a valid hex workspace" >&2
+  echo "  Fix: export HEX_DIR=\$HOME/hex  (or wherever hex is installed)" >&2
+  exit 1
+fi
+
+if ! grep -q 'export HEX_DIR=' "$HOME/.zshrc" 2>/dev/null && \
+   ! grep -q 'export HEX_DIR=' "$HOME/.bashrc" 2>/dev/null; then
+  echo "WARN: HEX_DIR not exported in shell rc — hex may not start in new terminals" >&2
+  echo "  Fix: echo 'export HEX_DIR=\"$HEX_DIR\"' >> ~/.zshrc" >&2
+fi
+
 HEX_SYSTEM_DIR="$HEX_DIR/.hex"
 SCRIPTS_DIR="$HEX_SYSTEM_DIR/scripts"
 
@@ -758,18 +771,18 @@ check_21() {
 }
 
 check_23() {
-  if [[ -z "${AGENT_DIR:-}" ]]; then
-    _error "AGENT_DIR not set — add 'export AGENT_DIR=\"\$HEX_DIR\"' to your shell rc"
-    _rec 23 "agent-dir-set" "error" "AGENT_DIR not exported"
+  if [[ -z "${HEX_DIR:-}" ]]; then
+    _error "HEX_DIR not set — add 'export HEX_DIR=\"\$HEX_DIR\"' to your shell rc"
+    _rec 23 "hex-dir-set" "error" "HEX_DIR not exported"
     return
   fi
-  if [[ ! -d "$AGENT_DIR/.hex" ]]; then
-    _error "AGENT_DIR=$AGENT_DIR does not contain .hex/ — wrong path"
-    _rec 23 "agent-dir-set" "error" "invalid path"
+  if [[ ! -d "$HEX_DIR/.hex" ]]; then
+    _error "HEX_DIR=$HEX_DIR does not contain .hex/ — wrong path"
+    _rec 23 "hex-dir-set" "error" "invalid path"
     return
   fi
-  _pass "AGENT_DIR=$AGENT_DIR"
-  _rec 23 "agent-dir-set" "pass" "$AGENT_DIR"
+  _pass "HEX_DIR=$HEX_DIR"
+  _rec 23 "hex-dir-set" "pass" "$HEX_DIR"
 }
 
 check_22() {

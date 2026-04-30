@@ -5,20 +5,20 @@
 # JSON operations use python3 stdlib only.
 set -u
 
-if [ -z "${AGENT_DIR:-}" ]; then
+if [ -z "${HEX_DIR:-}" ]; then
   _ctx_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   _ctx_candidate="$_ctx_lib_dir"
   while [ "$_ctx_candidate" != "/" ]; do
     if [ -f "$_ctx_candidate/CLAUDE.md" ]; then
-      AGENT_DIR="$_ctx_candidate"
+      HEX_DIR="$_ctx_candidate"
       break
     fi
     _ctx_candidate="$(dirname "$_ctx_candidate")"
   done
-  AGENT_DIR="${AGENT_DIR:-$HOME/hex}"
+  HEX_DIR="${HEX_DIR:-$HOME/hex}"
   unset _ctx_lib_dir _ctx_candidate
 fi
-HEX_CONTEXTS_JSON="${HEX_CONTEXTS_JSON:-$AGENT_DIR/.hex/hex-contexts.json}"
+HEX_CONTEXTS_JSON="${HEX_CONTEXTS_JSON:-$HEX_DIR/.hex/hex-contexts.json}"
 
 # --- Internal helpers ---
 

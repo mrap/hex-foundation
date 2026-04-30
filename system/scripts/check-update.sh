@@ -12,8 +12,8 @@ set -uo pipefail
 
 # ─── Resolve paths ───────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-CLAUDE_DIR="$AGENT_DIR/.hex"
+HEX_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CLAUDE_DIR="$HEX_DIR/.hex"
 CONFIG_FILE="$CLAUDE_DIR/upgrade.json"
 UPDATE_CHECKED="$CLAUDE_DIR/.update-checked"
 UPDATE_AVAILABLE="$CLAUDE_DIR/.update-available"

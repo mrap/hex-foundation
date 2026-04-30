@@ -13,28 +13,28 @@
 set -uo pipefail
 
 # Source shared environment so we have the same PATH/env as interactive shell
-HEX_ENV="${AGENT_DIR:-${AGENT_DIR:-$HOME/hex}}/.hex/scripts/env.sh"
+HEX_ENV="${HEX_DIR:-${HEX_DIR:-$HOME/hex}}/.hex/scripts/env.sh"
 [ -f "$HEX_ENV" ] && source "$HEX_ENV"
 
-# ─── Resolve AGENT_DIR ────────────────────────────────────────────────────────
-AGENT_DIR="${AGENT_DIR:-}"
-if [ -z "$AGENT_DIR" ]; then
+# ─── Resolve HEX_DIR ────────────────────────────────────────────────────────
+HEX_DIR="${HEX_DIR:-}"
+if [ -z "$HEX_DIR" ]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   # Walk up from scripts/ to find CLAUDE.md (agent root)
   candidate="$(dirname "$SCRIPT_DIR")"
   while [ "$candidate" != "/" ]; do
     if [ -f "$candidate/CLAUDE.md" ]; then
-      AGENT_DIR="$candidate"
+      HEX_DIR="$candidate"
       break
     fi
     candidate="$(dirname "$candidate")"
   done
-  AGENT_DIR="${AGENT_DIR:-${AGENT_DIR:-$HOME/hex}}"
+  HEX_DIR="${HEX_DIR:-${HEX_DIR:-$HOME/hex}}"
 fi
 
-HEX_CHECKS_DIR="$AGENT_DIR/.hex/scripts"
+HEX_CHECKS_DIR="$HEX_DIR/.hex/scripts"
 HEX_DOCTOR="$HEX_CHECKS_DIR/doctor.sh"
-ALERT_DIR="$AGENT_DIR/.hex"
+ALERT_DIR="$HEX_DIR/.hex"
 ALERT_FILE="$ALERT_DIR/doctor-alert"
 
 # Ensure .hex dir exists
@@ -50,7 +50,7 @@ fi
 # If an agent self-halted via circuit breaker, verify the underlying issue is
 # fixed (claude binary reachable via env.sh), then remove HALT to let it retry.
 # Agent list is discovered from charters via hex-agent list — no hardcoded IDs.
-HEX_AGENT="$AGENT_DIR/.hex/bin/hex"
+HEX_AGENT="$HEX_DIR/.hex/bin/hex"
 if [ ! -x "$HEX_AGENT" ]; then
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] hex-agent binary not found at $HEX_AGENT — skipping agent recovery" >&2
 fi

@@ -11,9 +11,9 @@ set -uo pipefail
 
 # ─── Resolve paths ───────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-PROJECTS_DIR="$AGENT_DIR/projects"
-LEDGER="$AGENT_DIR/.hex/cost/ledger.jsonl"
+HEX_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PROJECTS_DIR="$HEX_DIR/projects"
+LEDGER="$HEX_DIR/.hex/cost/ledger.jsonl"
 EVOLUTION_DIR="$PROJECTS_DIR/fleet-lead/evolution"
 BOARD="$PROJECTS_DIR/fleet-lead/board.md"
 TODAY="$(date +%Y-%m-%d)"

@@ -28,9 +28,9 @@ for arg in "$@"; do
 done
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
-# Derive AGENT_DIR from this script's location: scripts/ → hex/
-AGENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-CLAUDE_DIR="$AGENT_DIR/.claude"
+# Derive HEX_DIR from this script's location: scripts/ → hex/
+HEX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+CLAUDE_DIR="$HEX_DIR/.claude"
 
 # ─── State ────────────────────────────────────────────────────────────────────
 PASS_COUNT=0
@@ -92,7 +92,7 @@ source "$CHECKS_DIR/startup.sh"
 echo ""
 echo -e "${BOLD}Startup Module — Health Check${RESET}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo -e "${DIM}AGENT_DIR=$AGENT_DIR${RESET}"
+echo -e "${DIM}HEX_DIR=$HEX_DIR${RESET}"
 echo ""
 
 run_startup_checks

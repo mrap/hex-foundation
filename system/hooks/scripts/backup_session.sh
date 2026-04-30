@@ -10,13 +10,13 @@ PROJECTS_DIR="$HOME/.claude/projects"
 # Resolve agent root from script location (.hex/hooks/scripts/)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "$SCRIPT_DIR" == */.hex/hooks/scripts ]]; then
-    AGENT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+    HEX_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 elif [[ "$SCRIPT_DIR" == */hooks/scripts ]]; then
-    AGENT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+    HEX_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 else
-    AGENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+    HEX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 fi
-BACKUP_DIR="$AGENT_DIR/raw/transcripts"
+BACKUP_DIR="$HEX_DIR/raw/transcripts"
 
 mkdir -p "$BACKUP_DIR"
 

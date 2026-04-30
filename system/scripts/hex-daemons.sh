@@ -28,8 +28,8 @@ _init_daemons() {
 
 # ─── Agent Dir (resolved from script location) ──────────────────────────────
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_AGENT_DIR="$(cd "$_SCRIPT_DIR/../.." && pwd)"
-_LOG_DIR="$_AGENT_DIR/.hex/logs"
+_HEX_DIR="$(cd "$_SCRIPT_DIR/../.." && pwd)"
+_LOG_DIR="$_HEX_DIR/.hex/logs"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 GREEN='\033[32m'

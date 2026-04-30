@@ -24,8 +24,8 @@ fi
 API="${HEX_URL:-https://localhost}/visions/api/comments"
 LOG="/tmp/hex-ui-feedback-loop.log"
 LOCK="/tmp/hex-ui-feedback-loop.lock"
-PROMPT_FILE="${AGENT_DIR:-$HOME/hex}/.hex/scripts/hex-ui-feedback-loop-prompt.txt"
-PROJECT_DIR="${AGENT_DIR:-$HOME/hex}"
+PROMPT_FILE="${HEX_DIR:-$HOME/hex}/.hex/scripts/hex-ui-feedback-loop-prompt.txt"
+PROJECT_DIR="${HEX_DIR:-$HOME/hex}"
 
 # Simple lock so concurrent ticks don't race
 if [ -e "$LOCK" ]; then

@@ -15,20 +15,20 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECKS_DIR="$SCRIPT_DIR/doctor-checks"
 
-# ─── Resolve AGENT_DIR ────────────────────────────────────────────────────────
-if [ -z "${AGENT_DIR:-}" ]; then
+# ─── Resolve HEX_DIR ────────────────────────────────────────────────────────
+if [ -z "${HEX_DIR:-}" ]; then
   candidate="$SCRIPT_DIR"
   while [ "$candidate" != "/" ]; do
     if [ -f "$candidate/CLAUDE.md" ]; then
-      AGENT_DIR="$candidate"
+      HEX_DIR="$candidate"
       break
     fi
     candidate="$(dirname "$candidate")"
   done
-  AGENT_DIR="${AGENT_DIR:-${AGENT_DIR:-$HOME/hex}}"
+  HEX_DIR="${HEX_DIR:-${HEX_DIR:-$HOME/hex}}"
 fi
 
-CLAUDE_DIR="$AGENT_DIR/.claude"
+CLAUDE_DIR="$HEX_DIR/.claude"
 
 # ─── Flags ────────────────────────────────────────────────────────────────────
 FIX=false
@@ -106,7 +106,7 @@ source "$CHECKS_DIR/memory.sh"
 echo ""
 echo -e "${BOLD}Memory Module — Health Check${RESET}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo -e "${DIM}AGENT_DIR=$AGENT_DIR${RESET}"
+echo -e "${DIM}HEX_DIR=$HEX_DIR${RESET}"
 echo ""
 
 run_memory_checks

@@ -10,9 +10,9 @@ set -uo pipefail
 PASS=0
 FAIL=0
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HEX_DIR="${AGENT_DIR:-${HEX_DIR:-$(cd "$_SCRIPT_DIR/../.." && pwd)}}"
+HEX_DIR="${HEX_DIR:-${HEX_DIR:-$(cd "$_SCRIPT_DIR/../.." && pwd)}}"
 export HEX_DIR
-export AGENT_DIR="$HEX_DIR"
+export HEX_DIR="$HEX_DIR"
 ENV_SH="$HEX_DIR/.hex/scripts/env.sh"
 
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -155,7 +155,7 @@ fi
 # ── 9. Watchdog script runs and finds doctor.sh ─────────────────────────────
 bold "9. Watchdog finds and runs doctor.sh"
 
-WD_OUT=$(AGENT_DIR="$HEX_DIR" bash "$HEX_DIR/.hex/scripts/hex-doctor-watchdog.sh" 2>&1)
+WD_OUT=$(HEX_DIR="$HEX_DIR" bash "$HEX_DIR/.hex/scripts/hex-doctor-watchdog.sh" 2>&1)
 WD_RC=$?
 if [ $WD_RC -eq 0 ]; then
   assert_pass "watchdog ran clean (exit 0)"

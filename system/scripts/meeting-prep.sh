@@ -14,32 +14,32 @@ set -uo pipefail
 
 # --- Resolve agent directory ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENT_DIR=""
+HEX_DIR=""
 candidate="$SCRIPT_DIR"
 while [ "$candidate" != "/" ]; do
   if [ -f "$candidate/CLAUDE.md" ]; then
-    AGENT_DIR="$candidate"
+    HEX_DIR="$candidate"
     break
   fi
   candidate="$(dirname "$candidate")"
 done
 
-if [ -z "${AGENT_DIR:-}" ]; then
+if [ -z "${HEX_DIR:-}" ]; then
   echo "Error: Could not find CLAUDE.md." >&2
   exit 1
 fi
 
 # --- LLM CLI abstraction ---
-source "$AGENT_DIR/.hex/scripts/llm-cli.sh"
+source "$HEX_DIR/.hex/scripts/llm-cli.sh"
 
 # --- Config ---
-TZ_FILE="$AGENT_DIR/.hex/timezone"
-PREP_DIR="$AGENT_DIR/raw/meeting-prep"
+TZ_FILE="$HEX_DIR/.hex/timezone"
+PREP_DIR="$HEX_DIR/raw/meeting-prep"
 DONE_FILE="$PREP_DIR/.prepped-today.json"
 LOG_FILE="$PREP_DIR/.meeting-prep.log"
 TODAY="$(date +%Y-%m-%d)"
 TG_CONFIG="${HOME}/.config/hex/telegram.yaml"
-NTFY_SCRIPT="$AGENT_DIR/.hex/scripts/hex-notify.sh"
+NTFY_SCRIPT="$HEX_DIR/.hex/scripts/hex-notify.sh"
 
 TZ_NAME="America/New_York"
 if [ -f "$TZ_FILE" ]; then
@@ -55,7 +55,7 @@ log "=== Starting ==="
 
 # --- Cron install helper ---
 if [[ "${1:-}" == "--cron-install" ]]; then
-    CRON_LINE="*/30 * * * * cd ${AGENT_DIR} && bash .hex/scripts/meeting-prep.sh >> /dev/null 2>&1"
+    CRON_LINE="*/30 * * * * cd ${HEX_DIR} && bash .hex/scripts/meeting-prep.sh >> /dev/null 2>&1"
     if crontab -l 2>/dev/null | grep -qF "meeting-prep.sh"; then
         echo "Cron entry already exists."
     else
@@ -140,7 +140,7 @@ _Space for notes during the meeting_
     printf '%s' "$MOCK_RESPONSE" > "$RESPONSE_TMP"
 
     # Run the Python parser with test env vars
-    export AGENT_DIR="$TEST_DIR"
+    export HEX_DIR="$TEST_DIR"
     export TODAY="$TEST_TODAY"
     export PREP_DIR="$TEST_PREP_DIR"
     export DONE_FILE="$TEST_DONE_FILE"
@@ -175,7 +175,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_DIR = os.environ["AGENT_DIR"]
+HEX_DIR = os.environ["HEX_DIR"]
 TODAY = os.environ["TODAY"]
 PREP_DIR = os.environ["PREP_DIR"]
 DONE_FILE = os.environ["DONE_FILE"]
@@ -256,7 +256,7 @@ for m in meetings:
     # Determine output directory: project dir or raw/meeting-prep
     out_dir = PREP_DIR
     if project and project != "none":
-        proj_dir = os.path.join(AGENT_DIR, "projects", project)
+        proj_dir = os.path.join(HEX_DIR, "projects", project)
         if os.path.isdir(proj_dir):
             proj_meetings = os.path.join(proj_dir, "meetings")
             os.makedirs(proj_meetings, exist_ok=True)
@@ -445,8 +445,8 @@ fi
 
 # --- Gather context ---
 PEOPLE_CTX=""
-if [ -d "$AGENT_DIR/people" ]; then
-    for p in "$AGENT_DIR"/people/*/profile.md; do
+if [ -d "$HEX_DIR/people" ]; then
+    for p in "$HEX_DIR"/people/*/profile.md; do
         [ -f "$p" ] || continue
         NAME=$(basename "$(dirname "$p")")
         PEOPLE_CTX="${PEOPLE_CTX}
@@ -457,7 +457,7 @@ $(head -30 "$p")
 fi
 
 TODO_CTX=""
-[ -f "$AGENT_DIR/todo.md" ] && TODO_CTX=$(head -100 "$AGENT_DIR/todo.md")
+[ -f "$HEX_DIR/todo.md" ] && TODO_CTX=$(head -100 "$HEX_DIR/todo.md")
 
 # Already-prepped event IDs
 ALREADY=""
@@ -472,7 +472,7 @@ except: print('')
 fi
 
 # Project names for matching
-PROJECTS=$(ls -1 "$AGENT_DIR/projects/" 2>/dev/null | tr '\n' ', ')
+PROJECTS=$(ls -1 "$HEX_DIR/projects/" 2>/dev/null | tr '\n' ', ')
 
 # Time range
 NOW_ISO=$(date +%Y-%m-%dT%H:%M:%S)
@@ -556,7 +556,7 @@ RESPONSE=$(
     for var in $(env | grep '^CLAUDE' | cut -d= -f1); do
         unset "$var"
     done
-    cd "$AGENT_DIR"
+    cd "$HEX_DIR"
     timeout 90 llm_exec "$(cat "$PROMPT_TMP")" 2>/dev/null
 ) || {
     EXIT_CODE=$?
@@ -583,7 +583,7 @@ fi
 RESPONSE_TMP="$PREP_DIR/.response.tmp"
 printf '%s' "$RESPONSE" > "$RESPONSE_TMP"
 
-export AGENT_DIR TODAY PREP_DIR DONE_FILE TG_CONFIG NTFY_SCRIPT LOG_FILE
+export HEX_DIR TODAY PREP_DIR DONE_FILE TG_CONFIG NTFY_SCRIPT LOG_FILE
 
 python3 << 'PYEOF'
 import json
@@ -596,7 +596,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_DIR = os.environ["AGENT_DIR"]
+HEX_DIR = os.environ["HEX_DIR"]
 TODAY = os.environ["TODAY"]
 PREP_DIR = os.environ["PREP_DIR"]
 DONE_FILE = os.environ["DONE_FILE"]
@@ -677,7 +677,7 @@ for m in meetings:
     # Determine output directory: project dir or raw/meeting-prep
     out_dir = PREP_DIR
     if project and project != "none":
-        proj_dir = os.path.join(AGENT_DIR, "projects", project)
+        proj_dir = os.path.join(HEX_DIR, "projects", project)
         if os.path.isdir(proj_dir):
             proj_meetings = os.path.join(proj_dir, "meetings")
             os.makedirs(proj_meetings, exist_ok=True)

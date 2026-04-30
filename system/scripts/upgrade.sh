@@ -16,6 +16,12 @@ set -uo pipefail
 # ─── Resolve paths ───────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HEX_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+if [[ ! -f "$HEX_DIR/CLAUDE.md" ]] && [[ ! -f "$HEX_DIR/AGENTS.md" ]]; then
+  echo "ERROR: Cannot determine hex workspace. Set HEX_DIR or run from within your hex directory." >&2
+  exit 1
+fi
+
 HEX_DOTDIR="$HEX_DIR/.hex"
 CACHE_DIR="$HEX_DOTDIR/.upgrade-cache"
 CONFIG_FILE="$HEX_DOTDIR/upgrade.json"
@@ -760,14 +766,14 @@ if [ -n "$RC_FILE" ]; then
     pass "Removed old hex alias from $RC_FILE"
   fi
 
-  # --- AGENT_DIR + HEX_DIR ---
-  if grep -q 'export AGENT_DIR=' "$RC_FILE" 2>/dev/null; then
-    pass "AGENT_DIR already in $RC_FILE"
+  # --- HEX_DIR (primary) + AGENT_DIR (deprecated alias) ---
+  if grep -q 'export HEX_DIR=' "$RC_FILE" 2>/dev/null; then
+    pass "HEX_DIR already in $RC_FILE"
   else
     echo "" >> "$RC_FILE"
     echo "export HEX_DIR=\"$HEX_DIR\"" >> "$RC_FILE"
-    echo 'export AGENT_DIR="$HEX_DIR"' >> "$RC_FILE"
-    pass "Added AGENT_DIR + HEX_DIR to $RC_FILE"
+    echo 'export AGENT_DIR="$HEX_DIR"  # deprecated alias — use HEX_DIR' >> "$RC_FILE"
+    pass "Added HEX_DIR + AGENT_DIR (deprecated alias) to $RC_FILE"
   fi
 
   # --- hex binary on PATH ---

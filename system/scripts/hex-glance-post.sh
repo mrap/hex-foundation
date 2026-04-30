@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-AGENT_DIR="${AGENT_DIR:-${AGENT_DIR:-$HOME/hex}}"
+HEX_DIR="${HEX_DIR:-${HEX_DIR:-$HOME/hex}}"
 PROJECT_ID="${1:-}"
 CHANNEL_ID="${2:-}"
 
@@ -10,7 +10,7 @@ if [[ -z "$PROJECT_ID" || -z "$CHANNEL_ID" ]]; then
   exit 1
 fi
 
-SECRETS_FILE="$AGENT_DIR/.hex/secrets/slack-bot.env"
+SECRETS_FILE="$HEX_DIR/.hex/secrets/slack-bot.env"
 if [[ ! -f "$SECRETS_FILE" ]]; then
   echo "ERROR: secrets file not found: $SECRETS_FILE" >&2
   exit 1
@@ -18,13 +18,13 @@ fi
 # shellcheck source=/dev/null
 source "$SECRETS_FILE"
 
-PINS_DIR="$AGENT_DIR/.hex/runtime/glance-pins"
+PINS_DIR="$HEX_DIR/.hex/runtime/glance-pins"
 mkdir -p "$PINS_DIR"
 
 PIN_FILE="$PINS_DIR/${CHANNEL_ID}.json"
 
 # Get state JSON
-STATE_JSON=$(AGENT_DIR="$AGENT_DIR" bash "$AGENT_DIR/.hex/scripts/hex-glance-derivation.sh" "$PROJECT_ID")
+STATE_JSON=$(HEX_DIR="$HEX_DIR" bash "$HEX_DIR/.hex/scripts/hex-glance-derivation.sh" "$PROJECT_ID")
 
 # Build Block Kit payload + decide post vs update, all in python
 RESULT=$(SLACK_TOKEN="$MRAP_HEX_SLACK_BOT_TOKEN" python3 - \

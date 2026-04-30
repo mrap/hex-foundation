@@ -15,26 +15,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 candidate="$SCRIPT_DIR"
 while [ "$candidate" != "/" ]; do
   if [ -f "$candidate/CLAUDE.md" ]; then
-    AGENT_DIR="$candidate"
+    HEX_DIR="$candidate"
     break
   fi
   candidate="$(dirname "$candidate")"
 done
 
-if [ -z "${AGENT_DIR:-}" ]; then
+if [ -z "${HEX_DIR:-}" ]; then
   echo "Error: Could not find CLAUDE.md. Run this from your hex directory."
   exit 1
 fi
 
 # ─── Load LLM CLI abstraction ────────────────────────────────────────────────
-source "$AGENT_DIR/.hex/scripts/llm-cli.sh"
+source "$HEX_DIR/.hex/scripts/llm-cli.sh"
 
-DASHBOARD="$AGENT_DIR/.hex/scripts/landings-dashboard.sh"
-CAPTURE_PANE="$AGENT_DIR/.hex/scripts/capture-pane.sh"
-HEX_WATCHER="$AGENT_DIR/.hex/scripts/hex-watcher"
-HEX_BOT="$AGENT_DIR/.hex/scripts/hex-bot"
-HEX_PICKER="$AGENT_DIR/.hex/scripts/hex-picker.sh"
-HEX_CONTEXT_STATUS="$AGENT_DIR/.hex/scripts/hex-context-status.sh"
+DASHBOARD="$HEX_DIR/.hex/scripts/landings-dashboard.sh"
+CAPTURE_PANE="$HEX_DIR/.hex/scripts/capture-pane.sh"
+HEX_WATCHER="$HEX_DIR/.hex/scripts/hex-watcher"
+HEX_BOT="$HEX_DIR/.hex/scripts/hex-bot"
+HEX_PICKER="$HEX_DIR/.hex/scripts/hex-picker.sh"
+HEX_CONTEXT_STATUS="$HEX_DIR/.hex/scripts/hex-context-status.sh"
 SESSION_NAME="hex"
 DASH_WIDTH="10%"
 BOI_BIN="$HOME/.local/bin/boi"
@@ -60,12 +60,12 @@ if [ -n "${TMUX:-}" ]; then
     PANE_COUNT=$(tmux list-panes | wc -l | tr -d ' ')
     if [ "$PANE_COUNT" -eq 1 ]; then
       # Split and launch dashboard
-      tmux split-window -h -l "$DASH_WIDTH" "AGENT_DIR='$AGENT_DIR' bash '$DASHBOARD' --watch"
+      tmux split-window -h -l "$DASH_WIDTH" "HEX_DIR='$HEX_DIR' bash '$DASHBOARD' --watch"
       # Split dashboard pane to create BOI status pane below it (if boi is installed)
       W=$(first_win)
       DASH_PANE=$(tmux list-panes -t "$SESSION_NAME:$W" -F '#{pane_index}' | tail -1)
       if [ -x "$BOI_BIN" ]; then
-        tmux split-window -t "$SESSION_NAME:$W.$DASH_PANE" -v -l 35% -c "$AGENT_DIR" \
+        tmux split-window -t "$SESSION_NAME:$W.$DASH_PANE" -v -l 35% -c "$HEX_DIR" \
           "'$BOI_BIN' status --compact"
       fi
       MAIN_PANE=$(tmux list-panes -t "$SESSION_NAME:$W" -F '#{pane_index}' | head -1)
@@ -74,7 +74,7 @@ if [ -n "${TMUX:-}" ]; then
       # Dashboard exists but no BOI pane — add it
       W=$(first_win)
       DASH_PANE=$(tmux list-panes -t "$SESSION_NAME:$W" -F '#{pane_index}' | tail -1)
-      tmux split-window -t "$SESSION_NAME:$W.$DASH_PANE" -v -l 35% -c "$AGENT_DIR" \
+      tmux split-window -t "$SESSION_NAME:$W.$DASH_PANE" -v -l 35% -c "$HEX_DIR" \
         "'$BOI_BIN' status --compact"
     fi
     # If claude isn't running in the main pane, start it
@@ -105,20 +105,20 @@ esac
 # Claude Code: pass '/hex-startup' as initial prompt (triggers slash command)
 # Codex: pass as initial prompt (Codex reads AGENTS.md for startup instructions)
 CLI_NAME="$(llm_cli_name)"
-tmux new-session -d -s "$SESSION_NAME" -c "$AGENT_DIR" "$SHELL_CMD \"$CLI_NAME '/hex-startup'\""
+tmux new-session -d -s "$SESSION_NAME" -c "$HEX_DIR" "$SHELL_CMD \"$CLI_NAME '/hex-startup'\""
 
 # Split right pane for dashboard
 # Note: sleep between splits to let tmux stabilize dimensions before
 # programs start rendering. Without this, content renders at pre-split
 # widths and appears cut off until the first refresh cycle.
-tmux split-window -h -t "$SESSION_NAME" -l "$DASH_WIDTH" -c "$AGENT_DIR" \
-  "sleep 0.5 && AGENT_DIR='$AGENT_DIR' bash '$DASHBOARD' --watch"
+tmux split-window -h -t "$SESSION_NAME" -l "$DASH_WIDTH" -c "$HEX_DIR" \
+  "sleep 0.5 && HEX_DIR='$HEX_DIR' bash '$DASHBOARD' --watch"
 
 # Split dashboard pane to create BOI status pane below it (if boi is installed)
 W=$(first_win)
 DASH_PANE=$(tmux list-panes -t "$SESSION_NAME:$W" -F '#{pane_index}' | tail -1)
 if [ -x "$BOI_BIN" ]; then
-  tmux split-window -t "$SESSION_NAME:$W.$DASH_PANE" -v -l 35% -c "$AGENT_DIR" \
+  tmux split-window -t "$SESSION_NAME:$W.$DASH_PANE" -v -l 35% -c "$HEX_DIR" \
     "sleep 0.5 && '$BOI_BIN' status --compact"
 fi
 
@@ -127,7 +127,7 @@ MAIN_PANE=$(tmux list-panes -t "$SESSION_NAME:$W" -F '#{pane_index}' | head -1)
 tmux select-pane -t "$SESSION_NAME:$W.$MAIN_PANE"
 
 # ─── Register "main" context and bind workspace picker hotkey ────────────────
-(source "$AGENT_DIR/.hex/scripts/hex-context-lib.sh" && ctx_register "main") || true
+(source "$HEX_DIR/.hex/scripts/hex-context-lib.sh" && ctx_register "main") || true
 if [ -f "$HEX_PICKER" ]; then
   tmux bind-key -T root "C-\\" run-shell "bash '$HEX_PICKER'"
 fi

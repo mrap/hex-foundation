@@ -4,20 +4,20 @@
 # Active context gets asterisk. Must run in <100ms.
 set -uo pipefail
 
-if [ -z "${AGENT_DIR:-}" ]; then
+if [ -z "${HEX_DIR:-}" ]; then
   _ctx_status_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   _ctx_candidate="$_ctx_status_dir"
   while [ "$_ctx_candidate" != "/" ]; do
     if [ -f "$_ctx_candidate/CLAUDE.md" ]; then
-      AGENT_DIR="$_ctx_candidate"
+      HEX_DIR="$_ctx_candidate"
       break
     fi
     _ctx_candidate="$(dirname "$_ctx_candidate")"
   done
-  AGENT_DIR="${AGENT_DIR:-$HOME/hex}"
+  HEX_DIR="${HEX_DIR:-$HOME/hex}"
   unset _ctx_status_dir _ctx_candidate
 fi
-HEX_CONTEXTS_JSON="${HEX_CONTEXTS_JSON:-$AGENT_DIR/.hex/hex-contexts.json}"
+HEX_CONTEXTS_JSON="${HEX_CONTEXTS_JSON:-$HEX_DIR/.hex/hex-contexts.json}"
 
 if [[ ! -f "$HEX_CONTEXTS_JSON" ]]; then
   echo "[main*]"

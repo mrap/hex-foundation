@@ -51,8 +51,8 @@ fi
 
 # Generate filename and timestamp
 # Use configured timezone from .hex/timezone (if set)
-if [ -z "${TZ:-}" ] && [ -f "$AGENT_DIR/.hex/timezone" ]; then
-  TZ="$(cat "$AGENT_DIR/.hex/timezone" | tr -d '[:space:]')"; export TZ
+if [ -z "${TZ:-}" ] && [ -f "$HEX_DIR/.hex/timezone" ]; then
+  TZ="$(cat "$HEX_DIR/.hex/timezone" | tr -d '[:space:]')"; export TZ
 fi
 TIMESTAMP="$(date '+%Y-%m-%dT%H:%M:%S')"
 FILENAME="$(date '+%Y-%m-%d_%H-%M-%S').md"

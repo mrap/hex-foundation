@@ -10,9 +10,9 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-PROJECTS_DIR="$AGENT_DIR/projects"
-OKR_FILE="$AGENT_DIR/okrs/personal/2026-Q2.md"
+HEX_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PROJECTS_DIR="$HEX_DIR/projects"
+OKR_FILE="$HEX_DIR/okrs/personal/2026-Q2.md"
 TODAY="$(date +%Y-%m-%d)"
 REPORT_DIR="$PROJECTS_DIR/fleet-lead"
 REPORT="$REPORT_DIR/goal-alignment-${TODAY}.md"

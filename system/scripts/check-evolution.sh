@@ -13,13 +13,13 @@ set -uo pipefail
 
 # ─── Resolve paths ──────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-EVOLUTION_DB="$AGENT_DIR/.hex/skills/memory/scripts/evolution_db.py"
-SUGGESTIONS="$AGENT_DIR/evolution/suggestions.md"
+HEX_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+EVOLUTION_DB="$HEX_DIR/.hex/skills/memory/scripts/evolution_db.py"
+SUGGESTIONS="$HEX_DIR/evolution/suggestions.md"
 
 # Use configured timezone (SO #17)
-if [ -z "${TZ:-}" ] && [ -f "$AGENT_DIR/.hex/timezone" ]; then
-  TZ="$(tr -d '[:space:]' < "$AGENT_DIR/.hex/timezone")"; export TZ
+if [ -z "${TZ:-}" ] && [ -f "$HEX_DIR/.hex/timezone" ]; then
+  TZ="$(tr -d '[:space:]' < "$HEX_DIR/.hex/timezone")"; export TZ
 fi
 
 DRY_RUN=false
@@ -34,7 +34,7 @@ if [[ ! -f "$EVOLUTION_DB" ]]; then
 fi
 
 # ─── Query ready items ─────────────────────────────────────────────────────
-READY_OUTPUT=$(AGENT_DIR="$AGENT_DIR" python3 "$EVOLUTION_DB" list --ready --sort occurrences 2>&1)
+READY_OUTPUT=$(HEX_DIR="$HEX_DIR" python3 "$EVOLUTION_DB" list --ready --sort occurrences 2>&1)
 
 if echo "$READY_OUTPUT" | grep -q "No items found"; then
     echo "No items ready for promotion."
@@ -73,7 +73,7 @@ for ITEM in "${ITEMS[@]}"; do
     IFS='|' read -r ID OCC TITLE <<< "$ITEM"
 
     # Get full details for this item
-    DETAILS=$(AGENT_DIR="$AGENT_DIR" python3 "$EVOLUTION_DB" get "$ID" 2>&1)
+    DETAILS=$(HEX_DIR="$HEX_DIR" python3 "$EVOLUTION_DB" get "$ID" 2>&1)
 
     # Extract category and impact from details
     CATEGORY=$(echo "$DETAILS" | grep "category:" | head -1 | sed 's/.*category: //')

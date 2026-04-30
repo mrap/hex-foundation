@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-AGENT_DIR="${AGENT_DIR:-${AGENT_DIR:-$HOME/hex}}"
+HEX_DIR="${HEX_DIR:-${HEX_DIR:-$HOME/hex}}"
 PROJECT_ID="${1:-hex-os}"
 BOI_DB="${HOME}/.boi/boi.db"
 
@@ -9,7 +9,7 @@ BOI_DB="${HOME}/.boi/boi.db"
 STATE_TMP=$(mktemp)
 trap 'rm -f "$STATE_TMP"' EXIT
 
-AGENT_DIR="$AGENT_DIR" bash "$AGENT_DIR/.hex/scripts/hex-landings-state.sh" > "$STATE_TMP" 2>/dev/null || true
+HEX_DIR="$HEX_DIR" bash "$HEX_DIR/.hex/scripts/hex-landings-state.sh" > "$STATE_TMP" 2>/dev/null || true
 
 # Count active BOI jobs
 ACTIVE_BOI=0
@@ -20,7 +20,7 @@ ACTIVE_BOI="${ACTIVE_BOI:-0}"
 
 # Most recent decision date
 LAST_DECISION="none"
-DECISIONS_DIR="$AGENT_DIR/me/decisions"
+DECISIONS_DIR="$HEX_DIR/me/decisions"
 if [[ -d "$DECISIONS_DIR" ]]; then
   _latest=$(ls -t "$DECISIONS_DIR"/*.md 2>/dev/null | head -1 || true)
   if [[ -n "${_latest:-}" ]]; then

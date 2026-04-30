@@ -5,15 +5,15 @@
 
 set -euo pipefail
 
-AGENT_DIR="${AGENT_DIR:-${AGENT_DIR:-$HOME/hex}}"
+HEX_DIR="${HEX_DIR:-${HEX_DIR:-$HOME/hex}}"
 ISSUES=0
 LOG=""
 
 log() { LOG="$LOG\n$1"; }
 
 # 1. Rebuild memory index (incremental)
-if [ -f "$AGENT_DIR/.hex/skills/memory/scripts/memory_index.py" ]; then
-  python3 "$AGENT_DIR/.hex/skills/memory/scripts/memory_index.py" 2>/dev/null && \
+if [ -f "$HEX_DIR/.hex/skills/memory/scripts/memory_index.py" ]; then
+  python3 "$HEX_DIR/.hex/skills/memory/scripts/memory_index.py" 2>/dev/null && \
     log "OK: memory index rebuilt" || \
     { log "ISSUE: memory index rebuild failed"; ISSUES=$((ISSUES+1)); }
 fi
@@ -31,16 +31,16 @@ if [ -f "$MEMORY_MD" ]; then
 fi
 
 # 3. Check for stale file references in CLAUDE.md
-if [ -f "$AGENT_DIR/CLAUDE.md" ]; then
+if [ -f "$HEX_DIR/CLAUDE.md" ]; then
   STALE=0
   while IFS= read -r ref; do
     # Extract file paths that look like relative refs
-    path="$AGENT_DIR/$ref"
+    path="$HEX_DIR/$ref"
     if [ ! -e "$path" ]; then
       log "STALE: CLAUDE.md references missing file: $ref"
       STALE=$((STALE+1))
     fi
-  done < <(grep -oP '(?<=\()(?!http)[a-zA-Z0-9_./-]+\.(?:md|yaml|py|sh|json)\)' "$AGENT_DIR/CLAUDE.md" 2>/dev/null | sed 's/)$//' || true)
+  done < <(grep -oP '(?<=\()(?!http)[a-zA-Z0-9_./-]+\.(?:md|yaml|py|sh|json)\)' "$HEX_DIR/CLAUDE.md" 2>/dev/null | sed 's/)$//' || true)
   if [ "$STALE" -gt 0 ]; then
     ISSUES=$((ISSUES+STALE))
   else
@@ -61,23 +61,23 @@ if [ -d "$HOME/.claude/projects/-Users-hex/memory" ]; then
 fi
 
 # 5. Check todo.md for items older than 14 days without update
-if [ -f "$AGENT_DIR/todo.md" ]; then
-  STALE_TODOS=$(grep -cP '\d{4}-\d{2}-\d{2}' "$AGENT_DIR/todo.md" 2>/dev/null || echo 0)
+if [ -f "$HEX_DIR/todo.md" ]; then
+  STALE_TODOS=$(grep -cP '\d{4}-\d{2}-\d{2}' "$HEX_DIR/todo.md" 2>/dev/null || echo 0)
   log "OK: todo.md has $STALE_TODOS dated items (age check deferred to dream agent)"
 fi
 
 # 6. Check evolution pipeline health
 for f in observations.md suggestions.md changelog.md; do
-  if [ ! -f "$AGENT_DIR/evolution/$f" ]; then
+  if [ ! -f "$HEX_DIR/evolution/$f" ]; then
     log "ISSUE: missing evolution/$f"
     ISSUES=$((ISSUES+1))
   fi
 done
 
 # 7. Check for orphaned project directories (no context.md or charter.yaml)
-if [ -d "$AGENT_DIR/projects" ]; then
+if [ -d "$HEX_DIR/projects" ]; then
   ORPHANS=0
-  for dir in "$AGENT_DIR/projects"/*/; do
+  for dir in "$HEX_DIR/projects"/*/; do
     [ -d "$dir" ] || continue
     dirname=$(basename "$dir")
     [ "$dirname" = "_archive" ] && continue
@@ -92,8 +92,8 @@ if [ -d "$AGENT_DIR/projects" ]; then
 fi
 
 # 8. Run dream-cycle.py for activity summary
-if [ -f "$AGENT_DIR/evolution/scripts/dream-cycle.py" ]; then
-  DREAM_OUTPUT=$(python3 "$AGENT_DIR/evolution/scripts/dream-cycle.py" 2>/dev/null || echo "dream-cycle.py failed")
+if [ -f "$HEX_DIR/evolution/scripts/dream-cycle.py" ]; then
+  DREAM_OUTPUT=$(python3 "$HEX_DIR/evolution/scripts/dream-cycle.py" 2>/dev/null || echo "dream-cycle.py failed")
   log "DREAM: $DREAM_OUTPUT"
 fi
 
@@ -105,7 +105,7 @@ echo ""
 echo "Issues found: $ISSUES"
 
 # Write to consolidation log
-CONSOLIDATION_LOG="$AGENT_DIR/evolution/consolidation-latest.log"
+CONSOLIDATION_LOG="$HEX_DIR/evolution/consolidation-latest.log"
 {
   echo "=== Consolidation Report — $NOW ==="
   echo -e "$LOG"

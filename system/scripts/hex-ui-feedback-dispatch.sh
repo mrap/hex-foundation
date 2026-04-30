@@ -16,8 +16,8 @@ export PATH
 API="${HEX_URL:-https://localhost}/visions/api/comments"
 LOG="/tmp/hex-ui-feedback-loop.log"
 LOCK="/tmp/hex-ui-feedback-loop.lock"
-SPEC_DIR="${AGENT_DIR:-$HOME/hex}/specs/feedback-comments"
-PROJECT_DIR="${AGENT_DIR:-$HOME/hex}"
+SPEC_DIR="${HEX_DIR:-$HOME/hex}/specs/feedback-comments"
+PROJECT_DIR="${HEX_DIR:-$HOME/hex}"
 
 mkdir -p "$SPEC_DIR"
 
@@ -67,7 +67,7 @@ with urllib.request.urlopen('${HEX_URL:-https://localhost}/visions/api/comments'
     full = json.load(r)
 data = [c for c in full.get('comments', []) if c.get('status') == 'new']
 
-SPEC_DIR = "${AGENT_DIR:-$HOME/hex}/specs/feedback-comments"
+SPEC_DIR = "${HEX_DIR:-$HOME/hex}/specs/feedback-comments"
 DISPATCH_LIMIT = 3  # per tick
 
 def slug(s):

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-AGENT_DIR="${AGENT_DIR:-${AGENT_DIR:-$HOME/hex}}"
-LANDINGS_FILE="${1:-${AGENT_DIR}/landings/$(date +%Y-%m-%d).md}"
+HEX_DIR="${HEX_DIR:-${HEX_DIR:-$HOME/hex}}"
+LANDINGS_FILE="${1:-${HEX_DIR}/landings/$(date +%Y-%m-%d).md}"
 BOI_DB="${HOME}/.boi/boi.db"
 
 if [[ ! -f "$LANDINGS_FILE" ]]; then

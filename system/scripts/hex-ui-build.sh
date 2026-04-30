@@ -104,7 +104,7 @@ else
     echo "$OLD_ROUTER" | xargs kill -TERM 2>/dev/null || true
     sleep 1
   fi
-  ROUTER_DIR="${AGENT_DIR:-$HOME/hex}/.hex/scripts/hex-router"
+  ROUTER_DIR="${HEX_DIR:-$HOME/hex}/.hex/scripts/hex-router"
   if [ -d "$ROUTER_DIR" ]; then
     cd "$ROUTER_DIR"
     nohup python3 router.py > /tmp/hex-router.log 2>&1 &

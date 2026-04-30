@@ -6,7 +6,7 @@ set -uo pipefail
 BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
 [[ "${HEX_RUNTIME:-}" == "codex" ]] && CLAUDE_SETTINGS="${HOME}/.codex/settings.json"
-SECRETS_FILE="${AGENT_DIR}/.hex/secrets/mcp-plugin-ecc.env"
+SECRETS_FILE="${HEX_DIR}/.hex/secrets/mcp-plugin-ecc.env"
 RESULT=0
 
 emit_event() {

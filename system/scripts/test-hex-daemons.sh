@@ -10,7 +10,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+HEX_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 PASS=0
 FAIL=0
@@ -23,7 +23,7 @@ echo ""
 
 # ─── Test 1: hex-daemons status runs without error ────────────────────────
 echo "Test 1: hex-daemons status"
-STATUS_OUT=$(bash "$AGENT_DIR/.hex/scripts/hex-daemons.sh" status 2>&1) || true
+STATUS_OUT=$(bash "$HEX_DIR/.hex/scripts/hex-daemons.sh" status 2>&1) || true
 
 # Strip ANSI codes
 STRIPPED=$(echo "$STATUS_OUT" | sed 's/\x1b\[[0-9;]*m//g')
@@ -37,7 +37,7 @@ fi
 
 # ─── Test 2: hex-daemons list shows all 4 daemons ────────────────────────
 echo "Test 2: hex-daemons list"
-LIST_OUT=$(bash "$AGENT_DIR/.hex/scripts/hex-daemons.sh" list 2>&1)
+LIST_OUT=$(bash "$HEX_DIR/.hex/scripts/hex-daemons.sh" list 2>&1)
 LIST_STRIPPED=$(echo "$LIST_OUT" | sed 's/\x1b\[[0-9;]*m//g')
 
 EXPECTED_DAEMONS=("boi-daemon" "hex-events" "boi-poold" "syncthing")
@@ -54,7 +54,7 @@ fi
 
 # ─── Test 3: startup.sh does not start daemons ───────────────────────────
 echo "Test 3: startup.sh does not start daemons"
-STARTUP_FILE="$AGENT_DIR/.hex/scripts/startup.sh"
+STARTUP_FILE="$HEX_DIR/.hex/scripts/startup.sh"
 
 # Check that startup.sh does not contain actual daemon-starting commands
 # (exclude lines that are info/warn strings or comments)

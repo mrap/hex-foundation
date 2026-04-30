@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HEX_DIR="${AGENT_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+HEX_DIR="${HEX_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 TEMPLATES_DIR="$HEX_DIR/.hex/templates/agent"
 POLICIES_DIR="$HOME/.hex-events/policies"
 SPAWNS_LOG_DIR="$HEX_DIR/projects/hex-agents/_spawns"

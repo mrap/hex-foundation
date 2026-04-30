@@ -11,7 +11,7 @@
 # Priority: 1) saved preference from bootstrap, 2) runtime detection
 detect_llm_cli() {
     # Check for preference saved during bootstrap
-    local pref_file="${AGENT_DIR:-.}/.hex/llm-preference"
+    local pref_file="${HEX_DIR:-.}/.hex/llm-preference"
     if [ -f "$pref_file" ]; then
         local pref
         pref="$(cat "$pref_file" | tr -d '[:space:]')"

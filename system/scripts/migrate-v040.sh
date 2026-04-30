@@ -81,7 +81,7 @@ while IFS= read -r wake_script; do
   [ -f "$wake_script" ] || continue
   basename_ws="$(basename "$wake_script")"
 
-  # Fix: source "$AGENT_DIR/.hex/env.sh" → source "$AGENT_DIR/.hex/scripts/env.sh"
+  # Fix: source "$HEX_DIR/.hex/env.sh" → source "$HEX_DIR/.hex/scripts/env.sh"
   if grep -q '\.hex/env\.sh' "$wake_script" && ! grep -q '\.hex/scripts/env\.sh' "$wake_script"; then
     sed -i '' 's|\.hex/env\.sh|.hex/scripts/env.sh|g' "$wake_script" 2>/dev/null || \
     sed -i 's|\.hex/env\.sh|.hex/scripts/env.sh|g' "$wake_script" 2>/dev/null

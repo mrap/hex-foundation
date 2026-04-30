@@ -6,8 +6,8 @@
 set -uo pipefail
 
 MESSAGES_JSON="$HOME/github.com/mrap/hex-ui/backend/state/messages.json"
-PROCESSED_JSON="${AGENT_DIR:-$HOME/hex}/.hex/state/hex-ui-processed-messages.json"
-FEEDBACK_LOG="${AGENT_DIR:-$HOME/hex}/projects/hex-ui/feedback/ui-feedback-log.md"
+PROCESSED_JSON="${HEX_DIR:-$HOME/hex}/.hex/state/hex-ui-processed-messages.json"
+FEEDBACK_LOG="${HEX_DIR:-$HOME/hex}/projects/hex-ui/feedback/ui-feedback-log.md"
 
 # Ensure state dir exists
 mkdir -p "$(dirname "$PROCESSED_JSON")"
