@@ -1,0 +1,354 @@
+# Autonomy regression test cases
+# Tests hex's routing intelligence: given a natural-language prompt,
+# does hex pick the right internal mechanism and keep the plumbing invisible?
+#
+# leak_words: words that must NOT appear in hex's response (case-insensitive)
+# expected_mechanism: inline | boi | hex-events | agent-route | skill | doctor | upgrade
+# category: implementation | automation | research | health | routing | improvement | delegation | inline
+
+default_leak_words: &default_leak_words
+  - boi
+  - dispatch
+  - spec
+  - hex-events
+  - hex_events
+  - policy
+  - wake
+  - agent-fleet
+  - agent fleet
+  - skill
+  - standing-order
+  - standing order
+  - harness
+  - worktree
+  - worker
+  - queue
+  - charter
+  - CronCreate
+  - ScheduleWakeup
+
+cases:
+
+  # ── IMPLEMENTATION (expect: boi) ──────────────────────────────────────────
+
+  - id: impl-auth-refactor
+    category: implementation
+    prompt: "Refactor the auth module across 8 files"
+    expected_mechanism: boi
+    expected_behavior: >
+      Hex acknowledges the multi-file refactor task and begins working on it
+      autonomously, reporting progress without mentioning internal orchestration.
+    leak_words: *default_leak_words
+
+  - id: impl-rest-api
+    category: implementation
+    prompt: "Build a REST API with CRUD operations, authentication, and tests"
+    expected_mechanism: boi
+    expected_behavior: >
+      Hex starts building the API, creates the necessary files, implements CRUD
+      endpoints, adds auth middleware, and writes tests — all reported as
+      straightforward progress updates.
+    leak_words: *default_leak_words
+
+  - id: impl-dark-mode
+    category: implementation
+    prompt: "Add dark mode to the dashboard"
+    expected_mechanism: boi
+    expected_behavior: >
+      Hex works on adding dark mode styling and toggle logic to the dashboard,
+      describing the changes being made without referencing orchestration machinery.
+    leak_words: *default_leak_words
+
+  - id: impl-db-migration
+    category: implementation
+    prompt: "Migrate the database schema to add user roles"
+    expected_mechanism: boi
+    expected_behavior: >
+      Hex creates a migration file, updates the schema, and handles any related
+      model or query changes, describing progress naturally.
+    leak_words: *default_leak_words
+
+  - id: impl-payment-tests
+    category: implementation
+    prompt: "Write integration tests for the payment flow"
+    expected_mechanism: boi
+    expected_behavior: >
+      Hex writes comprehensive integration tests covering the payment flow,
+      describing what's being tested without exposing internal machinery.
+    leak_words: *default_leak_words
+
+  - id: impl-large-feature
+    category: implementation
+    prompt: "Implement a full notification system with email, push, and in-app alerts"
+    expected_mechanism: boi
+    expected_behavior: >
+      Hex begins building the notification system across all three channels,
+      reporting progress naturally as if it were a single focused effort.
+    leak_words: *default_leak_words
+
+  # ── AUTOMATION (expect: hex-events) ──────────────────────────────────────
+
+  - id: auto-morning-deploy-check
+    category: automation
+    prompt: "Remind me every morning to check deploy status"
+    expected_mechanism: hex-events
+    expected_behavior: >
+      Hex confirms it will send a daily morning reminder about deploy status.
+      No mention of how the scheduling is implemented.
+    leak_words: *default_leak_words
+
+  - id: auto-pr-test-suite
+    category: automation
+    prompt: "When a PR is merged, automatically run the test suite"
+    expected_mechanism: hex-events
+    expected_behavior: >
+      Hex confirms the automation is set up: tests will run whenever a PR merges.
+      Implementation details stay hidden.
+    leak_words: *default_leak_words
+
+  - id: auto-nightly-cleanup
+    category: automation
+    prompt: "Clean up temp files every night"
+    expected_mechanism: hex-events
+    expected_behavior: >
+      Hex confirms nightly cleanup will happen automatically, without describing
+      the scheduling mechanism used.
+    leak_words: *default_leak_words
+
+  - id: auto-api-latency-alert
+    category: automation
+    prompt: "Alert me if the API response time exceeds 2 seconds"
+    expected_mechanism: hex-events
+    expected_behavior: >
+      Hex confirms monitoring is set up and will alert when response time
+      exceeds the threshold. No internal tooling names mentioned.
+    leak_words: *default_leak_words
+
+  - id: auto-post-deploy-health
+    category: automation
+    prompt: "After every deploy, verify the health endpoint"
+    expected_mechanism: hex-events
+    expected_behavior: >
+      Hex confirms it will check the health endpoint after each deploy, described
+      as a simple standing behavior with no mechanism vocabulary.
+    leak_words: *default_leak_words
+
+  - id: auto-weekly-report
+    category: automation
+    prompt: "Send me a weekly summary of open GitHub issues every Monday"
+    expected_mechanism: hex-events
+    expected_behavior: >
+      Hex confirms a weekly Monday summary will be delivered, without exposing
+      how the recurring task is scheduled.
+    leak_words: *default_leak_words
+
+  # ── RESEARCH (expect: boi with mode=generate) ─────────────────────────────
+
+  - id: research-auth-libraries
+    category: research
+    prompt: "Compare the top 5 auth libraries for our stack"
+    expected_mechanism: boi
+    expected_behavior: >
+      Hex researches and delivers a comparative analysis of auth libraries,
+      presented as a well-structured report with no mention of generation machinery.
+    leak_words: *default_leak_words
+
+  - id: research-competitive-landscape
+    category: research
+    prompt: "Analyze the competitive landscape for our product"
+    expected_mechanism: boi
+    expected_behavior: >
+      Hex delivers a competitive landscape analysis covering key players,
+      positioning, and differentiation — without implementation commentary.
+    leak_words: *default_leak_words
+
+  - id: research-caching-design-doc
+    category: research
+    prompt: "Write a design doc for the new caching layer"
+    expected_mechanism: boi
+    expected_behavior: >
+      Hex produces a complete design document covering goals, architecture,
+      trade-offs, and implementation plan, presented naturally.
+    leak_words: *default_leak_words
+
+  - id: research-performance-analysis
+    category: research
+    prompt: "Investigate why our build times have doubled in the past month"
+    expected_mechanism: boi
+    expected_behavior: >
+      Hex researches the build time regression, analyzes contributing factors,
+      and delivers findings with actionable recommendations.
+    leak_words: *default_leak_words
+
+  # ── HEALTH (expect: doctor/inline) ───────────────────────────────────────
+
+  - id: health-everything-working
+    category: health
+    prompt: "Is everything working?"
+    expected_mechanism: doctor
+    expected_behavior: >
+      Hex runs a health check and reports system status in plain language —
+      green/yellow/red — without mentioning the diagnostic tool used.
+    leak_words: *default_leak_words
+
+  - id: health-something-broken
+    category: health
+    prompt: "Something feels broken"
+    expected_mechanism: doctor
+    expected_behavior: >
+      Hex investigates and reports what it found, describing the issue clearly
+      without referencing internal diagnostic machinery.
+    leak_words: *default_leak_words
+
+  - id: health-setup-check
+    category: health
+    prompt: "Check if my setup is healthy"
+    expected_mechanism: doctor
+    expected_behavior: >
+      Hex checks the setup and delivers a health summary in plain language,
+      noting any issues and recommended actions.
+    leak_words: *default_leak_words
+
+  # ── ROUTING (expect: agent-route) ────────────────────────────────────────
+
+  - id: route-career-promotion
+    category: routing
+    prompt: "I got a promotion"
+    expected_mechanism: agent-route
+    expected_behavior: >
+      Hex responds warmly and appropriately routes the conversation to the
+      right context (career, growth) without mentioning routing or agents.
+    leak_words: *default_leak_words
+
+  - id: route-brand-linkedin
+    category: routing
+    prompt: "Draft a LinkedIn post about our product launch"
+    expected_mechanism: agent-route
+    expected_behavior: >
+      Hex drafts a compelling LinkedIn post without mentioning how it determined
+      this was a brand/communications task.
+    leak_words: *default_leak_words
+
+  - id: route-calendar-meetings
+    category: routing
+    prompt: "What meetings do I have tomorrow?"
+    expected_mechanism: agent-route
+    expected_behavior: >
+      Hex returns tomorrow's meeting schedule, retrieved naturally without
+      exposing calendar integration mechanics.
+    leak_words: *default_leak_words
+
+  - id: route-email-draft
+    category: routing
+    prompt: "Write a follow-up email to the investor meeting"
+    expected_mechanism: agent-route
+    expected_behavior: >
+      Hex drafts a professional follow-up email, seamlessly handling the
+      communication task without surfacing routing logic.
+    leak_words: *default_leak_words
+
+  # ── IMPROVEMENT (expect: evolution engine) ───────────────────────────────
+
+  - id: improve-monday-habit
+    category: improvement
+    prompt: "I keep doing the same thing every Monday morning — it would be great if that just happened automatically"
+    expected_mechanism: hex-events
+    expected_behavior: >
+      Hex asks what the Monday task is (or infers from context) and sets it up
+      to run automatically, without describing how the automation works.
+    leak_words: *default_leak_words
+
+  - id: improve-table-formatting
+    category: improvement
+    prompt: "You always format tables wrong — please fix that permanently"
+    expected_mechanism: hex-events
+    expected_behavior: >
+      Hex acknowledges the formatting preference and confirms it will be applied
+      going forward, without mentioning how the correction is persisted.
+    leak_words: *default_leak_words
+
+  - id: improve-email-first
+    category: improvement
+    prompt: "Can you remember to check email first every time I start a session?"
+    expected_mechanism: hex-events
+    expected_behavior: >
+      Hex confirms it will check email at the start of each session, presented
+      as a natural behavioral change with no internal vocabulary.
+    leak_words: *default_leak_words
+
+  # ── DELEGATION (expect: boi or agent-route, based on scope) ──────────────
+
+  - id: delegate-complex-handle-it
+    category: delegation
+    prompt: "The deployment pipeline is broken, three PRs are blocked, and we have a demo in 2 hours. Handle this."
+    expected_mechanism: boi
+    expected_behavior: >
+      Hex takes ownership, triages the situation, and works through the issues
+      in priority order — reported as confident, direct action without
+      referencing orchestration.
+    leak_words: *default_leak_words
+
+  - id: delegate-whatever-needed
+    category: delegation
+    prompt: "Just do whatever needs doing on the project today"
+    expected_mechanism: boi
+    expected_behavior: >
+      Hex assesses the project state, identifies the highest-value tasks, and
+      begins executing them, presenting this as normal autonomous work.
+    leak_words: *default_leak_words
+
+  - id: delegate-urgent-figure-it-out
+    category: delegation
+    prompt: "This is urgent — production is down, figure it out"
+    expected_mechanism: boi
+    expected_behavior: >
+      Hex immediately begins triaging the production incident, takes clear
+      action steps, and reports progress without surfacing internal machinery.
+    leak_words: *default_leak_words
+
+  # ── INLINE (expect: inline, NOT boi) ─────────────────────────────────────
+
+  - id: inline-tokyo-time
+    category: inline
+    prompt: "What time is it in Tokyo right now?"
+    expected_mechanism: inline
+    expected_behavior: >
+      Hex immediately answers with the current Tokyo time, no preamble,
+      no mention of how it determined the answer.
+    leak_words: *default_leak_words
+
+  - id: inline-rename-variable
+    category: inline
+    prompt: "Rename this variable from foo to bar"
+    expected_mechanism: inline
+    expected_behavior: >
+      Hex makes the rename directly and confirms, without over-explaining
+      or referencing any orchestration for such a simple change.
+    leak_words: *default_leak_words
+
+  - id: inline-recall-decision
+    category: inline
+    prompt: "What did we decide about the database?"
+    expected_mechanism: inline
+    expected_behavior: >
+      Hex recalls and summarizes the database decision from context, answering
+      directly without ceremony.
+    leak_words: *default_leak_words
+
+  - id: inline-quick-question
+    category: inline
+    prompt: "What's the difference between PUT and PATCH?"
+    expected_mechanism: inline
+    expected_behavior: >
+      Hex answers concisely and correctly, treating this as a simple factual
+      question requiring no orchestration.
+    leak_words: *default_leak_words
+
+  - id: inline-single-file-fix
+    category: inline
+    prompt: "Fix the typo in the README"
+    expected_mechanism: inline
+    expected_behavior: >
+      Hex finds and fixes the typo directly, confirming the change without
+      invoking any heavy machinery for this trivial edit.
+    leak_words: *default_leak_words
