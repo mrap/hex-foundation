@@ -647,6 +647,8 @@ if [ -d "$SOURCE_DIR/$SOURCE_SUBDIR_SKILLS" ]; then
 fi
 if [ -d "$SOURCE_DIR/$SOURCE_SUBDIR_COMMANDS" ]; then
   rsync -a     --exclude='__pycache__'     "$SOURCE_DIR/$SOURCE_SUBDIR_COMMANDS/" "$HEX_DOTDIR/commands/"
+  mkdir -p "$HEX_DIR/.claude/commands"
+  rsync -a     --exclude='__pycache__'     "$SOURCE_DIR/$SOURCE_SUBDIR_COMMANDS/" "$HEX_DIR/.claude/commands/"
 fi
 
 # For v1 layout, also sync hooks and the ui directory (not present in v2).

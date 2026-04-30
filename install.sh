@@ -129,10 +129,12 @@ if [ -d "$SCRIPT_DIR/tests" ]; then
     cp -r "$SCRIPT_DIR/tests" "$TARGET_DIR/tests"
 fi
 
-# Copy commands to .claude/commands/ (where Claude Code discovers them)
+# Copy commands to both .claude/commands/ (Claude Code) and .hex/commands/ (doctor/tooling)
 if [ -d "$SCRIPT_DIR/system/commands" ]; then
     mkdir -p "$TARGET_DIR/.claude/commands"
     cp "$SCRIPT_DIR/system/commands/"*.md "$TARGET_DIR/.claude/commands/"
+    mkdir -p "$TARGET_DIR/.hex/commands"
+    cp "$SCRIPT_DIR/system/commands/"*.md "$TARGET_DIR/.hex/commands/"
 fi
 
 # Symlink .agents/skills/ → .hex/skills/ so tools that look in .agents/ find the same skill set
