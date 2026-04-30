@@ -1,7 +1,7 @@
 #!/bin/bash
 # test_upgrade_prune.sh — Integration tests for upgrade.sh prune pass
 #
-# Builds a fake AGENT_DIR fixture in a tmpdir, exercises --prune and
+# Builds a fake HEX_DIR fixture in a tmpdir, exercises --prune and
 # --prune-apply, checks dry-run output, apply mutations, idempotency,
 # and malformed-JSON robustness.
 
