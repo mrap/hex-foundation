@@ -153,8 +153,22 @@ else
   fi
 fi
 
-# ── Gate 6: Ahead of remote ─────────────────────────────────────────────────
-bold "Gate 6: Commits to push"
+# ── Gate 6: Autonomy regression ──────────────────────────────────────────────
+bold "Gate 6: Autonomy regression"
+AUTONOMY_DIR="$REPO_DIR/tests/autonomy"
+if [ -d "$AUTONOMY_DIR" ]; then
+  echo "  Running mechanism routing tests..."
+  if python3 "$AUTONOMY_DIR/run_autonomy_suite.py" --mode structural 2>&1 | tee /tmp/autonomy-results.log | tail -3 | grep -q "0 failed"; then
+    green "  Autonomy regression: PASS ✓"
+  else
+    gate_fail "Autonomy regression failed — mechanism routing errors detected"
+  fi
+else
+  echo "  Autonomy tests not found — skipping"
+fi
+
+# ── Gate 7: Ahead of remote ─────────────────────────────────────────────────
+bold "Gate 7: Commits to push"
 REMOTE_SHA=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
 if [ "$FULL_SHA" = "$REMOTE_SHA" ]; then
   green "  Already up to date — nothing to push"
