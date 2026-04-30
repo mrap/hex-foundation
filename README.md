@@ -349,6 +349,11 @@ v0.10.0 adds: **BOI v1.1.0 integration + containerized BOI E2E.**
 - **Containerized BOI E2E**: `tests/core-e2e/` suites cover fresh install, upgrade (catches stale-symlink bugs), and doctor runtime checks. CI-gated via GitHub Actions core-e2e workflow.
 - **Doctor expanded**: `check_17` now runs `boi --help`, `boi --version`, and `boi status` instead of file-existence checks. Each failure includes a repair hint.
 
+v0.10.1 fixes: **Releaser auto-unblock regression.**
+- **Harness queue.rs**: `check_unblock_condition` now handles `message_reply` blocks — previously only `telemetry` and `timer` arms existed, so releaser blocks were silently permanent.
+- **Harness wake.rs**: `blocked_since` is now stamped with the server clock on apply, preventing LLM-hallucinated future timestamps from corrupting SLA math.
+- **Tests**: 4 new tests in `tests/queue_test.rs` covering the unblock path.
+
 v0.9.0 adds: **BOI v1.0.0 Rust binary + doctor runtime checks.**
 - **BOI rewrite**: BOI is now a compiled Rust binary at `~/.boi/bin/boi`. Install clones and builds from source; `VERSIONS` pins `BOI_VERSION`.
 - **Doctor runtime checks**: `check_17` now validates `boi --help`, `boi --version` (against `VERSIONS`), `boi status` (DB queryable), dangling-symlink detection, and the full wrapper chain (`~/.boi/boi --help`). Each failure includes a repair hint.
