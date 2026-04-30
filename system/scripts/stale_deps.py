@@ -34,7 +34,7 @@ def find_agent_dir():
         check = check.parent
         if (check / "CLAUDE.md").exists():
             return check
-    return Path(os.environ.get("AGENT_DIR", "."))
+    return Path(os.environ.get("HEX_DIR", "."))
 
 
 def extract_dependency_items(text, source_file):

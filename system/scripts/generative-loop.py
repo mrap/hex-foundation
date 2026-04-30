@@ -25,7 +25,7 @@ from typing import Optional
 # Config
 # ---------------------------------------------------------------------------
 
-HEX_ROOT = Path(os.environ.get("AGENT_DIR", str(Path.home() / "hex")))
+HEX_ROOT = Path(os.environ.get("HEX_DIR", str(Path.home() / "hex")))
 OUTPUTS_DIR = HEX_ROOT / "raw" / "research" / "generative-layer" / "outputs"
 STATE_DIR = HEX_ROOT / "raw" / "research" / "generative-layer" / "state"
 BOOKMARKS_DIR = HEX_ROOT / "raw" / "research" / "bookmarks"

@@ -10,8 +10,8 @@ Compare local hex against hex and push improvements upstream.
 
 ## Steps
 
-1. **Detect AGENT_DIR and BASE_DIR**
-   - AGENT_DIR: walk up from script to find CLAUDE.md
+1. **Detect HEX_DIR and BASE_DIR**
+   - HEX_DIR: walk up from script to find CLAUDE.md
    - BASE_DIR: `~/github.com/mrap/hex`
 
 2. **Diff shared files**
