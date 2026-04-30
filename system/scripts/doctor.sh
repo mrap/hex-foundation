@@ -662,9 +662,10 @@ check_17() {
 
 # 18: Python 3.10+ available (error)
 check_18() {
-  if python3 -c "import sys; assert sys.version_info >= (3,10)" 2>/dev/null; then
+  local py3; py3=$(for p in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do for d in "" /opt/homebrew/bin/ /usr/local/bin/; do cmd="${d}${p}"; [[ -x "$cmd" ]] && "$cmd" -c "import sys; assert sys.version_info>=(3,10)" 2>/dev/null && echo "$cmd" && break 2; done; done)
+  if [[ -n "$py3" ]]; then
     local ver
-    ver=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    ver=$("$py3" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
     _pass "Python $ver available"
     _rec 18 "Python 3.10+ available" "pass" "Python $ver found"
     return
