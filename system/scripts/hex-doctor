@@ -383,6 +383,63 @@ else
   echo "  ─────────────────────────────────────────"
   check_67
 
+  # ── hex binary version-sync (check_68) ──────────────────────────────────────
+  # Verifies the `hex` binary on PATH matches the Cargo.toml version.
+  # Detects a stale PATH binary after a foundation repo upgrade.
+  # HEX_FOUNDATION_DIR can be overridden (default: ~/github.com/mrap/hex-foundation).
+  check_68() {
+    local foundation_dir="${HEX_FOUNDATION_DIR:-$HOME/github.com/mrap/hex-foundation}"
+    local foundation_toml="$foundation_dir/system/harness/Cargo.toml"
+    local installed_toml="$HEX_DIR/.hex/harness/Cargo.toml"
+    local toml_path
+
+    if [ -f "$foundation_toml" ]; then
+      toml_path="$foundation_toml"
+    elif [ -f "$installed_toml" ]; then
+      toml_path="$installed_toml"
+    else
+      _warn "hex-binary version-sync: Cargo.toml not found — skipping"
+      _rec 68 "hex-binary version-sync" "warn" "Cargo.toml not found"
+      return
+    fi
+
+    local CARGO_VER
+    CARGO_VER=$(grep -E '^version' "$toml_path" | head -1 | cut -d'"' -f2)
+
+    if [ -z "$CARGO_VER" ]; then
+      _error "hex-binary version-sync: could not read version from $toml_path"
+      _rec 68 "hex-binary version-sync" "error" "could not parse Cargo.toml version"
+      return
+    fi
+
+    local hex_path
+    hex_path=$(command -v hex 2>/dev/null) || true
+
+    if [ -z "$hex_path" ]; then
+      _error "hex-binary version-sync: hex not found on PATH"
+      _rec 68 "hex-binary version-sync" "error" "hex not on PATH"
+      return
+    fi
+
+    local BIN_VER
+    BIN_VER=$(hex --version 2>&1 | awk '{print $2}')
+
+    if [ "$BIN_VER" = "$CARGO_VER" ]; then
+      _pass "hex-binary version-sync: hex binary == Cargo.toml == $CARGO_VER"
+      _rec 68 "hex-binary version-sync" "pass" "$CARGO_VER"
+    else
+      _error "hex-binary version-sync: binary=$BIN_VER but Cargo.toml=$CARGO_VER — rebuild needed"
+      _info  "  Run: cd ~/github.com/mrap/hex-foundation && make install"
+      _rec 68 "hex-binary version-sync" "error" "binary=$BIN_VER cargo=$CARGO_VER"
+    fi
+  }
+
+  MODULE_COUNT=$((MODULE_COUNT + 1))
+  echo ""
+  echo -e "${BOLD}Hex Binary Version Sync${RESET}"
+  echo "  ─────────────────────────────────────────"
+  check_68
+
 fi
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
