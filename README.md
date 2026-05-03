@@ -212,7 +212,7 @@ The binary is built or downloaded automatically by `install.sh`. If it cannot be
 
 ### Version
 
-`version.txt` at the repo root is the single source of truth. `build.rs` injects it at compile time. Cargo.toml must match. Git tags must match. See [docs/versioning.md](./docs/versioning.md).
+`system/harness/Cargo.toml` is the single source of truth. `env!("CARGO_PKG_VERSION")` embeds the version at compile time. Git tags must match — enforced by `release.sh`. See [docs/versioning.md](./docs/versioning.md).
 
 ### SSE bus
 
@@ -260,7 +260,6 @@ python3 .hex/scripts/quality-check.py --sweep           # scan last 24h
 ```
 hex-foundation/
 ├── install.sh           Single install entrypoint
-├── version.txt          Repo-level version (read by Rust build.rs)
 ├── VERSIONS             Pinned boi version (hex-events is now inline)
 ├── system/              → becomes ~/hex/.hex/ on install
 │   ├── harness/         ← hex binary Rust source (agent + server + SSE + assets + comments)
@@ -271,7 +270,7 @@ hex-foundation/
 │   │   ├── src/assets.rs   asset registry handler
 │   │   ├── src/telemetry.rs request + event telemetry (append-only JSONL)
 │   │   ├── src/wake.rs     agent wake cycle
-│   │   └── build.rs        reads version.txt at compile time
+│   │   └── build.rs        injects git SHA; Cargo.toml is version source
 │   ├── events/          ← hex-events daemon, emitter, CLI (merged from hex-events repo)
 │   │   ├── hex_eventd.py   main daemon
 │   │   ├── hex_emit.py     event emitter
@@ -292,8 +291,7 @@ hex-foundation/
 │   │                    hex-shutdown, hex-startup, hex-triage
 │   ├── policies/        quality-spec-audit, quality-kr-check, quality-sweep,
 │   │                    quality-gaming-alert — event-driven quality gates
-│   ├── reference/       core-agents/ — quality-antagonist and fleet agent charters
-│   └── version.txt
+│   └── reference/       core-agents/ — quality-antagonist and fleet agent charters
 ├── templates/           Seeds for CLAUDE.md, AGENTS.md, me.md, todo.md, decision-template.md
 ├── docs/architecture.md System overview
 └── tests/
@@ -370,7 +368,7 @@ v0.8.0 adds: **Unified `hex` binary + 3 new primitives + hex-events merged inlin
 - **SSE bus**: real-time event streaming with namespaced topics (`content.*`, `system.*`), wildcard subscriptions, topic manifests as self-documenting contract. hex-events bridged to SSE.
 - **Telemetry**: append-only JSONL for all server requests and events, same pattern as agent harness.
 - **hex-events merged**: standalone [hex-events](https://github.com/mrap/hex-events) repo (v0.2.0) merged into `system/events/`. hex-events repo archived.
-- **Version system**: `version.txt` is single source of truth, `build.rs` injects at compile time.
+- **Version system**: `Cargo.toml` is single source of truth, `env!("CARGO_PKG_VERSION")` embeds version at compile time. (v0.11.3 removed the `version.txt` sidecar.)
 - **Migration**: install.sh handles upgrading from pre-0.8.0 (standalone `hex-agent` → `hex` + symlink). 122/122 E2E tests pass in Docker.
 
 v0.3.0 adds: **Modular integration bundles + `hex-integration` CLI.** Every external surface (API, MCP, system service, refresh flow) lives in one directory under `integrations/<name>/` — manifest, probe, runbook, secrets schema, maintenance scripts, event policies, tests. `hex-integration install/uninstall/update/list/validate/status/probe/rotate` manages the lifecycle. Compile-step policy coupling: bundle event YAMLs compile into `~/.hex-events/policies/<name>-<stem>.yaml` with `# generated_from:` audit headers. See `docs/integrations.md` and `templates/integrations/_template/`.

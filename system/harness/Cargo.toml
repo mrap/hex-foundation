@@ -1,8 +1,8 @@
 [package]
 name = "hex"
-# Keep in sync with /version.txt — that file is the source of truth.
-# build.rs reads version.txt and injects HEX_VERSION at compile time.
-version = "0.8.0"
+# Source of truth for hex version. Bumped by release.sh; build.rs
+# injects this via env!("CARGO_PKG_VERSION") at compile time.
+version = "0.11.3"
 edition = "2021"
 
 [dependencies]

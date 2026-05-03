@@ -743,8 +743,54 @@ if [ -f "$SOURCE_DIR/templates/CLAUDE.md.template" ]; then
   portable_sha256 "$SOURCE_DIR/templates/CLAUDE.md.template" > "$CACHE_DIR/.last-template-hash"
 fi
 
-# ─── Step 4: Ensure shell alias & skip-permissions ──────────────────────────
-header "5. Shell Setup"
+# ─── Step 5: Sync VERSIONS file ─────────────────────────────────────────────
+header "5. Sync VERSIONS"
+
+VERSIONS_FILE="$HEX_DIR/VERSIONS"
+if [ -f "$VERSIONS_FILE" ]; then
+  if $DRY_RUN; then
+    info "[dry-run] Would update VERSIONS from Cargo.toml + BOI version"
+  else
+    # Read Cargo.toml version from foundation source (v2 layout)
+    _cargo_ver=""
+    if [ -f "$SOURCE_DIR/system/harness/Cargo.toml" ]; then
+      _cargo_ver=$(grep -E '^version' "$SOURCE_DIR/system/harness/Cargo.toml" | head -1 | cut -d'"' -f2)
+    fi
+
+    # Read BOI version — prefer live binary, fall back to git tag
+    _boi_ver=""
+    _boi_bin="${HOME}/.boi/boi"
+    if [ -x "$_boi_bin" ]; then
+      _boi_ver=$("$_boi_bin" --version 2>/dev/null | awk '{print $2}')
+    fi
+    if [ -z "$_boi_ver" ] && command -v boi &>/dev/null; then
+      _boi_ver=$(boi --version 2>/dev/null | awk '{print $2}')
+    fi
+    if [ -z "$_boi_ver" ] && [ -d "$HOME/github.com/mrap/boi" ]; then
+      _boi_ver=$(git -C "$HOME/github.com/mrap/boi" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
+    fi
+
+    if [ -n "$_cargo_ver" ]; then
+      # Preserve comment header lines and HEX_*_REPO user-override vars
+      _hdr=$(grep '^#' "$VERSIONS_FILE" || true)
+      _repo_overrides=$(grep '^HEX_.*_REPO=' "$VERSIONS_FILE" || true)
+
+      {
+        [ -n "$_hdr" ] && printf '%s\n\n' "$_hdr"
+        echo "HEX_FOUNDATION_VERSION=v${_cargo_ver}"
+        [ -n "$_boi_ver" ] && echo "BOI_VERSION=v${_boi_ver}"
+        [ -n "$_repo_overrides" ] && printf '\n%s\n' "$_repo_overrides"
+      } > "${VERSIONS_FILE}.tmp" && mv "${VERSIONS_FILE}.tmp" "$VERSIONS_FILE"
+
+      pass "VERSIONS → HEX_FOUNDATION_VERSION=v${_cargo_ver}${_boi_ver:+, BOI_VERSION=v${_boi_ver}}"
+    else
+      warn "Could not read Cargo.toml version from source — VERSIONS not updated"
+    fi
+  fi
+fi
+
+# ─── Step 6: Ensure shell alias & skip-permissions ──────────────────────────
+header "6. Shell Setup"
 
 HEX_PATH_LINE="export PATH=\"$HEX_DIR/.hex/bin:\$PATH\""
 
@@ -821,8 +867,8 @@ else
   info '  claude() { command claude --dangerously-skip-permissions "$@"; }'
 fi
 
-# ─── Step 5: Summary ────────────────────────────────────────────────────────
-header "6. Summary"
+# ─── Step 7: Summary ────────────────────────────────────────────────────────
+header "7. Summary"
 
 echo -e "  Files updated:  $CHANGED"
 echo -e "  Files added:    $NEW"

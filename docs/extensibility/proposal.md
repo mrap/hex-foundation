@@ -50,7 +50,7 @@ enforced by convention (documented below) and, eventually, by a checksum manifes
   scripts/                       ← system scripts (shipped with hex)
   sse/                           ← SSE server config (shipped with hex)
   templates/                     ← core templates (shipped with hex)
-  version.txt                    ← hex version stamp (used by upgrade safety check)
+  harness/Cargo.toml             ← hex version (Cargo.toml is source of truth; upgrade safety check reads this)
 
 <repo>/projects/                 ← PROJECT AGENTS — user-owned, never overwritten
   <project-name>/
@@ -466,7 +466,6 @@ variables at launch.
 ```
 WRITABLE BY hex upgrade:
   <repo>/system/**
-  <repo>/system/version.txt
 
 NEVER WRITTEN BY hex upgrade:
   ~/**                        ← entire user home

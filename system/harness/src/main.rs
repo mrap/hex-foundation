@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use hex::{state, wake};
 
 #[derive(Parser)]
-#[command(name = "hex", about = "Hex multi-agent harness")]
+#[command(name = "hex", about = "Hex multi-agent harness", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -1209,7 +1209,7 @@ fn main() {
             std::process::exit(exit_code);
         }
         Commands::Version => {
-            println!("hex {} ({})", env!("HEX_VERSION"), env!("HEX_GIT_SHA"));
+            println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
         }
     }
 }

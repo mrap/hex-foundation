@@ -37,7 +37,7 @@ Current suites:
 | `test-boi-install` | Fresh BOI install: binary builds, `--help`/`--version`, smoke dispatch |
 | `test-boi-upgrade` | Upgrade path: version bump, stale-symlink detection, doctor catches dangling link |
 | `test-assets` | Asset registry CRUD via `hex asset` subcommands |
-| `test-cli` | All `hex` subcommands reachable; version matches `version.txt` |
+| `test-cli` | All `hex` subcommands reachable; version matches `Cargo.toml` |
 | `test-events` | Event emit, policy firing, trace via `hex events` |
 | `test-messaging` | Message send/receive/filter with SQLite verification |
 | `test-sse` | SSE subscribe/publish, topic filtering, heartbeat |

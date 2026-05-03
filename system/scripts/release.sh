@@ -26,9 +26,11 @@ SKIP_PARITY=false
 
 for arg in "$@"; do
   case "$arg" in
+    bump-version)   ;;  # subcommand handled after cd
     --dry-run)      DRY_RUN=true ;;
     --skip-e2e)     SKIP_E2E=true ;;
     --skip-parity)  SKIP_PARITY=true ;;
+    [0-9]*)         ;;  # version arg for bump-version
     *)              echo "Unknown arg: $arg"; exit 1 ;;
   esac
 done
@@ -54,10 +56,47 @@ semver_gt() {
 
 cd "$REPO_DIR"
 
+# ── Subcommand: bump-version ─────────────────────────────────────────────────
+if [[ "${1:-}" == "bump-version" ]]; then
+  NEW_VERSION="${2:-}"
+  if ! semver_valid "$NEW_VERSION"; then
+    red "Usage: release.sh bump-version X.Y.Z  (semver required, e.g. 0.11.4)"
+    exit 1
+  fi
+  CARGO_TOML="system/harness/Cargo.toml"
+  CURRENT_VER=$(grep -E '^version' "$CARGO_TOML" | head -1 | cut -d'"' -f2)
+  bold "Bumping $CURRENT_VER → $NEW_VERSION"
+  sed -i '' "s/^version = \"$CURRENT_VER\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML"
+  bold "Building harness (cargo build --release)..."
+  if ! (cd system/harness && cargo build --release 2>&1); then
+    red "Build failed — reverting Cargo.toml"
+    git checkout "$CARGO_TOML"
+    exit 1
+  fi
+  git add "$CARGO_TOML"
+  git commit -m "bump: v$NEW_VERSION"
+  git tag "v$NEW_VERSION"
+  green "Bumped to v$NEW_VERSION and tagged ✓"
+  echo ""
+  echo "Next steps:"
+  echo "  1. Run Docker E2E:     bash system/scripts/release.sh --dry-run"
+  echo "  2. Push when approved: bash system/scripts/release.sh"
+  echo "  Note: push requires Mike's manual approval (HEX_RELEASE_PIPELINE=1)"
+  exit 0
+fi
+
 SHA=$(git rev-parse --short HEAD)
 FULL_SHA=$(git rev-parse HEAD)
-VERSION=$(cat system/version.txt 2>/dev/null || echo "unknown")
+VERSION=$(grep -E '^version' system/harness/Cargo.toml | head -1 | cut -d'"' -f2)
 FILE_COUNT=$(git diff --name-only HEAD~1 2>/dev/null | wc -l | tr -d ' ')
+
+# Guard: abort if HEAD is already tagged with a version that differs from Cargo.toml
+HEAD_TAG=$(git tag --points-at HEAD 2>/dev/null | grep -E '^v[0-9]' | head -1 | sed 's/^v//')
+if [[ -n "$HEAD_TAG" && "$HEAD_TAG" != "$VERSION" ]]; then
+  red "ABORT: HEAD is tagged v$HEAD_TAG but system/harness/Cargo.toml says $VERSION."
+  red "These must match. Fix with: bash system/scripts/release.sh bump-version $VERSION"
+  exit 1
+fi
 
 bold "═══ hex-foundation Release Pipeline ═══"
 echo "Commit:  $SHA"
@@ -80,10 +119,10 @@ LATEST_TAG=$(git tag --sort=-version:refname | head -1 | sed 's/^v//')
 if [ -z "$LATEST_TAG" ]; then
   green "  No prior tags — first release ✓"
 elif ! semver_valid "$VERSION"; then
-  gate_fail "Invalid semver in system/version.txt: '$VERSION' (expected X.Y.Z)"
+  gate_fail "Invalid semver in system/harness/Cargo.toml: '$VERSION' (expected X.Y.Z)"
 elif [ "$VERSION" = "$LATEST_TAG" ]; then
   COMMITS_SINCE=$(git rev-list "v$LATEST_TAG"..HEAD --count 2>/dev/null || echo "?")
-  gate_fail "Version $VERSION matches latest tag v$LATEST_TAG but there are $COMMITS_SINCE unpublished commit(s). Bump system/version.txt (at minimum patch: $(echo "$LATEST_TAG" | awk -F. '{print $1"."$2"."$3+1}'))"
+  gate_fail "Version $VERSION matches latest tag v$LATEST_TAG but there are $COMMITS_SINCE unpublished commit(s). Run: bash system/scripts/release.sh bump-version $(echo "$LATEST_TAG" | awk -F. '{print $1"."$2"."$3+1}')"
 elif ! semver_gt "$VERSION" "$LATEST_TAG"; then
   gate_fail "Version $VERSION is not greater than latest tag v$LATEST_TAG"
 else

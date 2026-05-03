@@ -54,6 +54,7 @@ Show a concise summary:
 - What files were updated/added
 - Whether CLAUDE.md was merged
 - Any new commands or skills that were added
+- Whether VERSIONS was updated (upgrade.sh syncs `HEX_FOUNDATION_VERSION` and `BOI_VERSION` from Cargo.toml automatically)
 - Remind: "Run `/hex-startup` to load the updated configuration."
 
 ## First-Time Setup
