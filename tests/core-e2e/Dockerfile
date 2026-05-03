@@ -12,11 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-# version.txt is the source of truth; build.rs reads it via HEX_DIR
-COPY version.txt /hex-root/version.txt
 COPY system/harness/ ./
-ENV HEX_DIR=/hex-root
 RUN cargo build --release 2>&1
+# Stamp the Cargo.toml version for runtime consistency checks (source of truth)
+RUN grep '^version' ./Cargo.toml | head -1 | cut -d'"' -f2 > /build/compiled-version.txt
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM debian:trixie-slim
@@ -40,6 +39,7 @@ RUN mkdir -p \
     $HOME/hex/.hex/audit \
     $HOME/hex/.hex/telemetry \
     $HOME/hex/.hex/reference/core-agents \
+    $HOME/hex/.hex/scripts \
     $HOME/.hex-events/policies \
     $HOME/hex/.hex-events/policies \
     $HOME/hex/system/sse/topics \
@@ -50,19 +50,19 @@ RUN mkdir -p \
 # CLAUDE.md is required by get_hex_dir() to validate the workspace
 RUN touch $HOME/hex/CLAUDE.md
 
-# version.txt — needed by 'hex version' and test-cli's version-consistency check
-COPY version.txt $HOME/hex/version.txt
-
 # Binary and backward-compat symlink
 COPY --from=builder /build/target/release/hex $HOME/hex/.hex/bin/hex
+# Compiled-version stamp for cli-version-consistency test
+COPY --from=builder /build/compiled-version.txt $HOME/hex/.hex/hex-version.txt
 RUN ln -s $HOME/hex/.hex/bin/hex $HOME/hex/.hex/bin/hex-agent
 
 # SSE topic manifests (server loads from $HEX_DIR/system/sse/topics/)
 COPY system/sse/topics/ $HOME/hex/system/sse/topics/
 
 # Integration, doctor, and memory scripts (hex delegates to these via bash/python3)
-COPY system/scripts/hex-integration $HOME/hex/system/scripts/hex-integration
-COPY system/scripts/hex-doctor      $HOME/hex/system/scripts/hex-doctor
+# Binary looks for these at $HEX_DIR/.hex/scripts/ (runtime install path)
+COPY system/scripts/hex-integration $HOME/hex/.hex/scripts/hex-integration
+COPY system/scripts/hex-doctor      $HOME/hex/.hex/scripts/hex-doctor
 COPY system/scripts/bin/            $HOME/hex/system/scripts/bin/
 COPY system/skills/memory/scripts/  $HOME/hex/system/skills/memory/scripts/
 

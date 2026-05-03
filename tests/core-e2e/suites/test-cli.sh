@@ -6,7 +6,7 @@ set -uo pipefail
 
 HEX="$HEX_DIR/.hex/bin/hex"
 HEX_AGENT="$HEX_DIR/.hex/bin/hex-agent"
-VERSION_FILE="$HEX_DIR/version.txt"
+VERSION_FILE="$HEX_DIR/.hex/hex-version.txt"
 
 echo ""
 echo "=== UNIFIED CLI TESTS ==="
@@ -110,15 +110,15 @@ else
     assert_fail "cli-hex-agent-symlink: $HEX_AGENT does not exist"
 fi
 
-# ── 12. Version consistency: hex version matches version.txt ──────────────────
+# ── 12. Version consistency: hex version matches Cargo.toml version compiled in ──
 if [ -f "$VERSION_FILE" ]; then
     EXPECTED_VERSION=$(cat "$VERSION_FILE" | tr -d '[:space:]')
     VERSION_OUT=$("$HEX" version 2>&1)
     if echo "$VERSION_OUT" | grep -qF "$EXPECTED_VERSION"; then
-        assert_pass "cli-version-consistency: 'hex version' output contains version.txt value ($EXPECTED_VERSION)"
+        assert_pass "cli-version-consistency: 'hex version' output matches compiled Cargo.toml version ($EXPECTED_VERSION)"
     else
         assert_fail "cli-version-consistency: expected '$EXPECTED_VERSION' in 'hex version' output, got: $VERSION_OUT"
     fi
 else
-    assert_fail "cli-version-consistency: version.txt not found at $VERSION_FILE"
+    assert_fail "cli-version-consistency: compiled version stamp not found at $VERSION_FILE"
 fi
