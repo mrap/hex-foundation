@@ -394,6 +394,30 @@ Open an issue or PR — the system is meant to evolve.
 
 ---
 
+## Shell completions
+
+`hex` can generate shell completions for bash, zsh, fish, elvish, and PowerShell.
+
+```bash
+# bash — add to ~/.bashrc
+eval "$(hex completions bash)"
+
+# zsh — add to ~/.zshrc
+eval "$(hex completions zsh)"
+
+# fish — add to ~/.config/fish/completions/hex.fish
+hex completions fish > ~/.config/fish/completions/hex.fish
+```
+
+Or source on-the-fly:
+
+```bash
+source <(hex completions bash)   # bash
+source <(hex completions zsh)    # zsh
+```
+
+---
+
 ## License
 
 MIT. See [LICENSE](./LICENSE).

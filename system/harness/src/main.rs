@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use hex::{state, wake};
@@ -70,6 +71,10 @@ enum Commands {
     },
     /// Print version
     Version,
+    /// Generate shell completions
+    Completions {
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1211,5 +1216,28 @@ fn main() {
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
         }
+        Commands::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "hex", &mut io::stdout());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+    use clap_complete::Shell;
+
+    #[test]
+    fn completions_zsh_nonempty_and_contains_hex() {
+        let mut buf = Vec::new();
+        clap_complete::generate(Shell::Zsh, &mut Cli::command(), "hex", &mut buf);
+        assert!(!buf.is_empty(), "zsh completions must not be empty");
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("_hex"),
+            "zsh completions must contain '_hex', got: {}",
+            &output[..200.min(output.len())]
+        );
     }
 }
