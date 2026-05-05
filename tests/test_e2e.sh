@@ -205,7 +205,7 @@ cd /tmp/hex-upgrade-repo && git init -q && git add -A && git commit -q -m "v0.2.
 cd /tmp/test-hex
 
 # Run upgrade pointing to local repo
-HEX_DIR=/tmp/test-hex HEX_REPO_URL=/tmp/hex-upgrade-repo bash /tmp/test-hex/.hex/scripts/upgrade.sh 2>&1 || true
+HEX_DIR=/tmp/test-hex bash /tmp/test-hex/.hex/scripts/upgrade.sh --local /tmp/hex-upgrade-repo 2>&1 || true
 
 # Verify user zone preserved
 if grep -q "MY_CUSTOM_RULE_12345" /tmp/test-hex/CLAUDE.md; then
