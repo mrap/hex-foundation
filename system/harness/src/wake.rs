@@ -168,25 +168,41 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
     let unblocked = queue::promote_unblocked(&mut agent_state.queue, &agent_state.inbox);
     let inbox_items = queue::inbox_to_active(&mut agent_state);
 
-    // 6c. Backlog auto-promotion — proactive agents only, with daily budget ceiling.
+    // 6c. Backlog auto-promotion — with critic-revised safety gates.
     //
-    // CONSTRAINT 1: Only fire for agents with a non-empty proactive_initiatives field.
-    //   Reactive-only agents (e.g. system-arch-critic) have an empty list and never
-    //   self-assign work from backlog.
+    // CONSTRAINT 1 (source gate): Agent must have backlog.md OR proactive_initiatives.
+    //   Reactive-only agents with neither never self-assign work from backlog.
     //
-    // CONSTRAINT 2 (daily_wake_budget): If the agent's charter declares a positive
-    //   usd_per_day budget and today's spend already exceeds 80% of it, skip
-    //   auto-promotion and let the agent park instead.
+    // CONSTRAINT 2 (spend ceiling): If usd_per_day > 0 and today's spend exceeds 80%, skip.
     //
-    // CONSTRAINT 3 (wake_ceiling): Never auto-promote more than 2 backlog items per
-    //   wake — keeps each shift focused.
-    let backlog_promoted = if !charter_data.proactive_initiatives.is_empty() {
-        // Seed backlog on first wake or when new initiatives are added to charter
-        queue::seed_backlog_from_charter(
-            &mut agent_state.queue,
-            &charter_data.proactive_initiatives,
-        );
+    // CONSTRAINT 3 (idle gate): Only promote if last `act` trail entry was > 2h ago.
+    //   Prevents piling on when the agent recently produced real work.
+    //
+    // CONSTRAINT 4 (daily cap): Never auto-promote on more than 12 wakes per day.
+    //   Guards agents with usd_per_day == 0 that have no spend ceiling.
+    //
+    // CONSTRAINT 5 (wake ceiling): Never promote more than 2 items per wake.
+    let backlog_md_path = hex_dir.join(format!("projects/{}/backlog.md", config.agent_id));
+    let has_backlog_source = backlog_md_path.exists() || !charter_data.proactive_initiatives.is_empty();
 
+    let backlog_promoted = if has_backlog_source {
+        // Seed from backlog.md (grounded, quality-gated items)
+        if backlog_md_path.exists() {
+            queue::seed_backlog_from_md(
+                &mut agent_state.queue,
+                &backlog_md_path,
+                &agent_state.completed_backlog_ids,
+            );
+        }
+        // Legacy fallback: charter proactive_initiatives
+        if !charter_data.proactive_initiatives.is_empty() {
+            queue::seed_backlog_from_charter(
+                &mut agent_state.queue,
+                &charter_data.proactive_initiatives,
+            );
+        }
+
+        // CONSTRAINT 2: daily spend ceiling
         let daily_wake_budget = charter_data.budget.usd_per_day;
         let budget_ok = if daily_wake_budget > 0.0 {
             let spent = cost::today_spend_usd(&cost_dir, &config.agent_id);
@@ -205,15 +221,52 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
             }
             ok
         } else {
-            // usd_per_day == 0 means no cap configured; treat as unlimited
             true
         };
 
-        if budget_ok && agent_state.queue.active.is_empty() {
-            // Only auto-promote when active queue is empty — don't pile on
+        // CONSTRAINT 3: idle gate — only promote if last act was > 2h ago
+        const ACT_IDLE_SECONDS: i64 = 7200;
+        let idle_ok = match agent_state.last_trail_act_at {
+            None => true,
+            Some(last_act) => (Utc::now() - last_act).num_seconds() >= ACT_IDLE_SECONDS,
+        };
+        if !idle_ok {
+            audit::append(
+                &audit_dir,
+                &config.agent_id,
+                "backlog-skipped-not-idle",
+                &serde_json::json!({
+                    "last_trail_act_at": agent_state.last_trail_act_at,
+                    "required_idle_seconds": ACT_IDLE_SECONDS,
+                }),
+            );
+        }
+
+        // CONSTRAINT 4: daily backlog-wake cap (guards zero-budget agents)
+        const MAX_BACKLOG_WAKES_PER_DAY: u32 = 12;
+        let today = Utc::now().date_naive().to_string();
+        if agent_state.backlog_wakes_date.as_deref() != Some(today.as_str()) {
+            agent_state.backlog_wakes_today = 0;
+            agent_state.backlog_wakes_date = Some(today);
+        }
+        let daily_cap_ok = agent_state.backlog_wakes_today < MAX_BACKLOG_WAKES_PER_DAY;
+        if !daily_cap_ok {
+            audit::append(
+                &audit_dir,
+                &config.agent_id,
+                "backlog-daily-cap-hit",
+                &serde_json::json!({
+                    "backlog_wakes_today": agent_state.backlog_wakes_today,
+                    "cap": MAX_BACKLOG_WAKES_PER_DAY,
+                }),
+            );
+        }
+
+        if budget_ok && idle_ok && daily_cap_ok && agent_state.queue.active.is_empty() {
             const WAKE_CEILING: usize = 2;
             let n = queue::auto_promote_from_backlog(&mut agent_state.queue, WAKE_CEILING);
             if n > 0 {
+                agent_state.backlog_wakes_today += 1;
                 audit::append(
                     &audit_dir,
                     &config.agent_id,
@@ -222,6 +275,7 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
                         "promoted": n,
                         "wake_ceiling": WAKE_CEILING,
                         "daily_wake_budget": daily_wake_budget,
+                        "backlog_wakes_today": agent_state.backlog_wakes_today,
                     }),
                 );
             }
@@ -390,7 +444,23 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
             return Ok(0);
         }
 
-        // Apply queue updates
+        // Update last_trail_act_at from this invocation's accepted act entries
+        for entry in &accepted_entries {
+            if entry.entry_type == "act" {
+                agent_state.last_trail_act_at = Some(Utc::now());
+            }
+        }
+
+        // Apply queue updates — track completed backlog IDs before removing items
+        for completed_id in &response.queue_updates.completed {
+            if let Some(item) = agent_state.queue.active.iter().find(|i| &i.id == completed_id) {
+                if item.source == "backlog-auto-promote"
+                    && !agent_state.completed_backlog_ids.contains(&item.id)
+                {
+                    agent_state.completed_backlog_ids.push(item.id.clone());
+                }
+            }
+        }
         agent_state
             .queue
             .active
