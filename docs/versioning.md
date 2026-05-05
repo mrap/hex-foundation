@@ -14,7 +14,7 @@
 system/harness/Cargo.toml (source of truth)
     ├── env!("CARGO_PKG_VERSION") embedded at compile time → binary
     ├── git tag = v$(version in Cargo.toml) — enforced by release.sh
-    └── mrap-hex VERSIONS file pinned by /hex-upgrade from Cargo.toml at tag
+    └── hex VERSIONS file pinned by /hex-upgrade from Cargo.toml at tag
 ```
 
 ## Releasing a New Version

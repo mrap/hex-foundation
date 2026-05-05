@@ -21,7 +21,10 @@ import glob as glob_mod
 import warnings
 from pathlib import Path
 
-HEX_ROOT = Path("/Users/mrap/mrap-hex")
+_hex_dir = os.environ.get("HEX_DIR")
+if not _hex_dir:
+    sys.exit("ERROR: HEX_DIR environment variable required (path to hex workspace)")
+HEX_ROOT = Path(_hex_dir)
 INITIATIVES_DIR = HEX_ROOT / "initiatives"
 PROJECTS_DIR = HEX_ROOT / "projects"
 BOI_DB = Path.home() / ".boi" / "boi-rust.db"

@@ -10,6 +10,7 @@ Output: Markdown brief to stdout.
 import glob
 import importlib.util
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -18,7 +19,10 @@ from pathlib import Path
 
 BOI_DB = Path.home() / ".boi" / "boi-rust.db"
 BOI_LOGS = Path.home() / ".boi" / "logs"
-HEX_SCRIPTS = Path("/Users/mrap/mrap-hex/.hex/scripts")
+_hex_dir = os.environ.get("HEX_DIR")
+if not _hex_dir:
+    sys.exit("ERROR: HEX_DIR environment variable required")
+HEX_SCRIPTS = Path(_hex_dir) / ".hex" / "scripts"
 
 FAILURE_FIX_HINTS = {
     "ProviderRateLimit": "retry with longer backoff",

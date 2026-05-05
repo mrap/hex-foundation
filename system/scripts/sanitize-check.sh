@@ -144,6 +144,7 @@ fi
 # hex_invoke so they work on both Claude Code and Codex runtimes.
 CLAUDE_BIN_VIOLATIONS=$(grep -rn 'claude\s\+-p\b\|exec\s\+claude\b\|\bcodex exec\b' . \
     --exclude-dir=.git \
+    --exclude-dir=.hex \
     --exclude-dir=tests \
     --exclude-dir=eval \
     --include="*.sh" 2>/dev/null \
