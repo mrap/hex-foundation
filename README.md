@@ -286,6 +286,9 @@ hex-foundation/
 │   │   └── topics/      ← SSE topic manifests (content.comments, system.agents, etc.)
 │   ├── scripts/         startup.sh, doctor.sh, upgrade.sh, quality-check.py,
 │   │                    route-comment.py, hex-asset.py, hex-asset-discover.py, ...
+│   │   ├── health/      fleet self-driving scripts (fleet-pulse, stalled-initiative,
+│   │   │                mike-pending, budget-period-reset, backlog-promote,
+│   │   │                agent-performance-review, fleet-scorecard-aggregate)
 │   │   ├── comments-service/  comment widget (widget.js) + Python fallback server
 │   │   └── sse-bus/           hex-events → SSE bridge script
 │   ├── commands/        → copied to ~/hex/.claude/commands/ (Claude Code) and ~/hex/.hex/commands/ (doctor/tooling)
@@ -295,6 +298,10 @@ hex-foundation/
 │   ├── policies/        quality-spec-audit, quality-kr-check, quality-sweep,
 │   │                    quality-gaming-alert — event-driven quality gates
 │   └── reference/       core-agents/ — quality-antagonist and fleet agent charters
+├── adapter/
+│   └── policy-templates/  Installable hex-events policy templates for fleet health
+│                          (fleet-pulse, stalled-initiative-monitor, mike-pending-escalator,
+│                          budget-period-reset, agent-performance-review-weekly, ...)
 ├── templates/           Seeds for CLAUDE.md, AGENTS.md, me.md, todo.md, decision-template.md
 ├── docs/architecture.md System overview
 └── tests/
@@ -344,6 +351,16 @@ bash tests/eval/run_eval_macos.sh            # macOS Tart
 ---
 
 ## Roadmap
+
+v0.13.0 adds: **Fleet self-driving mechanisms and agent performance review.**
+- **Fleet pulse watchdog**: `check-fleet-pulse.sh` emits `hex.agent.needs-attention` events for dormant agents. Composite liveness score with WARN/ERROR escalation tiers. Suppresses during budget lockout.
+- **Stalled initiative monitor**: `check-stalled-initiatives.sh` detects initiatives with no progress signal in 48h (commit, act trail, or KR update). Sends drive-or-close directives to initiative owners. Anti-spam guard prevents re-fire within 24h.
+- **Mike-pending board monitor**: `check-mike-pending.sh` tracks Mike-blocked items with tier labels (quiet/digest/direct-ping). Coalesced per-run alerts with DM fallback.
+- **Budget period auto-reset**: `budget-period-reset.py` rolls `cost.current_period.start` forward when a period expires. 5x runaway safety gate emits ERROR alert instead of clearing an out-of-control agent.
+- **Backlog auto-promotion**: `wake.rs` gains proactive backlog promotion with three safety constraints — `proactive_initiatives` gate (reactive-only agents never self-assign), per-agent daily wake-budget ceiling at 80% of charter budget, and a per-wake ceiling of 2 backlog items.
+- **Agent performance review**: `agent-performance-review.py` produces per-agent quality/velocity/autonomy scorecards from critic reviews, BOI DB, audit trail, and Mike-pushback signals. Composite geometric mean (0.0–1.0) with cold-start handling.
+- **Fleet scorecard aggregate**: `fleet-scorecard-aggregate.py` runs per-agent reviews and produces fleet-wide top/bottom 5, biggest movers, and Mike-pushback heatmap. Outputs a single coalesced digest — no per-agent pings.
+- **Policy templates**: `adapter/policy-templates/` gains fleet-pulse, stalled-initiative-monitor, mike-pending-escalator, budget-period-reset, and agent-performance-review-weekly templates for out-of-the-box fleet health wiring.
 
 v0.12.0 adds: **Upgrade reliability, shell completions, failure-revive protocol, and doctor improvements.**
 - **Shell completions**: `hex completions bash|zsh|fish` generates completion scripts for all subcommands. Install snippets in README.
