@@ -132,6 +132,25 @@ fn default_projects_dir() -> PathBuf {
     Path::new(&home).join(".claude/projects")
 }
 
+/// Class-selection seam for the burn guardrail's two alerts, keyed by the alert
+/// key each call site uses. The spend-rate breach (`burn-guard`) is the
+/// operator's spend signal → the `Spend` rail (push urgent + email). The
+/// misconfiguration alert (`burn-guard-config`) — like every other historical
+/// alert — stays `Default` (push only).
+///
+/// Pure so the mapping is unit-testable in this BIN target, where the lib's
+/// `cfg(test)` delivery sink is NOT linked (the `hex` lib is a plain dependency
+/// of the binary, compiled without `cfg(test)`, so calling `notify*` in a bin
+/// test would hit the real curl/gws arms). The class→rails half is proven in
+/// `alert.rs::email_classes_send_both_rails` / `default_class_sends_push_only…`;
+/// this seam pins the class SELECTION, and the two compose to the full proof.
+fn burn_alert_class(key: &str) -> crate::alert::AlertClass {
+    match key {
+        "burn-guard" => crate::alert::AlertClass::Spend,
+        _ => crate::alert::AlertClass::Default,
+    }
+}
+
 pub fn run(cmd: UsageCommands) -> i32 {
     match cmd {
         UsageCommands::Burn {
@@ -142,10 +161,11 @@ pub fn run(cmd: UsageCommands) -> i32 {
             let dir = projects_dir.unwrap_or_else(default_projects_dir);
             if !dir.exists() {
                 // S6: a missing transcript root is a config bug, not "zero spend".
-                crate::alert::notify(
+                crate::alert::notify_with_class(
                     "burn-guard-config",
                     "burn guardrail misconfigured",
                     &format!("projects dir not found: {}", dir.display()),
+                    burn_alert_class("burn-guard-config"),
                 );
                 return 1;
             }
@@ -164,13 +184,14 @@ pub fn run(cmd: UsageCommands) -> i32 {
                 detail: Some(format!("rate_usd_hr={rate:.2} window_mins={window_mins}")),
             });
             if rate > threshold {
-                crate::alert::notify(
+                crate::alert::notify_with_class(
                     "burn-guard",
                     "Claude burn rate over threshold",
                     &format!(
                         "${rate:.0}/hr over the last {window_mins}m (threshold ${threshold:.0}/hr). \
                          Check active sessions/subagents."
                     ),
+                    burn_alert_class("burn-guard"),
                 );
             }
             0
@@ -285,6 +306,27 @@ mod tests {
         );
         let s = window_spend(tmp.path(), now(), Duration::minutes(60));
         assert!(s.usd < 100.0);
+    }
+
+    /// Call-site mapping (task Tbnve3dk9): the burn guardrail's spend-threshold
+    /// breach must select the `Spend` class (→ email + urgent push), while the
+    /// misconfiguration alert — like every other historical notify — stays
+    /// `Default` (push only). Non-vacuous: pins BOTH halves of "map the spend
+    /// site, leave all others default". The class→rails delivery is proven in
+    /// `alert.rs::email_classes_send_both_rails`; this proves the SELECTION.
+    #[test]
+    fn burn_alert_class_maps_spend_and_leaves_config_default() {
+        use crate::alert::AlertClass;
+        assert_eq!(
+            burn_alert_class("burn-guard"),
+            AlertClass::Spend,
+            "the spend-rate breach must ride the Spend rail"
+        );
+        assert_eq!(
+            burn_alert_class("burn-guard-config"),
+            AlertClass::Default,
+            "the misconfig alert stays Default (all other notify calls unchanged)"
+        );
     }
 
     /// Models are priced per their own table; synthetic/unknown rows skipped.

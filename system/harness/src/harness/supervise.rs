@@ -281,6 +281,27 @@ pub fn build_watchdog_spec(hex_dir: &Path) -> daemon_green::ServiceSpec {
 // Drivers (I/O — thin shells over daemon-green + the pure logic above)
 // ---------------------------------------------------------------------------
 
+/// Class-selection + emit seam for the harness-down escalation (task Tbnve3dk9).
+///
+/// A harness that fails to come back after restart + re-bootstrap is the
+/// operator's "harness itself down" signal, so it rides the `HarnessDown` rail
+/// (push urgent + email). Extracted from the `Escalate` arm so the mapping is
+/// testable end-to-end through the alert module's `test_sink` without driving
+/// real daemon-green I/O.
+///
+/// Deliberately the ONLY supervise alert mapped: `harness-watchdog-revive`
+/// (below) fires on every recovery ACTION — including a successful revive — so
+/// it is a recovery notice, not a harness-down page, and stays `Default`.
+fn emit_harness_down_alert(hex_dir: &Path, msg: &str) {
+    crate::alert::notify_at_with_class(
+        hex_dir,
+        "harness-restart-failed",
+        "hex harness DOWN",
+        msg,
+        crate::alert::AlertClass::HarnessDown,
+    );
+}
+
 /// Restart `label` then VERIFY the engine serves; one re-bootstrap on failure; escalate loud
 /// (S6) if still dead. Holds the bootstrap lock so it cannot race the watchdog. Returns the
 /// verdict, or `Err` (already alerted) when the harness is still down.
@@ -322,7 +343,7 @@ pub fn restart_and_verify(hex_dir: &Path, label: &str) -> Result<RestartVerdict,
                  Recover with `hex harness start`."
             );
             eprintln!("  [FAIL] {msg}");
-            crate::alert::notify_at(hex_dir, "harness-restart-failed", "hex harness DOWN", &msg);
+            emit_harness_down_alert(hex_dir, &msg);
             Err(msg)
         }
     }
@@ -516,5 +537,50 @@ mod tests {
         // Re-acquire after drop must succeed.
         let _g2 = acquire_bootstrap_lock(&tmp).expect("re-lock after drop");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Call-site mapping (task Tbnve3dk9): the harness-down escalation must reach
+    /// the email rail AND push at urgent priority — i.e. the production path
+    /// selects `AlertClass::HarnessDown`. Drives the real `emit_harness_down_alert`
+    /// against a configured rail and observes delivery through the alert module's
+    /// `test_sink` (email fires only for the three named classes), so this is an
+    /// end-to-end proof, not a constant assertion.
+    #[test]
+    fn harness_down_escalation_reaches_email_rail_urgent_class() {
+        // Serialize on the crate HEX_DIR lock — test_sink is process-global and
+        // shared with every other alert test `cargo test class` runs.
+        let _g = crate::telemetry::test_support::lock_env();
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HEX_DIR", tmp.path());
+        std::fs::create_dir_all(tmp.path().join(".hex/config")).unwrap();
+        std::fs::write(
+            tmp.path().join(".hex/config/alerts.toml"),
+            "ntfy_topic_url = \"https://ntfy.example.invalid/t\"\n\
+             email = \"ops@example.invalid\"\n",
+        )
+        .unwrap();
+        crate::alert::test_sink::reset();
+
+        // Pin the trigger→alert link: the `Escalate` verdict is the sole caller
+        // of `emit_harness_down_alert` (restart + re-bootstrap both failed). If
+        // the arms get rewired away from the helper this assertion still stands,
+        // documenting exactly which verdict must reach the harness-down rail.
+        assert_eq!(classify_restart(false, false), RestartVerdict::Escalate);
+
+        emit_harness_down_alert(tmp.path(), "harness is DOWN after restart + re-bootstrap");
+
+        let emails = crate::alert::test_sink::emails();
+        let pushes = crate::alert::test_sink::pushes();
+        assert_eq!(
+            emails.len(),
+            1,
+            "harness-down must reach the email rail (HarnessDown); got {emails:?}"
+        );
+        assert_eq!(emails[0].to, "ops@example.invalid");
+        assert_eq!(pushes.len(), 1, "harness-down pushes exactly once");
+        assert_eq!(
+            pushes[0].priority, "urgent",
+            "harness-down must push at urgent priority: {pushes:?}"
+        );
     }
 }

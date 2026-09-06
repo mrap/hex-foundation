@@ -396,10 +396,20 @@ fn save_state(hex_dir: &Path, snap: &Snapshot) -> std::result::Result<(), String
 fn emit_alert(t: &Transition) {
     match t {
         Transition::SpecTerminal { spec_id, status } => {
-            hex::alert::notify(
+            // All three terminal statuses alert (trigger unchanged). A terminally
+            // FAILED spec IS a work-order-terminal-failure → the WorkOrderFailed
+            // rail (push urgent + email); completed/canceled stay Default (push
+            // only, normal priority).
+            let class = if status == "failed" {
+                hex::alert::AlertClass::WorkOrderFailed
+            } else {
+                hex::alert::AlertClass::Default
+            };
+            hex::alert::notify_with_class(
                 &format!("boi-spec-watch:spec-terminal:{spec_id}"),
                 "BOI spec terminal",
                 &format!("spec {spec_id} → {}", status.to_uppercase()),
+                class,
             );
         }
         Transition::TaskBlocked {
@@ -555,6 +565,89 @@ mod tests {
                     status: status.to_string(),
                 }],
                 "status {status} must alert"
+            );
+        }
+    }
+
+    // ---- call-site mapping: spec-terminal-failed → WorkOrderFailed rail ----
+
+    /// RED (task Tbnve3dk9): `emit_alert` today sends every `SpecTerminal` at
+    /// `AlertClass::Default` (push only, normal priority) — the three email
+    /// classes are not yet mapped at their call sites. This pins the
+    /// boi-spec-watch mapping end-to-end, driving the real `emit_alert` code
+    /// path with a configured rail and observing delivery through the alert
+    /// module's `test_sink` (email fires only for the three named classes):
+    ///
+    ///   * a terminally FAILED spec MUST reach the email rail and push at
+    ///     `urgent` priority (proves `AlertClass::WorkOrderFailed` reaches the
+    ///     rail);
+    ///   * a non-failed terminal (completed) MUST still alert — the trigger is
+    ///     unchanged (spec: "do not change any alert's trigger conditions") —
+    ///     but push ONLY, at normal priority, with no email.
+    ///
+    /// Both halves fail against the pre-mapping workspace: the failed case
+    /// sends no email today, so the class has not reached the rail.
+    #[test]
+    fn boi_spec_watch_spec_terminal_failed_maps_work_order_failed_class() {
+        let _g = crate::telemetry::test_support::lock_env();
+
+        fn rig(tmp: &tempfile::TempDir) {
+            std::env::set_var("HEX_DIR", tmp.path());
+            std::fs::create_dir_all(tmp.path().join(".hex/config")).unwrap();
+            std::fs::write(
+                tmp.path().join(".hex/config/alerts.toml"),
+                "ntfy_topic_url = \"https://ntfy.example.invalid/t\"\n\
+                 email = \"ops@example.invalid\"\n",
+            )
+            .unwrap();
+            crate::alert::test_sink::reset();
+        }
+
+        // FAILED terminal → email rail + urgent push.
+        {
+            let tmp = tempfile::TempDir::new().unwrap();
+            rig(&tmp);
+            emit_alert(&Transition::SpecTerminal {
+                spec_id: "Sredfail1".to_string(),
+                status: "failed".to_string(),
+            });
+            let emails = crate::alert::test_sink::emails();
+            let pushes = crate::alert::test_sink::pushes();
+            assert_eq!(
+                emails.len(),
+                1,
+                "failed terminal must reach the email rail (WorkOrderFailed); got {emails:?}"
+            );
+            assert_eq!(emails[0].to, "ops@example.invalid");
+            assert_eq!(pushes.len(), 1, "failed terminal pushes exactly once");
+            assert_eq!(
+                pushes[0].priority, "urgent",
+                "failed terminal must push at urgent priority: {pushes:?}"
+            );
+        }
+
+        // Non-failed terminal (completed) → alert still fires, push only, normal.
+        {
+            let tmp = tempfile::TempDir::new().unwrap();
+            rig(&tmp);
+            emit_alert(&Transition::SpecTerminal {
+                spec_id: "Sredok1".to_string(),
+                status: "completed".to_string(),
+            });
+            let pushes = crate::alert::test_sink::pushes();
+            assert_eq!(
+                pushes.len(),
+                1,
+                "non-failed terminal must still alert — trigger unchanged"
+            );
+            assert_eq!(
+                pushes[0].priority, "default",
+                "non-failed terminal pushes at normal priority: {pushes:?}"
+            );
+            assert!(
+                crate::alert::test_sink::emails().is_empty(),
+                "non-failed terminal must not email: {:?}",
+                crate::alert::test_sink::emails()
             );
         }
     }
