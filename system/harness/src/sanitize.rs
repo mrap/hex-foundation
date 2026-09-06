@@ -395,6 +395,79 @@ fn claude_path_check_file(rel_path: &str, content: &str) -> Vec<Violation> {
 }
 
 // ---------------------------------------------------------------------------
+// Artifact-detection category — the second leak class (build artifacts that
+// are mechanically uncommittable). Keyed on the git index (`git ls-files`),
+// NOT a filesystem walk: the tree gitignores `target/` and uses out-of-repo
+// `CARGO_TARGET_DIR` plus per-worktree `target-cq` dirs, so a raw walk would
+// false-positive on gitignored build dirs. Only paths git actually tracks or
+// has staged can leak toward a public branch, so those are what we check.
+// ---------------------------------------------------------------------------
+
+const ARTIFACT_LABEL: &str = "committed build artifact (deny set)";
+const ARTIFACT_SUFFIX: &str =
+    " — target*/, node_modules/, *.rlib, *.rmeta, *.o, .DS_Store must never be committed";
+
+/// Deny-set matcher over a repo-relative, `/`-separated path (git form). True
+/// when any directory component is `node_modules` or begins with `target`, or
+/// the basename ends in `.rlib`/`.rmeta`/`.o` or is exactly `.DS_Store`.
+fn is_artifact_path(rel: &str) -> bool {
+    let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return false;
+    }
+    // Every element except the last is a directory component.
+    for comp in &parts[..parts.len() - 1] {
+        if *comp == "node_modules" || comp.starts_with("target") {
+            return true;
+        }
+    }
+    let base = *parts.last().expect("parts is non-empty");
+    base == ".DS_Store"
+        || base.ends_with(".rlib")
+        || base.ends_with(".rmeta")
+        || base.ends_with(".o")
+}
+
+/// Scan the git index for deny-set build artifacts. A non-git tree has no
+/// tracked paths — zero artifacts, which is correct (not a swallowed error).
+/// A git command that genuinely fails IS surfaced loudly (S6: no quiet
+/// failures) via the returned error.
+fn tracked_artifacts(root: &Path) -> Result<Vec<Violation>> {
+    if !root.join(".git").exists() {
+        return Ok(Vec::new());
+    }
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z"])
+        .output()
+        .with_context(|| format!("sanitize: cannot run `git ls-files` in {}", root.display()))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "sanitize: `git ls-files` failed in {}: {}",
+            root.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let mut found = Vec::new();
+    for chunk in out.stdout.split(|b| *b == 0) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let rel = String::from_utf8_lossy(chunk).into_owned();
+        if is_artifact_path(&rel) {
+            found.push(Violation {
+                category: ARTIFACT_LABEL.to_string(),
+                path: format!("./{rel}"),
+                line: 0,
+                content: rel,
+            });
+        }
+    }
+    Ok(found)
+}
+
+// ---------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------
 
@@ -574,6 +647,21 @@ pub fn scan(repo_root: &Path, verbose: bool) -> Result<Vec<Violation>> {
             verbose,
         );
         all.extend(found);
+    }
+
+    // Second leak class: git-tracked build artifacts. Appended AFTER every
+    // content category so the `/Users/` category always registers first.
+    let artifacts = tracked_artifacts(&root)?;
+    if !artifacts.is_empty() {
+        hit_labels.push(ARTIFACT_LABEL);
+        report_category(
+            ARTIFACT_LABEL,
+            ARTIFACT_SUFFIX,
+            ARTIFACT_SUFFIX,
+            &artifacts,
+            verbose,
+        );
+        all.extend(artifacts);
     }
 
     println!();
@@ -825,6 +913,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist");
         assert!(scan(&missing, false).is_err());
+    }
+
+    // -- Artifact deny-set matcher ----------------------------------------------
+
+    #[test]
+    fn artifact_matcher_denies_deny_set_and_allows_source() {
+        // Deny set: any target*/ dir, node_modules/, *.rlib, *.rmeta, *.o, .DS_Store.
+        assert!(is_artifact_path("target/release/app"));
+        assert!(is_artifact_path("target-iso/app.rlib"));
+        assert!(is_artifact_path("target-cq/deps/foo.rmeta"));
+        assert!(is_artifact_path("system/harness/target/x.o"));
+        assert!(is_artifact_path("web/node_modules/pkg/index.js"));
+        assert!(is_artifact_path("build/app.o"));
+        assert!(is_artifact_path("docs/.DS_Store"));
+        // Source, config, and docs are never artifacts.
+        assert!(!is_artifact_path("system/harness/src/sanitize.rs"));
+        assert!(!is_artifact_path("docs/notes.org")); // ".org" ends in "org", not ".o"
+        assert!(!is_artifact_path("README.md"));
+        assert!(!is_artifact_path("Cargo.toml"));
+        // The `target*/` glob is intentionally broad: any dir beginning with
+        // "target" is denied (target/, target-iso/, target-cq/, targeting/).
+        assert!(is_artifact_path("targeting/plan.md"));
     }
 
     // -- Parity harness ---------------------------------------------------------
