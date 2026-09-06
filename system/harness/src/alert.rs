@@ -53,6 +53,29 @@ pub fn notify_at(hex_dir: &Path, key: &str, title: &str, msg: &str) -> bool {
     true
 }
 
+/// Clear a dedupe stamp so the next `notify(key, …)` is guaranteed to fire.
+///
+/// Used when a watched condition ENDS (e.g. a BOI task leaves `blocked`) so the
+/// next genuine episode re-alerts instead of being swallowed by the shared 6h
+/// dedupe window. Without this, an unblock→re-block inside 6h stays silent (the
+/// bug this closes). Never fails the caller (S6): a missing stamp is a no-op; an
+/// unexpected IO error is logged loudly to stderr, not propagated.
+pub fn clear(key: &str) {
+    if let Ok(d) = std::env::var("HEX_DIR") {
+        clear_at(std::path::Path::new(&d), key);
+    }
+}
+
+/// Inner, testable form of [`clear`].
+pub fn clear_at(hex_dir: &Path, key: &str) {
+    let p = stamp_path(hex_dir, key);
+    match std::fs::remove_file(&p) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!("alert [{key}]: stamp clear failed: {e}"),
+    }
+}
+
 fn stamp_path(hex_dir: &Path, key: &str) -> std::path::PathBuf {
     hex_dir.join(".hex/run/alerts").join(format!("{key}.last"))
 }
@@ -89,5 +112,21 @@ mod tests {
         std::env::set_var("HEX_DIR", tmp.path());
         assert!(notify_at(tmp.path(), "test-key", "t", "m"));
         assert!(!notify_at(tmp.path(), "test-key", "t", "m")); // suppressed
+    }
+
+    #[test]
+    fn clear_stamp_reenables_notify() {
+        let _g = crate::telemetry::test_support::lock_env();
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HEX_DIR", tmp.path());
+        assert!(notify_at(tmp.path(), "clear-key", "t", "m"));
+        assert!(!notify_at(tmp.path(), "clear-key", "t", "m")); // suppressed by stamp
+        clear_at(tmp.path(), "clear-key"); // unblock clears the stamp
+        assert!(
+            notify_at(tmp.path(), "clear-key", "t", "m"),
+            "after clear, the next notify must fire again (re-block re-alert)"
+        );
+        // Clearing an absent stamp is a quiet no-op, never a panic.
+        clear_at(tmp.path(), "never-stamped-key");
     }
 }
