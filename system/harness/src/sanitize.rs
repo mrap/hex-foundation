@@ -149,7 +149,10 @@ fn registry() -> Vec<LineCheck> {
         exclude_dirs: COMMON_EXCLUDE_DIRS,
         filters: {
             let mut f = compile(COMMON_FILTERS);
-            f.push(re(r#"/Users/test(/|"|$)"#)); // personalization-audit: filter literal
+            // Word boundary so prose forms (`/Users/test` in backticks, followed
+            // by punctuation, or at end of sentence) pass while /Users/testuser
+            // still flags — the leak-guard docs describe the rule they enforce.
+            f.push(re(r"/Users/test\b")); // personalization-audit: filter literal
             f.push(re(r"^\./CHANGELOG\.md:"));
             f
         },
@@ -724,6 +727,27 @@ mod tests {
         assert_eq!(v[0].path, "./system/scripts/foo.sh");
         assert_eq!(v[0].line, 1);
         assert_eq!(v[0].category, "hardcoded /Users/ path");
+    }
+
+    #[test]
+    fn users_test_fixture_prose_forms_pass_but_prefix_names_flag() {
+        let c = check("hardcoded /Users/ path");
+        // Sanctioned fake-fixture path in code and in prose (backticks,
+        // punctuation, end of line) — all pass.
+        for good in [
+            r#"path = "/Users/test/hex/file.txt""#,
+            "the `/Users/test` fixture allowance",
+            "The single allowance is /Users/test",
+            "allowance is /Users/test.",
+        ] {
+            assert!(
+                check_content(&c, "docs/x.md", good).is_empty(),
+                "must pass: {good}"
+            );
+        }
+        // A real-looking username sharing the prefix still flags.
+        let bad = "DATA=/Users/testuser/input.csv"; // personalization-audit: test fixture
+        assert_eq!(check_content(&c, "docs/x.md", bad).len(), 1);
     }
 
     #[test]
