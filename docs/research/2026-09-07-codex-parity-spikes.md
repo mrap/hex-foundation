@@ -323,3 +323,152 @@ and stay deterministic. Two gotchas recorded in docs/runtimes.md: raise
 `project_doc_max_bytes` above the 32 KB default to avoid silent AGENTS.md
 truncation, and on macOS key project trust entries on the resolved `/private/tmp`
 path, not `/tmp`.
+## S0.4 Headless auth and environment isolation
+
+Question. Does codex exec run headless from a fully stripped, non-login
+environment? Does CODEX_API_KEY in the environment win over the ChatGPT tokens in
+auth.json? What does --ignore-user-config actually suppress, and how does -p
+interact with it? Do 3 concurrent runs against one CODEX_HOME race or corrupt
+auth.json?
+
+Method (all against codex-cli 0.153.4, isolated temp CODEX_HOME seeded from a copy
+of the real auth.json; model gpt-5.4-mini; every live call ends with < /dev/null).
+
+```
+T=$(mktemp -d); mkdir -p "$T/home" "$T/proj"
+cp ~/.codex/auth.json "$T/home/auth.json"; chmod 600 "$T/home/auth.json"
+
+# (a) stripped env
+env -i HOME="$HOME" PATH=/usr/bin:/bin:/opt/homebrew/bin:"$HOME/.local/bin" CODEX_HOME="$T/home" \
+  codex exec --json --skip-git-repo-check -C "$T/proj" -m gpt-5.4-mini \
+  "Reply with exactly the single word: HEADLESS_OK and nothing else." < /dev/null
+
+# (b) env-var precedence
+CODEX_API_KEY=sk-bogus CODEX_HOME="$T/home" \
+  codex exec --json --skip-git-repo-check -C "$T/proj" -m gpt-5.4-mini "Reply with exactly: PRECEDENCE_OK" < /dev/null
+
+# (c) --ignore-user-config and -p, with AGENTS.md codeword + SessionStart marker hook
+printf 'When asked for the project codeword, answer with exactly: ZEBRAFISH42\n' > "$T/home/AGENTS.md"
+# $T/home/hooks.json SessionStart runs: echo SESSIONSTART_MARKER > $T/home/marker.txt
+printf 'model_reasoning_effort = "low"\n'  > "$T/home/config.toml"
+printf 'model_reasoning_effort = "high"\n' > "$T/home/hi.config.toml"
+CODEX_HOME="$T/home" codex exec ... --dangerously-bypass-hook-trust "What is the project codeword? ..."               # control
+CODEX_HOME="$T/home" codex exec ... --ignore-user-config --dangerously-bypass-hook-trust "What is the project codeword? ..."  # test
+CODEX_HOME="$T/home" codex exec ... -p hi "Reply with exactly: P_OK"
+CODEX_HOME="$T/home" codex exec ... -p hi --ignore-user-config "Reply with exactly: P_OK"
+
+# (d) concurrency
+for i in 1 2 3; do ( CODEX_HOME="$T/home" codex exec ... -m gpt-5.4-mini "Reply with exactly: CONC_$i" < /dev/null; echo $? > "$T/d$i.rc" ) & done; wait
+```
+
+Result.
+- Binary location drift from the brief. codex is at ~/.local/bin/codex (standalone,
+  symlink into ~/.codex/packages/standalone/current/bin/codex); /opt/homebrew/bin/codex
+  does not exist. A stripped PATH must include ~/.local/bin.
+- (a) exit 0. Model returned HEADLESS_OK. Headless from env -i works with only HOME,
+  PATH (containing the codex binary), and CODEX_HOME. The exec --json stream uses
+  item.* events; the older event_msg shape is only in the rollout files.
+- (b) exit 1. CODEX_API_KEY=sk-bogus flipped auth to ApiKey mode
+  (auth.recovery_reason="not_chatgpt_auth") and the request got 401
+  invalid_api_key ("Incorrect API key provided: sk-bogus"). The environment
+  variable wins over the ChatGPT tokens in auth.json.
+- (c) --ignore-user-config only skips $CODEX_HOME/config.toml. $CODEX_HOME/AGENTS.md
+  (codeword ZEBRAFISH42) still reached the model and the SessionStart hook still
+  wrote its marker, both with and without the flag. -p hi layered
+  hi.config.toml on top of base config (reasoning_effort low -> high), but
+  -p hi --ignore-user-config dropped both base and profile, falling back to the
+  built-in default medium. So --ignore-user-config suppresses the profile layer too.
+- (d) All 3 runs exit 0 with distinct output and 3 rollouts written. auth.json mtime
+  and last_refresh are unchanged (token not near expiry, so no refresh fired; a
+  refresh was deliberately not forced to avoid rotating the shared live token). A
+  benign non-fatal race surfaced: concurrent runs collide installing the shared
+  system-skills dir (ERROR codex_skills_extension::host_service: failed to install
+  system skills ... remove existing system skills dir), runs still succeed.
+
+Decision. Headless automation must (1) point PATH at ~/.local/bin (not
+/opt/homebrew/bin) on standalone installs; (2) never leak CODEX_API_KEY into a
+ChatGPT-auth environment, since it silently overrides and 401s; (3) treat
+--ignore-user-config as config.toml-plus-profile-only, and still isolate AGENTS.md
+and hooks.json by controlling CODEX_HOME; (4) give each concurrent worker its own
+CODEX_HOME to avoid the skills-dir race. Follow-up: the concurrent-refresh path is
+unproven; retest near token expiry in a throwaway home before relying on it.
+
+## S0.8 Project layer trust gating
+
+Question. Is a project-local .codex/config.toml read by codex exec only when the
+project is trusted in the user config, and is it skipped otherwise?
+
+Method. Temp project whose .codex/config.toml sets model = "bogus-model-xyz". Run
+once with no [projects] entry in the temp user config and once with a trust entry.
+Base user config sets model = "gpt-5.4-mini" as the fallback so the untrusted arm
+never calls an unsanctioned model.
+
+```
+T=$(mktemp -d); mkdir -p "$T/home" "$T/proj/.codex"
+cp ~/.codex/auth.json "$T/home/auth.json"; chmod 600 "$T/home/auth.json"
+printf 'model = "bogus-model-xyz"\n' > "$T/proj/.codex/config.toml"
+PROJ_REAL=$(cd "$T/proj" && pwd -P)
+
+# untrusted
+printf 'model = "gpt-5.4-mini"\n' > "$T/home/config.toml"
+CODEX_HOME="$T/home" codex exec --json --skip-git-repo-check -C "$T/proj" "Reply with exactly: E_OK" < /dev/null
+
+# trusted
+{ printf 'model = "gpt-5.4-mini"\n\n'; printf '[projects."%s"]\ntrust_level = "trusted"\n' "$PROJ_REAL"; } > "$T/home/config.toml"
+CODEX_HOME="$T/home" codex exec --json --skip-git-repo-check -C "$T/proj" "Reply with exactly: E_OK" < /dev/null
+```
+
+Result.
+- Untrusted: exit 0, resolved model = gpt-5.4-mini. The project config.toml was not
+  read.
+- Trusted: exit 1, resolved model = bogus-model-xyz, API returned 400
+  invalid_request_error "The 'bogus-model-xyz' model is not supported when using
+  Codex with a ChatGPT account." The project config.toml was read and layered on top.
+- The trust-table key must be the canonicalized path. macOS mktemp -d returns a
+  /var/folders (or /tmp) path that is a symlink into /private/...; codex canonicalizes
+  cwd before matching, so writing the unresolved path makes the trusted arm behave
+  like the untrusted arm. Top-level keys in the user config must precede the first
+  [projects."..."] table.
+
+Decision. hex must write [projects."<canonical abs path>"] trust_level = "trusted"
+(resolved with pwd -P / realpath) into the user config before it can rely on any
+project .codex/config.toml being honored. Untrusted projects are safe by default:
+their config layer is silently ignored.
+
+## S0.9 Quota and token accounting
+
+Question. Where do rate limits and token usage live in a headless run, and does a
+turn that makes multiple tool calls count as one message for quota?
+
+Method. One codex exec run (gpt-5.4-mini, read-only sandbox) that makes 3 shell tool
+calls in a single turn, then extract the token_count records from the temp
+CODEX_HOME rollout.
+
+```
+T=$(mktemp -d); mkdir -p "$T/home" "$T/proj"
+cp ~/.codex/auth.json "$T/home/auth.json"; chmod 600 "$T/home/auth.json"
+CODEX_HOME="$T/home" codex exec --json --skip-git-repo-check -C "$T/proj" -m gpt-5.4-mini -s read-only \
+  "Run these three shell commands one at a time using your shell tool: first 'pwd', then 'date +%Y', then 'echo TOOLCALL_DONE'. After all three, reply with the single word FINISHED." < /dev/null
+rf=$(find "$T/home/sessions" -name '*.jsonl' | head -1)
+# count token_count records and read total_token_usage.total_tokens per record
+```
+
+Result.
+- Rate limits live in the rollout as event_msg records of type token_count, each
+  with info (total_token_usage, last_token_usage, model_context_window) and a
+  rate_limits object (limit_id, primary.used_percent, primary.window_minutes,
+  primary.resets_at, credits, plan_type). A scrubbed copy is committed at
+  tests/fixtures/codex/rate-limits.json.
+- The 3-tool-call turn produced 4 token_count records: one per model step (initial
+  plus one after each tool-call result), each with its own rate_limits snapshot.
+- info.total_token_usage.total_tokens accumulates across the invocation
+  (11876 -> 23868 -> 35965 -> 48119); info.last_token_usage is the per-step usage.
+- primary.used_percent was 0.0 for every record (10080-minute window, plan_type pro).
+  Whether a multi-tool-call turn counts as one server-side message is NOT resolvable
+  from a used_percent delta at this utilization; 0.0 -> 0.0 is a null, not a finding.
+
+Decision. For quota tracking hex should read the rate_limits snapshot from the last
+token_count record of a run (used_percent, window_minutes, resets_at), and treat
+token usage as cumulative per invocation via total_token_usage, not per tool call.
+Follow-up: re-measure the used_percent delta on an account with meaningful
+utilization to settle the per-message-versus-per-turn question.

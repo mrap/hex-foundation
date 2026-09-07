@@ -538,3 +538,181 @@ Parity implication: to feed a large hex `AGENTS.md` to Codex, raise
 `project_doc_max_bytes` (default 32 KB truncates silently). Either set it in a
 trusted project `.codex/config.toml` (trust keyed on the resolved path) or pass
 `-c project_doc_max_bytes=<n>` on the command line.
+## Headless auth
+
+Facts verified against codex-cli 0.153.4 on this Mac (2026-09-07, ChatGPT login,
+plan_type pro). Every probe uses an isolated temp CODEX_HOME seeded from a copy of
+the real auth.json. The shared setup for the commands below is:
+
+```
+T=$(mktemp -d); mkdir -p "$T/home" "$T/proj"
+cp ~/.codex/auth.json "$T/home/auth.json"; chmod 600 "$T/home/auth.json"
+```
+
+Binary location drift. The spec brief states codex lives at /opt/homebrew/bin/codex.
+On this Mac it is a standalone install at ~/.local/bin/codex (a symlink into
+~/.codex/packages/standalone/current/bin/codex); /opt/homebrew/bin/codex does not
+exist. A stripped PATH must therefore include ~/.local/bin.
+
+```
+ls -la ~/.local/bin/codex        # -> symlink to ~/.codex/packages/standalone/current/bin/codex
+ls -la /opt/homebrew/bin/codex   # -> No such file or directory
+```
+
+Headless from a fully stripped, non-login environment works (exit 0, model replies).
+`env -i` clears the environment; codex only needs HOME, a PATH that contains its
+binary, and CODEX_HOME.
+
+```
+env -i HOME="$HOME" PATH=/usr/bin:/bin:/opt/homebrew/bin:"$HOME/.local/bin" CODEX_HOME="$T/home" \
+  codex exec --json --skip-git-repo-check -C "$T/proj" -m gpt-5.4-mini \
+  "Reply with exactly the single word: HEADLESS_OK and nothing else." < /dev/null
+# -> exit 0; item.completed agent_message text = "HEADLESS_OK"
+```
+
+The exec --json event stream uses item.* events (for example
+item.completed with item.type = agent_message), not the event_msg shape found in
+the session rollout files.
+
+CODEX_API_KEY in the environment wins over the ChatGPT tokens in auth.json. Setting
+a bogus value flips auth to ApiKey mode and the run fails with a 401 before any
+usable turn. This is the precedence signal.
+
+```
+CODEX_API_KEY=sk-bogus CODEX_HOME="$T/home" \
+  codex exec --json --skip-git-repo-check -C "$T/proj" -m gpt-5.4-mini \
+  "Reply with exactly: PRECEDENCE_OK" < /dev/null
+# -> exit 1; stderr shows auth_mode="ApiKey", auth.recovery_reason="not_chatgpt_auth",
+#    "unexpected status 401 Unauthorized: Incorrect API key provided: sk-bogus"
+```
+
+--ignore-user-config is narrow: it skips only $CODEX_HOME/config.toml (the help text
+says "Do not load $CODEX_HOME/config.toml; auth still uses CODEX_HOME"). A codeword
+in $CODEX_HOME/AGENTS.md still reaches the model and a $CODEX_HOME/hooks.json
+SessionStart hook still fires, with or without the flag. Control run (no flag) and
+test run (flag) both show codeword reaching the model and the hook marker written
+(hook trust bypassed so the marker is not gated by trust). AGENTS.md and hooks.json
+load independently of config.toml.
+
+```
+printf 'When asked for the project codeword, answer with exactly: ZEBRAFISH42\n' > "$T/home/AGENTS.md"
+# hooks.json SessionStart writes "$T/home/marker.txt"
+# control:
+CODEX_HOME="$T/home" codex exec --json --skip-git-repo-check -C "$T/proj" -m gpt-5.4-mini \
+  --dangerously-bypass-hook-trust "What is the project codeword? Answer with one word only." < /dev/null
+# -> exit 0; codeword reply = ZEBRAFISH42; marker PRESENT
+# test:
+CODEX_HOME="$T/home" codex exec --json --skip-git-repo-check -C "$T/proj" -m gpt-5.4-mini \
+  --ignore-user-config --dangerously-bypass-hook-trust "What is the project codeword? Answer with one word only." < /dev/null
+# -> exit 0; codeword reply = ZEBRAFISH42; marker PRESENT (both survive --ignore-user-config)
+```
+
+-p <profile> layers $CODEX_HOME/<name>.config.toml on top of the base user config,
+but --ignore-user-config suppresses the profile as well. With base config
+model_reasoning_effort = "low" and a profile hi.config.toml setting "high": plain run
+resolves low, `-p hi` resolves high (profile read), and `-p hi --ignore-user-config`
+resolves the built-in default medium (both base config and profile dropped). Read the
+resolved effort from stderr (codex.turn.reasoning_effort=...).
+
+```
+printf 'model_reasoning_effort = "low"\n'  > "$T/home/config.toml"
+printf 'model_reasoning_effort = "high"\n' > "$T/home/hi.config.toml"
+CODEX_HOME="$T/home" codex exec --json --skip-git-repo-check -C "$T/proj" -m gpt-5.4-mini "Reply with exactly: P_OK" < /dev/null                              # -> reasoning_effort=low
+CODEX_HOME="$T/home" codex exec --json --skip-git-repo-check -C "$T/proj" -m gpt-5.4-mini -p hi "Reply with exactly: P_OK" < /dev/null                        # -> reasoning_effort=high
+CODEX_HOME="$T/home" codex exec --json --skip-git-repo-check -C "$T/proj" -m gpt-5.4-mini -p hi --ignore-user-config "Reply with exactly: P_OK" < /dev/null   # -> reasoning_effort=medium (default)
+```
+
+Concurrency: 3 codex exec runs launched in parallel against one shared temp
+CODEX_HOME all exit 0 and return their distinct outputs; auth.json is not touched.
+
+```
+before_m=$(stat -f '%m' "$T/home/auth.json")
+for i in 1 2 3; do ( CODEX_HOME="$T/home" codex exec --json --skip-git-repo-check -C "$T/proj" \
+  -m gpt-5.4-mini "Reply with exactly: CONC_$i" < /dev/null > "$T/d$i.out" 2>"$T/d$i.err"; echo $? > "$T/d$i.rc" ) & done; wait
+cat "$T"/d*.rc            # -> 0 0 0
+stat -f '%m' "$T/home/auth.json"   # -> unchanged vs before_m
+```
+
+The token in auth.json was not near expiry, so no refresh fired: auth.json mtime and
+the last_refresh field are identical before and after. The concurrent-refresh path
+was therefore not exercised (a refresh was deliberately not forced, since a refresh
+initiated from a temp-home copy of the live token can rotate it server-side). What
+concurrency does surface is a benign, non-fatal race on the skills extension: two
+runs collide installing the shared system-skills dir, logged as
+`ERROR codex_skills_extension::host_service: failed to install system skills: io
+error while remove existing system skills dir`. The affected runs still exit 0 with
+correct output.
+
+## Project layer trust
+
+A project .codex/config.toml is read only when the project is trusted in the user
+config; an untrusted project's config layer is silently skipped. Probe: a project
+whose .codex/config.toml sets a bogus model, run once with no [projects] entry and
+once with a trust entry. The base user config sets model = "gpt-5.4-mini" as the
+fallback so the untrusted arm never calls an unsanctioned model.
+
+```
+mkdir -p "$T/proj/.codex"
+printf 'model = "bogus-model-xyz"\n' > "$T/proj/.codex/config.toml"
+PROJ_REAL=$(cd "$T/proj" && pwd -P)     # canonical path, see note below
+```
+
+Untrusted (user config has no [projects] entry): the project config is not read, the
+run uses the fallback model gpt-5.4-mini and succeeds.
+
+```
+printf 'model = "gpt-5.4-mini"\n' > "$T/home/config.toml"
+CODEX_HOME="$T/home" codex exec --json --skip-git-repo-check -C "$T/proj" "Reply with exactly: E_OK" < /dev/null
+# -> exit 0; stderr and rollout show model=gpt-5.4-mini (project layer ignored)
+```
+
+Trusted (user config names the project canonical path): the project config is read
+and layered on top, so the bogus model reaches the API and is rejected.
+
+```
+{ printf 'model = "gpt-5.4-mini"\n\n'; printf '[projects."%s"]\ntrust_level = "trusted"\n' "$PROJ_REAL"; } > "$T/home/config.toml"
+CODEX_HOME="$T/home" codex exec --json --skip-git-repo-check -C "$T/proj" "Reply with exactly: E_OK" < /dev/null
+# -> exit 1; model=bogus-model-xyz; API 400 invalid_request_error
+#    "The 'bogus-model-xyz' model is not supported when using Codex with a ChatGPT account."
+```
+
+Canonical path is mandatory. codex canonicalizes the project cwd before matching the
+trust table. On macOS mktemp -d returns /var/folders/... (and /tmp) which are
+symlinks into /private/..., so the [projects."..."] key must use the resolved path
+(pwd -P). Writing the unresolved path makes the trusted arm behave exactly like the
+untrusted arm. Also, in the user config any top-level keys (for example model) must
+appear before the first [projects."..."] table, or the key silently joins the table
+and parsing fails.
+
+## Quota accounting
+
+Quota and token accounting live in the session rollout, in event_msg records of type
+token_count under the temp CODEX_HOME (find "$T/home/sessions" -name '*.jsonl'). A
+scrubbed copy of one run is committed at tests/fixtures/codex/rate-limits.json.
+
+```
+CODEX_HOME="$T/home" codex exec --json --skip-git-repo-check -C "$T/proj" -m gpt-5.4-mini -s read-only \
+  "Run these three shell commands one at a time using your shell tool: first 'pwd', then 'date +%Y', then 'echo TOOLCALL_DONE'. After all three, reply with the single word FINISHED." < /dev/null
+rf=$(find "$T/home/sessions" -name '*.jsonl' | head -1)
+python3 -c "import json;[print(o['payload']['info']['total_token_usage']['total_tokens']) for o in (json.loads(l) for l in open('$rf') if l.strip()) if o.get('payload',{}).get('type')=='token_count']"
+```
+
+One token_count record is emitted per model step, not per tool call. A single exec
+invocation that makes 3 tool calls produced 4 token_count records: one initial model
+step plus one after each tool-call result. Each record carries its own rate_limits
+snapshot (limit_id, primary.used_percent, primary.window_minutes, primary.resets_at,
+credits, plan_type).
+
+info.total_token_usage.total_tokens accumulates across the whole invocation (the
+measured run climbed 11876 -> 23868 -> 35965 -> 48119), while
+info.last_token_usage is the per-step usage.
+
+primary.used_percent stayed 0.0 for every record on a 10080-minute window at the
+current (very low) utilization. Whether a multi-tool-call turn counts as one
+server-side message is therefore NOT resolvable from a used_percent before/after
+delta at this utilization; the delta is 0.0 -> 0.0, which is a null result, not a
+finding. The observable that is resolvable, and only as a reporting fact about the
+records rather than a claim about server-side billing: rate_limits is attached to
+every model step (4 snapshots for the 3-tool-call turn), and in the rollout
+info.total_token_usage is a running total across the whole invocation while
+info.last_token_usage is the per-step usage.
