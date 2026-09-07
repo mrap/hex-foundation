@@ -167,3 +167,159 @@ paths as cwd-relative and resolve them against the payload `cwd`. Hook logic tha
 should also cover subagents can rely on UserPromptSubmit / PreToolUse / PostToolUse
 firing inside subagents, but must treat SubagentStop (not Stop) as the subagent
 terminal signal.
+
+---
+
+<!-- merged from task branch exec-envelope (operator conflict resolution 2026-09-07): duplicate h1 dropped, all content kept -->
+
+
+Dated research ledger for the codex-parity Phase 0 spikes. One section per spike.
+Each section states the Question, the Method with exact commands, the Result, and
+the Decision or Follow-up. All probes ran against codex-cli 0.153.4 on macOS with
+ChatGPT auth, using a throwaway `CODEX_HOME` and a git initialized temp project
+(setup documented in docs/runtimes.md).
+
+## S0.1 codex exec --json envelope plus --output-schema and stdin
+
+Question. What events does `codex exec --json` emit for a one turn run, does
+`--output-schema` enforce strict conformance or fall back, and does a 170 KB
+prompt on stdin (with the positional `-`) reach the model?
+
+Method. Temp CODEX_HOME with a copied auth.json, git initialized temp project.
+
+```bash
+# Envelope
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s read-only \
+  "Reply with exactly the single word: hello" < /dev/null
+# Output schema: flat (3 required, additionalProperties false), nested, top-level oneOf
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s read-only \
+  --output-schema "$T/schema-flat.json"   -o "$T/result-flat.json"   "...demo, count 3, not done" < /dev/null
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s read-only \
+  --output-schema "$T/schema-nested.json" -o "$T/result-nested.json" "...meta.count 2, meta.tags [a,b]" < /dev/null
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s read-only \
+  --output-schema "$T/schema-oneof.json"  -o "$T/result-oneof.json"  "...kind number, value 7" < /dev/null
+# Stdin: 174206 byte prompt, codeword at the end; three cases
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s read-only - < "$T/big.txt"   # positional dash
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s read-only   < "$T/big.txt"   # no positional
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s read-only "...codeword near end..." < "$T/big.txt"
+```
+
+Result.
+
+- Envelope: four JSONL events in order. `thread.started` (carries `thread_id`),
+  `turn.started` (empty), `item.completed` (`item.type` `agent_message`, `text`
+  `hello`), `turn.completed` (`usage` with `input_tokens`, `cached_input_tokens`,
+  `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`).
+  Human readable output and all tracing go to stderr. Captured in
+  `tests/fixtures/codex/exec-envelope.jsonl` (thread_id scrubbed).
+- Output schema: strict, no fallback. Codex forwards the schema to the API as
+  `response_format` named `codex_output_schema`. Flat schema conforms exactly
+  (exit 0, `{"title":"demo","count":3,"done":false}`). Nested object conforms
+  exactly (exit 0, `{"title":"demo","meta":{"count":2,"tags":["a","b"]}}`). Top
+  level `oneOf` is rejected by the API: `invalid_request_error`, code
+  `invalid_json_schema`, `'oneOf' is not permitted`, status 400. The stream emits
+  `error` and `turn.failed`, no `-o` file is written, and the process exits 1.
+  Fixtures: `exec-output-schema.json` and `.result.json` (flat),
+  `exec-output-schema.nested.json` and `.nested.result.json`,
+  `exec-output-schema.oneof.json` and `.oneof.error.json`.
+- Stdin: the codeword `PLATINUM-WALRUS-42` was echoed in all three cases, so the
+  full 170 KB prompt reaches the model. The positional `-` is not required: with
+  no positional and piped stdin the codeword is still echoed. With a positional
+  prompt plus piped stdin, the pipe is appended as a `<stdin>` block (stderr logs
+  `Reading additional input from stdin...`). One dash run first returned a safety
+  refusal that still named the hidden codeword (proving it read the tail); an
+  immediate re run echoed it. Refusal is model nondeterminism, not a `-`
+  behavior difference.
+
+Decision or Follow-up. Envelope shape and strict schema behavior are pinned for
+the Phase 2 and 3 exec gates. Parity code must treat `turn.failed` as a non zero
+exit and must not expect Codex to soften an API rejected schema. Feed prompts on
+stdin with `/dev/null` closed on non prompt runs.
+
+## S0.13 shell_environment_policy
+
+Question. Does the default `shell_environment_policy` strip environment variable
+names containing KEY, SECRET, or TOKEN from the tool shell? Two reads of the
+config reference disagreed.
+
+Method. Export four vars in the launching shell, ask the model to run a shell
+command listing the matching names, under the default policy and under
+`inherit=all`.
+
+```bash
+MY_TEST_KEY=1 MY_TEST_SECRET=1 MY_TEST_TOKEN=1 PLAIN=1 \
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s workspace-write \
+  "Run this exact shell command and report its full stdout verbatim (names only): env | grep -E 'KEY|SECRET|TOKEN' | cut -d= -f1 | sort" < /dev/null
+# repeat with: -c shell_environment_policy.inherit=all
+```
+
+Result. No stripping. The model made a real `command_execution` tool call. Under
+the default policy the tool shell saw 5 matching names: `CLAUDE_CODE_MESSAGING_TOKEN`,
+`MY_TEST_KEY`, `MY_TEST_SECRET`, `MY_TEST_TOKEN`, `STARSHIP_SESSION_KEY`. Under
+`inherit=all` it saw 4: the same set minus `STARSHIP_SESSION_KEY`. The load
+bearing inference: `MY_TEST_KEY`, `MY_TEST_SECRET`, and `MY_TEST_TOKEN` are ad
+hoc exports that no shell profile sets, so their presence in the tool shell under
+the default policy can only be parent environment inheritance. That proves there
+is no default name based stripping. The 5 versus 4 difference does not weaken
+that inference. Its mechanism: the command was executed as `/bin/zsh -lc "..."`
+in the default run and `/bin/zsh -c "..."` in the `inherit=all` run. The login
+form re sources the user profile, which sets `STARSHIP_SESSION_KEY` fresh; the
+non login form does not. That variable came from the profile, not the parent.
+What this probe does not settle is why the invocation form changed between the
+two runs (whether the `shell_environment_policy.inherit` key governs the login
+shell form, or the form varied for an unrelated reason). See the follow-up below.
+
+Decision or Follow-up. The default does not strip secret named vars, so the
+plan's conditional `ignore_default_excludes` decision in runtime.toml is not
+needed. The inverse risk is real: Codex tool shells inherit every secret in the
+launching process environment. hex must scrub or drop secrets before launching
+`codex exec` rather than rely on a default policy. Record this in
+docs/runtimes.md (done).
+
+Open follow-up. Confirm whether `shell_environment_policy.inherit` controls
+whether the tool shell is a login shell (`-lc`) or not (`-c`). Cheap probe for a
+later phase: ask the model, under each policy, to run `echo "$0 $-"` and report
+whether the shell was login. Phase 2 and 3 need this because a login tool shell
+re sources the user profile and can pull in profile only variables.
+
+## S0.14 codex debug prompt-input
+
+Question. What is the JSON shape of `codex debug prompt-input`, and does a 40 KB
+AGENTS.md reach the model in full when `project_doc_max_bytes` is raised?
+
+Method. Temp project with a 40 KB AGENTS.md (40975 bytes) carrying an early
+marker and a tail marker past 39 KB, and `project_doc_max_bytes = 131072` in the
+project `.codex/config.toml`. The subcommand has no `-C` flag, so run it from
+inside the project. It makes no model call.
+
+```bash
+( cd "$PROJ" && CODEX_HOME="$T/home" codex debug prompt-input \
+    "What are the codewords in my project instructions?" )
+# CLI override alternative:
+( cd "$PROJ" && CODEX_HOME="$T/home" codex debug prompt-input -c project_doc_max_bytes=131072 "..." )
+```
+
+Result. Output is a JSON array of messages, each
+`{type:"message", id, role, content, internal_chat_message_metadata_passthrough}`
+with `content` a list of text parts. A one turn setup emitted 5 messages: 3
+`developer`, then 2 `user`. The first `user` message holds three parts
+(`content_item_kinds` `plugins.recommendations`, `agents_md.instructions`,
+`environments.environment_context`): the AGENTS.md is its own
+`agents_md.instructions` part sitting alongside a distinct `<environment_context>`
+part, not inside it. The second `user` message is the prompt. Shape pinned,
+scrubbed, strings over 200 chars truncated, in
+`tests/fixtures/codex/prompt-input.json`. The AGENTS.md reached the model in full
+only when the project layer was actually applied: with the trust entry keyed on
+`pwd -P` (`/private/tmp/...`) the bearing user message was 45357 chars and held
+both markers (measured with `grep -c CODEWORD-TAIL-OMEGA` and a python `len()`
+over the raw output; original AGENTS.md length 41071 chars). The CLI override
+`-c project_doc_max_bytes=131072` gave the same full delivery with no trust entry.
+A wrong trust path (`/tmp/...`) silently dropped the project config and the
+default 32 KB cutoff truncated the tail marker.
+
+Decision or Follow-up. The fixture is pinned for the Phase 2 and 3 instruction
+gates (`codex.agents-md-size`, `instructions.zones`) so they cost no Astra quota
+and stay deterministic. Two gotchas recorded in docs/runtimes.md: raise
+`project_doc_max_bytes` above the 32 KB default to avoid silent AGENTS.md
+truncation, and on macOS key project trust entries on the resolved `/private/tmp`
+path, not `/tmp`.

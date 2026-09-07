@@ -278,3 +278,263 @@ same event sequence lands in the hook log dir (SessionStart, UserPromptSubmit,
 PreToolUse, PostToolUse, Stop) plus any PermissionRequest raised when a command
 needs approval. The interactive PermissionRequest payload is the one field this
 headless spike could not capture; record its shape when performed.
+
+---
+
+<!-- merged from task branch exec-envelope (operator conflict resolution 2026-09-07): duplicate h1 dropped, all content kept -->
+
+
+Verified facts about the agent runtimes hex must target for Codex parity. Each
+fact carries the exact command that produced it. All probes ran against
+codex-cli 0.153.4 on macOS (Apple Silicon), logged in with ChatGPT auth.
+
+Probe convention used throughout: every probe runs against a throwaway
+`CODEX_HOME` that only holds a copy of `auth.json`, and against a git
+initialized temp project. The setup is:
+
+```bash
+T=$(mktemp -d /tmp/hex-p0-t1.XXXXXX)
+mkdir -p "$T/home"
+cp ~/.codex/auth.json "$T/home/auth.json"
+chmod 600 "$T/home/auth.json"
+PROJ="$T/proj"; mkdir -p "$PROJ/.codex"
+( cd "$PROJ" && git init -q && git commit -q --allow-empty -m init )
+# Trust the project layer. IMPORTANT: use the resolved physical path.
+REALPROJ=$(cd "$PROJ" && pwd -P)   # macOS resolves /tmp to /private/tmp
+printf '[projects."%s"]\ntrust_level = "trusted"\n' "$REALPROJ" > "$T/home/config.toml"
+```
+
+Gotcha that bit every project layer probe: on macOS `/tmp` is a symlink to
+`/private/tmp`, and Codex canonicalizes the project path before matching it
+against `[projects."..."]` trust keys. A trust entry keyed on the `/tmp/...`
+spelling never matches, so the project `.codex/config.toml` is silently ignored.
+Always key the trust entry on `pwd -P` (the `/private/tmp/...` form).
+
+## Exec envelope
+
+`codex exec --json` prints one JSON object per line (JSONL). A one turn run
+emits exactly four event types, in order: `thread.started`, `turn.started`,
+`item.completed`, `turn.completed`.
+
+```bash
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s read-only \
+  "Reply with exactly the single word: hello" < /dev/null
+```
+
+Result (captured, scrubbed, in `tests/fixtures/codex/exec-envelope.jsonl`):
+
+- `{"type":"thread.started","thread_id":"<THREAD_ID>"}` carries the only thread
+  identifier in the stream. It is a UUID; scrub it in fixtures.
+- `{"type":"turn.started"}` has no fields.
+- `{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"hello"}}`
+  carries the assistant text. Tool calls appear as their own `item.completed`
+  events with `item.type` of `command_execution` (see Shell environment policy).
+- `{"type":"turn.completed","usage":{...}}` carries token usage. Observed keys:
+  `input_tokens` (11635), `cached_input_tokens` (8448),
+  `cache_write_input_tokens` (0), `output_tokens` (18),
+  `reasoning_output_tokens` (11).
+
+The human readable progress and all `INFO` tracing go to stderr, never to the
+`--json` stdout stream, so `--json` stdout is safe to parse line by line.
+
+## Output schema
+
+`--output-schema FILE` forwards the schema to the model API as a strict
+structured output (`response_format` named `codex_output_schema`). Codex does
+not soften or fall back: a schema the API rejects fails the whole turn.
+
+Flat object schema (`additionalProperties:false`, three required fields), in
+`tests/fixtures/codex/exec-output-schema.json`:
+
+```bash
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s read-only \
+  --output-schema "$T/schema-flat.json" -o "$T/result-flat.json" \
+  "Return a JSON object for a task titled 'demo', count 3, not done." < /dev/null
+```
+
+Result (exit 0): the `-o` file holds exactly the required keys and nothing else,
+`{"title":"demo","count":3,"done":false}`
+(`tests/fixtures/codex/exec-output-schema.result.json`). Conformance is strict.
+
+Nested object schema (a `meta` object with its own required fields), in
+`tests/fixtures/codex/exec-output-schema.nested.json`:
+
+```bash
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s read-only \
+  --output-schema "$T/schema-nested.json" -o "$T/result-nested.json" \
+  "Return a JSON object titled 'demo' with meta.count 2 and meta.tags ['a','b']." < /dev/null
+```
+
+Result (exit 0): `{"title":"demo","meta":{"count":2,"tags":["a","b"]}}`
+(`tests/fixtures/codex/exec-output-schema.nested.result.json`). Nested objects
+are supported and strictly conformed.
+
+Top level `oneOf` schema, in `tests/fixtures/codex/exec-output-schema.oneof.json`:
+
+```bash
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s read-only \
+  --output-schema "$T/schema-oneof.json" -o "$T/result-oneof.json" \
+  "Return a JSON object with kind 'number' and value 7." < /dev/null
+```
+
+Result (exit 1): no `-o` file is written. The stream emits an `error` event and
+a `turn.failed` event carrying the API rejection
+(`tests/fixtures/codex/exec-output-schema.oneof.error.json`):
+`invalid_request_error`, code `invalid_json_schema`, message
+`Invalid schema for response_format 'codex_output_schema': In context=(), 'oneOf' is not permitted.`,
+status 400. There is no fallback; the process exits non zero.
+
+Takeaway for parity: Codex enforces the OpenAI structured output subset. Flat
+and nested objects with `additionalProperties:false` and `required` conform.
+Constructs the API disallows (top level `oneOf`) fail the turn rather than
+degrade.
+
+## Stdin prompt
+
+The positional `-` is not required to read a prompt from stdin. When stdin is a
+pipe, Codex reads it as the prompt whether or not `-` is given. When a positional
+prompt is also supplied, piped stdin is appended to it as a `<stdin>` block.
+The help text states this and the probes confirm it. Test prompt: 174206 bytes
+of filler ending with the codeword `PLATINUM-WALRUS-42` and an instruction to
+reply with only that codeword.
+
+```bash
+# Case 1: positional '-' with piped stdin
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s read-only - < "$T/big.txt"
+# Case 2: no positional at all, piped stdin
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s read-only   < "$T/big.txt"
+# Case 3: positional prompt plus piped stdin
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s read-only \
+  "There is a codeword near the end of the appended text. Reply with only that codeword." < "$T/big.txt"
+```
+
+Result:
+
+- Case 1 (`-`): the assistant reply is `PLATINUM-WALRUS-42`. The codeword sits at
+  byte 174000 or so, so echoing it proves the full 170 KB prompt reached the
+  model. One run first returned a safety refusal that still referenced the
+  hidden codeword (proving it read the tail); an immediate re run echoed the
+  codeword. The refusal is model nondeterminism on the adversarial framing, not
+  a `-` behavior difference.
+- Case 2 (no positional): reply `PLATINUM-WALRUS-42`. Same stdin as case 1, so
+  `-` is confirmed optional.
+- Case 3 (positional plus stdin): reply `PLATINUM-WALRUS-42`. Stderr logs
+  `Reading additional input from stdin...`; the piped text is appended to the
+  positional prompt as a `<stdin>` block.
+
+## Shell environment policy
+
+The tool shell inherits the launching process environment by default, including
+variables whose names look like secrets. There is no default name based
+stripping of `KEY`, `SECRET`, or `TOKEN` variables. Probe: export four vars in
+the launching shell, then ask the model to run a shell command that lists the
+matching variable names.
+
+```bash
+# Default policy
+MY_TEST_KEY=1 MY_TEST_SECRET=1 MY_TEST_TOKEN=1 PLAIN=1 \
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s workspace-write \
+  "Run this exact shell command and report its full stdout verbatim (names only, no values): env | grep -E 'KEY|SECRET|TOKEN' | cut -d= -f1 | sort" < /dev/null
+
+# Same prompt, inherit all of the parent environment
+MY_TEST_KEY=1 MY_TEST_SECRET=1 MY_TEST_TOKEN=1 PLAIN=1 \
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -C "$PROJ" -s workspace-write \
+  -c shell_environment_policy.inherit=all \
+  "Run this exact shell command and report its full stdout verbatim (names only, no values): env | grep -E 'KEY|SECRET|TOKEN' | cut -d= -f1 | sort" < /dev/null
+```
+
+The model makes a real shell tool call (visible in the stream as an
+`item.completed` with `item.type` `command_execution`, wrapping the command in
+the user shell). The `cut -d= -f1 | sort` above emits the matching names; the
+counts below are the length of each list. Matching variable names seen by the
+tool shell:
+
+- Default policy (5 names): `CLAUDE_CODE_MESSAGING_TOKEN`, `MY_TEST_KEY`,
+  `MY_TEST_SECRET`, `MY_TEST_TOKEN`, `STARSHIP_SESSION_KEY`.
+- With `-c shell_environment_policy.inherit=all` (4 names):
+  `CLAUDE_CODE_MESSAGING_TOKEN`, `MY_TEST_KEY`, `MY_TEST_SECRET`, `MY_TEST_TOKEN`.
+
+The load bearing signal is that `MY_TEST_KEY`, `MY_TEST_SECRET`, and
+`MY_TEST_TOKEN` reached the tool shell under both policies. These three are ad
+hoc exports in the launching shell that no shell profile sets, so their presence
+in the tool shell can only be parent environment inheritance. That proves there
+is no default name based stripping, independent of any shell wrapping question.
+The 5 versus 4 difference does not weaken that inference, but its cause is worth
+recording rather than dismissing. In these two runs the command was executed as
+`/bin/zsh -lc "..."` under the default policy and `/bin/zsh -c "..."` under
+`inherit=all`. The login form (`-lc`) re sources the user profile, which sets
+`STARSHIP_SESSION_KEY` fresh; the non login form does not, which accounts for the
+one extra name. What this probe does not settle is why the invocation form
+changed between the two runs: whether the `shell_environment_policy.inherit` key
+itself governs whether the tool shell is a login shell, or the form varied for an
+unrelated reason. Phase 2 and 3 care whether the Codex tool shell re sources the
+user profile, so this stays an open follow-up (recorded in the ledger), not a
+closed result.
+
+Parity implication: a hex process that shells out to `codex exec` must assume
+the model's tool shell can read every secret in the hex process environment.
+Scrub or drop secrets before launching Codex; do not rely on a default policy to
+hide them. The model itself refused to echo secret values verbatim, but that is
+a model behavior, not an environment guarantee.
+
+## Prompt input debug
+
+`codex debug prompt-input "<prompt>"` renders the model visible input as a JSON
+array of messages. It has no `-C` flag, so run it from inside the project
+directory. It makes no model call, so it does not consume quota. The array holds
+one message per input block; each message is
+`{type:"message", id, role, content, internal_chat_message_metadata_passthrough}`
+with `content` a list of text parts. A one turn setup emits five messages: three
+`developer` role (system and tool preamble), then two `user` role. The first
+`user` message carries three separate text parts, tagged in
+`internal_chat_message_metadata_passthrough.content_item_kinds` as
+`plugins.recommendations`, `agents_md.instructions`, and
+`environments.environment_context`. The project `AGENTS.md` is its own
+`agents_md.instructions` part (embedded as `# AGENTS.md instructions for <path>`
+wrapping an `<INSTRUCTIONS>` block); it sits alongside a distinct
+`<environment_context>` part, not inside it. The second `user` message is the
+user prompt. Parity gates that read this fixture should locate the `AGENTS.md` by
+matching the `agents_md.instructions` kind string, not by indexing a fixed
+`content` position: Codex may add or reorder parts (for example, the
+`plugins.recommendations` part is absent when no plugins are recommended), which
+would shift positional offsets. The scrubbed and truncated shape is in
+`tests/fixtures/codex/prompt-input.json` (every string over 200 chars is cut with
+a note of its original length).
+
+The probe uses a 40 KB `AGENTS.md` (40975 bytes on disk) with an early marker
+`CODEWORD-EARLY-ALPHA` near the top and a tail marker `CODEWORD-TAIL-OMEGA` past
+the 39 KB mark, plus `project_doc_max_bytes = 131072` in the project
+`.codex/config.toml`.
+
+```bash
+( cd "$PROJ" && CODEX_HOME="$T/home" codex debug prompt-input \
+    "What are the codewords in my project instructions?" )
+```
+
+Result:
+
+- With the trust entry keyed on the wrong `/tmp/...` path, the project config is
+  ignored, the default `project_doc_max_bytes` (32 KB) applies, and the tail
+  marker is absent (the `AGENTS.md` bearing message stops around 32 KB). This is
+  the trust path gotcha described at the top of this file.
+- With the trust entry keyed on `pwd -P` (`/private/tmp/...`), the project config
+  applies and the `AGENTS.md` reaches the model in full. Measured on the raw
+  (unredacted) output: `grep -c CODEWORD-TAIL-OMEGA out.json` returns 1, and a
+  python `len()` over the joined text parts of the `AGENTS.md` bearing user
+  message returns 45357 chars, holding both `CODEWORD-EARLY-ALPHA` and
+  `CODEWORD-TAIL-OMEGA`. That 45357 is the whole first `user` message (the three
+  parts joined: `plugins.recommendations` plus `agents_md.instructions` plus
+  `environments.environment_context`), not the `AGENTS.md` alone. The `AGENTS.md`
+  text is its own part, embedded as `# AGENTS.md instructions for <path>` wrapping
+  an `<INSTRUCTIONS>` block; the fixture's truncation note records that part's
+  original length as 41071 chars, which is the 40975 byte on-disk file plus the
+  `# AGENTS.md instructions ...` / `<INSTRUCTIONS>` wrapper.
+- The same full delivery happens with a CLI override, no project config or trust
+  entry needed:
+  `codex debug prompt-input -c project_doc_max_bytes=131072 "..."` echoes both
+  markers.
+
+Parity implication: to feed a large hex `AGENTS.md` to Codex, raise
+`project_doc_max_bytes` (default 32 KB truncates silently). Either set it in a
+trusted project `.codex/config.toml` (trust keyed on the resolved path) or pass
+`-c project_doc_max_bytes=<n>` on the command line.
