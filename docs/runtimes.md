@@ -1018,3 +1018,51 @@ first, then:
 ```
 cargo test --manifest-path system/harness/Cargo.toml codex_hook_hash -- --ignored
 ```
+
+## Claude MCP user scope
+
+Claude Code version: 2.1.263 (from `claude --version`).
+
+Question: where and in what shape does `claude mcp add-json -s user` persist an
+MCP server, and how does `claude mcp remove -s user` behave.
+
+Every probe ran with HOME set to a throwaway temp dir, so the real
+~/.claude.json was never touched. Fixture:
+tests/fixtures/claude/mcp-add-json-user.json (the scrubbed .claude.json Claude
+wrote; machineID and userID redacted).
+
+Commands (HOME points at the temp dir for every call):
+
+    claude mcp add-json -s user probe-http '{"type":"http","url":"https://example.invalid/mcp","headers":{"X-Test":"1"}}'
+    claude mcp add-json -s user probe-stdio '{"type":"stdio","command":"npx","args":["-y","some-mcp-server"],"env":{"API_KEY":"xxx"}}'
+    claude mcp list
+    claude mcp remove -s user probe-http
+
+Facts:
+
+- User scope writes to the top-level `mcpServers` key of `<HOME>/.claude.json`.
+  The add-json payload is stored verbatim as the value under the server name.
+  The http entry keeps `type`, `url`, and `headers`. The stdio entry keeps
+  `type`, `command`, `args`, and `env`. (from the two add-json commands)
+- Placement does not depend on the working directory. Running add-json from a
+  project subdirectory still writes the top-level `mcpServers` key and creates
+  no `projects` entry. (verified by running add-json from a `<HOME>/proj` cwd,
+  then checking `has projects key: False`)
+- Each add-json call exits 0 and prints a confirmation line:
+  `Added http MCP server probe-http to user config` and
+  `Added stdio MCP server probe-stdio to user config`. (exit codes from the
+  add-json commands)
+- The written `<HOME>/.claude.json` has file mode 0600. (from `ls -l`)
+- The first run also creates the directory `<HOME>/.claude/backups/`. (from
+  `ls -l <HOME>/.claude`)
+- `claude mcp remove -s user probe-http` exits 0 and prints
+  `Removed MCP server probe-http from user config` then
+  `File modified: <TMP>/home/.claude.json`. It deletes only the named server;
+  the other server stays. (from the remove command)
+- Removing a name that is absent from the scope exits 1 and prints
+  `No MCP server named "probe-http" in user scope`. Remove is not idempotent: a
+  second remove of the same name is a nonzero error. (from a second remove)
+
+Parity note for Codex: user-scope MCP servers are a flat map at the top of one
+JSON file, keyed by server name, with the value equal to the add-json payload. A
+Codex equivalent should target the same top-level `mcpServers` map.

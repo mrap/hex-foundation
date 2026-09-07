@@ -613,3 +613,52 @@ Decision or Follow-up.
   that, run
   `cargo test --manifest-path system/harness/Cargo.toml codex_hook_hash -- --ignored`
   to confirm the reproduction against a hash Codex itself wrote.
+
+## S0.10 Claude MCP add-json user scope
+
+Question: what exact JSON does `claude mcp add-json -s user` write for an http
+server with headers and for a stdio server, and how does remove behave in the
+user scope.
+
+Method (exact commands, HOME set to a throwaway temp dir for every call so the
+real ~/.claude.json stays untouched):
+
+    T=$(mktemp -d); mkdir -p "$T/home"
+    HOME="$T/home" claude mcp add-json -s user probe-http '{"type":"http","url":"https://example.invalid/mcp","headers":{"X-Test":"1"}}'
+    HOME="$T/home" claude mcp add-json -s user probe-stdio '{"type":"stdio","command":"npx","args":["-y","some-mcp-server"],"env":{"API_KEY":"xxx"}}'
+    HOME="$T/home" claude mcp list
+    HOME="$T/home" claude mcp remove -s user probe-http
+
+Result:
+
+- Claude Code version 2.1.263.
+- Both add-json calls exit 0. Messages: `Added http MCP server probe-http to
+  user config` and `Added stdio MCP server probe-stdio to user config`.
+- User scope writes to the top-level `mcpServers` key of `<HOME>/.claude.json`.
+  The payload is stored verbatim under the server name. Running from a project
+  subdirectory does not change placement and creates no `projects` entry.
+- The written file is mode 0600. The first run also creates
+  `<HOME>/.claude/backups/`.
+- `claude mcp remove -s user probe-http` exits 0, prints `Removed MCP server
+  probe-http from user config` and `File modified: <TMP>/home/.claude.json`,
+  and leaves the other server in place.
+- A second remove of the same name exits 1 with `No MCP server named
+  "probe-http" in user scope`.
+- A scrubbed copy of the written file is committed as
+  tests/fixtures/claude/mcp-add-json-user.json (machineID and userID redacted).
+
+Decision or Follow-up: for Codex parity, target the flat top-level `mcpServers`
+map in one JSON file, keyed by server name, with the value equal to the add-json
+payload. Treat remove as scope scoped and expect a nonzero exit when the name is
+absent.
+
+## S0.6 Effort levels
+
+These three facts are pinned from prior verification on 2026-09-07. They were
+not re-run in this task, because the spec forbids using gpt-6-astra in spikes
+(shared quota with Mike's interactive sessions). Recorded here for the record.
+
+- gpt-6-astra accepts `-c model_reasoning_effort=ultra` (exit 0, 2026-09-07).
+- The model catalog lists low, medium, high, xhigh, max, ultra for gpt-6-astra,
+  with default low (2026-09-07).
+- The API key on this Mac lists gpt-6-astra in /v1/models (2026-09-07).
