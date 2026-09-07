@@ -716,3 +716,149 @@ records rather than a claim about server-side billing: rate_limits is attached t
 every model step (4 snapshots for the 3-tool-call turn), and in the rollout
 info.total_token_usage is a running total across the whole invocation while
 info.last_token_usage is the per-step usage.
+# Runtimes
+
+Facts about how hex agent runtimes behave, captured during the codex parity
+spike (Phase 0, 2026-09-07). Each fact carries the exact command that produced
+it. Redactions: `<TMP>` for temp paths, `<REDACTED>` / `<ACCOUNT_ID>` for any
+account identifier or token.
+
+Environment note (all tasks): the codex 0.153.4 binary is at `~/.local/bin/codex`
+(a symlink to `~/.codex/packages/standalone/...`), not `/opt/homebrew/bin/codex`
+as the spike brief states. Version and ChatGPT login both match the brief.
+Command: `codex --version` prints `codex-cli 0.153.4`; `readlink ~/.local/bin/codex`
+shows the standalone target.
+
+## goose codex provider
+
+Probed with goose 1.46.0 (`~/.local/bin/goose`, `goose --version` prints `1.46.0`)
+driving codex 0.153.4. Every run used an isolated temp `HOME` and a temp
+`CODEX_HOME` (with `auth.json` copied in, ChatGPT login) so no real goose or codex
+config was touched. `CODEX_COMMAND` pointed at a wrapper that logged codex argv
+plus a whitelist of env vars, then exec'd the real codex. Full argv capture is in
+`tests/fixtures/codex/goose-codex-argv.txt`.
+
+### Providers available
+
+goose 1.46.0 ships three codex-related providers. The plain `codex` provider (id
+`codex`, display "OpenAI Codex CLI") is deprecated in favor of `chatgpt_codex` and
+`codex-acp`, and it is the one that shells out to the codex CLI. `chatgpt_codex`
+is an OAuth HTTP provider (no subprocess). `codex-acp` uses the
+`@agentclientprotocol/codex-acp` adapter.
+Command: `strings ~/.local/bin/goose | grep -iE 'OpenAI Codex CLI|Deprecated|chatgpt_codex|codex-acp'`
+Result: the `codex` entry text reads
+`[Deprecated: use chatgpt_codex or codex-acp instead] Execute OpenAI models via Codex CLI tool. Requires codex CLI installed.`
+The `codex` provider reads env vars `CODEX_COMMAND`, `CODEX_SKIP_GIT_CHECK`, and
+`CODEX_REASONING_EFFORT`. Source files seen in the binary:
+`crates/goose/src/providers/codex.rs`, `chatgpt_codex.rs`, `codex_acp.rs`.
+
+### How provider and model are chosen
+
+Command: `goose run --help`
+Result: `--provider <P>` overrides the `GOOSE_PROVIDER` env var, `--model <M>`
+overrides `GOOSE_MODEL`; both otherwise come from `~/.config/goose/config.yaml`.
+A recipe can set them via `settings.goose_provider` and `settings.goose_model`.
+Non-interactive execution is `goose run --no-session -q` (there is no `--yolo`
+flag on goose itself; approval behavior is set by `GOOSE_MODE`, one of `auto`,
+`approve`, `smart_approve`, `chat`).
+
+Confirmed with a recipe (offline, no model call):
+Command: `goose run --recipe <TMP>/recipe.yaml --render-recipe`
+Recipe settings used:
+```
+settings:
+  goose_provider: codex
+  goose_model: gpt-5.4-mini
+```
+Result: the render echoed the recipe back, which only confirms it parses. That
+the recipe actually drives the run is shown by the live auto run below: it set no
+`--provider`/`--model` on the CLI, the captured env had `GOOSE_PROVIDER` and
+`GOOSE_MODEL` both `<unset>`, and HOME was isolated (no config.yaml), yet the run
+reached provider `codex` with model `gpt-5.4-mini`. goose's own request log
+`<TMP>/home/.local/state/goose/logs/llm_request.0.jsonl` recorded
+`"model_name":"gpt-5.4-mini"` with `"command":"<TMP>/bin/codex-wrap.sh"`, and the
+cli log recorded `"gen_ai.provider.name":"codex"`.
+
+### Codex invocation and argv
+
+goose spawns the codex CLI (through `CODEX_COMMAND`) as:
+```
+<CODEX_COMMAND> exec -c model_reasoning_effort="<effort>" --json [--yolo] -
+```
+The prompt is piped to codex on stdin (the positional `-`). goose forwards no
+model to codex: the argv has no `-m`, `--model`, or `-c model=` token in any of
+the three captured runs (see the fixture), and goose does not write codex config.
+codex therefore takes its model from the temp CODEX_HOME `config.toml`, which this
+probe pinned to `model = "gpt-5.4-mini"` (confirmed by `turn_context.model =
+"gpt-5.4-mini"` in the rollout below).
+`CODEX_SKIP_GIT_CHECK=true` was set on every run but never appeared in the argv,
+so goose does not translate it into codex `--skip-git-repo-check`.
+Command that produced the argv (full capture in the fixture):
+```
+env HOME=<TMP>/home CODEX_HOME=<TMP>/codexhome \
+    CODEX_COMMAND=<TMP>/bin/codex-wrap.sh CODEX_REASONING_EFFORT=high \
+    CODEX_SKIP_GIT_CHECK=true GOOSE_MODE=auto GOOSE_DISABLE_KEYRING=true \
+    GOOSE_DISABLE_SESSION_NAMING=true \
+    goose run --no-session -q --recipe <TMP>/recipe.yaml < /dev/null
+```
+Captured argv: `exec -c model_reasoning_effort="high" --json --yolo -`.
+The run exited 0 and the model replied `READY`.
+
+### Approval and sandbox mapping (the rollout)
+
+`GOOSE_MODE=auto` makes goose pass `--yolo` to `codex exec`. The resulting codex
+rollout `turn_context` records `approval_policy = "never"` and
+`sandbox_policy = {"type": "danger-full-access"}`.
+Command (after the auto run above, read the newest rollout):
+```
+python3 -c 'import json,glob;
+p=sorted(glob.glob("<TMP>/codexhome/sessions/**/rollout-*.jsonl",recursive=True))[-1];
+[print(json.dumps(json.loads(l)["payload"])) for l in open(p)
+ if l.strip() and json.loads(l).get("type")=="turn_context"]'
+```
+Result (cwd and ids redacted):
+```
+approval_policy: "never"
+approvals_reviewer: "user"
+sandbox_policy: {"type": "danger-full-access"}
+permission_profile: {"type": "disabled"}
+model: "gpt-5.4-mini"
+reasoning_effort: "high"
+```
+So yes: auto mode (codex `--yolo`) maps to `danger-full-access` plus `never`
+approval.
+
+`GOOSE_MODE=approve` drops `--yolo` from the argv (observed in the fixture).
+Command: `env ... GOOSE_MODE=approve ... goose run --no-session -q --recipe <TMP>/recipe.yaml < /dev/null`
+Captured argv: `exec -c model_reasoning_effort="high" --json -` (no `--yolo`).
+A turn_context was not read for the approve run, so the resulting codex policy
+(codex defaults: on-request approval, workspace-write sandbox) is inferred, not
+observed. The probe prompt used no tools, so approve-mode tool gating in
+non-interactive goose is untested here.
+
+### CODEX_COMMAND is honored
+
+The wrapper set as `CODEX_COMMAND` was invoked on every run (it wrote its argv
+log), and `GOOSE_CODEX_DEBUG=1` printed the constructed command.
+Command: `env ... GOOSE_CODEX_DEBUG=1 ... goose run --no-session -q --recipe <TMP>/recipe.yaml < /dev/null`
+Result: goose stdout contained `=== CODEX PROVIDER DEBUG ===` and
+`Command: "<TMP>/bin/codex-wrap.sh"`, matching the wrapper path in the fixture.
+
+### CODEX_REASONING_EFFORT is honored
+
+goose translates `CODEX_REASONING_EFFORT` into codex `-c model_reasoning_effort="<value>"`.
+When unset, the effort defaults to `high`.
+Command (fresh HOME to rule out persisted state):
+```
+env HOME=<TMP>/home2 CODEX_HOME=<TMP>/codexhome \
+    CODEX_COMMAND=<TMP>/bin/codex-wrap.sh CODEX_REASONING_EFFORT=low \
+    CODEX_SKIP_GIT_CHECK=true GOOSE_MODE=auto GOOSE_DISABLE_KEYRING=true \
+    goose run --no-session -q --recipe <TMP>/recipe.yaml < /dev/null
+```
+Captured argv: `exec -c model_reasoning_effort="low" --json --yolo -`. With the
+env var unset the argv showed `model_reasoning_effort="high"`, so `low` proves
+the override is honored.
+Command (distinguish the two providers' env var names):
+`strings ~/.local/bin/goose | grep -oE '(CHATGPT_)?CODEX_REASONING_EFFORT' | sort -u`
+Result: both `CODEX_REASONING_EFFORT` (the `codex` CLI provider) and
+`CHATGPT_CODEX_REASONING_EFFORT` (the `chatgpt_codex` OAuth provider) are present.

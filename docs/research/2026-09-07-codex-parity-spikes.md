@@ -472,3 +472,70 @@ token_count record of a run (used_percent, window_minutes, resets_at), and treat
 token usage as cumulative per invocation via total_token_usage, not per tool call.
 Follow-up: re-measure the used_percent delta on an account with meaningful
 utilization to settle the per-message-versus-per-turn question.
+# Codex parity spikes (Phase 0)
+
+Dated research ledger for the codex parity plan. One entry per spike. Each entry
+gives the question, the exact commands, the result, and a decision or follow-up.
+Plain language. No em dashes.
+
+## S0.7 goose codex provider
+
+Question. How does goose 1.46.0 drive the codex CLI? What provider and model
+selection does it use, what approval and sandbox policy shows up in the codex
+rollout, and does it honor CODEX_COMMAND and CODEX_REASONING_EFFORT?
+
+Method (exact commands). All runs used a temp HOME and temp CODEX_HOME so no
+real config was touched.
+```
+T=$(mktemp -d /tmp/gooseprobe.XXXXXX)
+mkdir -p "$T/home" "$T/home2" "$T/codexhome" "$T/bin"
+cp ~/.codex/auth.json "$T/codexhome/auth.json"; chmod 600 "$T/codexhome/auth.json"
+printf 'model = "gpt-5.4-mini"\n' > "$T/codexhome/config.toml"
+# wrapper logs argv + whitelisted env, then exec's the resolved real codex path
+# recipe sets settings.goose_provider=codex, settings.goose_model=gpt-5.4-mini
+goose run --recipe "$T/recipe.yaml" --render-recipe            # offline validation
+# RUN A: auto + effort high
+env HOME="$T/home" CODEX_HOME="$T/codexhome" CODEX_COMMAND="$T/bin/codex-wrap.sh" \
+    CODEX_REASONING_EFFORT=high CODEX_SKIP_GIT_CHECK=true GOOSE_MODE=auto \
+    GOOSE_DISABLE_KEYRING=true GOOSE_DISABLE_SESSION_NAMING=true \
+    goose run --no-session -q --recipe "$T/recipe.yaml" < /dev/null
+# RUN B: approve, effort unset, GOOSE_CODEX_DEBUG=1
+# RUN C: fresh HOME ($T/home2), auto, CODEX_REASONING_EFFORT=low
+# then read newest rollout turn_context from $T/codexhome/sessions/**/rollout-*.jsonl
+```
+
+Result.
+- goose 1.46.0 has three codex providers. The one named `codex` shells out to the
+  codex CLI and is deprecated in favor of `chatgpt_codex` (OAuth HTTP) and
+  `codex-acp` (ACP adapter).
+- Provider and model come from `--provider`/`--model`, or `GOOSE_PROVIDER`/
+  `GOOSE_MODEL`, or a recipe `settings.goose_provider`/`settings.goose_model`.
+  Non-interactive mode is `goose run --no-session -q`. There is no goose `--yolo`
+  flag; `GOOSE_MODE` (auto, approve, smart_approve, chat) selects approval mode.
+- goose invokes `<CODEX_COMMAND> exec -c model_reasoning_effort="<effort>" --json
+  [--yolo] -` and pipes the prompt to codex stdin. The argv has no `-m`,
+  `--model`, or `-c model=` token in any of the three runs, so goose forwards no
+  model; codex took its model from the temp CODEX_HOME config.toml, which the
+  probe pinned to gpt-5.4-mini (turn_context.model confirmed gpt-5.4-mini).
+  `CODEX_SKIP_GIT_CHECK=true` was set but never reached the argv, so goose does
+  not translate it to codex `--skip-git-repo-check`.
+- GOOSE_MODE=auto passes `--yolo`. The codex rollout turn_context then shows
+  `approval_policy = "never"` and `sandbox_policy = {"type": "danger-full-access"}`.
+  So yes, auto maps to danger-full-access plus never. GOOSE_MODE=approve drops
+  `--yolo` from the argv (observed); the resulting codex default policy for the
+  approve run was inferred, not read from a turn_context.
+- CODEX_COMMAND is honored: the wrapper ran on every invocation, and
+  GOOSE_CODEX_DEBUG=1 printed `Command: "<wrapper path>"`.
+- CODEX_REASONING_EFFORT is honored: `low` produced `model_reasoning_effort="low"`
+  in the argv; when unset the effort defaulted to `high`.
+- Captured argv committed at `tests/fixtures/codex/goose-codex-argv.txt`
+  (temp paths redacted to <TMP>, env whitelist only, no secrets).
+
+Decision or follow-up. For codex parity, goose already produces the yolo mapping
+(auto to danger-full-access plus never). The env var for the `codex` CLI provider
+is `CODEX_REASONING_EFFORT` (the `chatgpt_codex` provider uses the
+`CHATGPT_CODEX_` prefix instead). Follow-up: the `codex` provider is deprecated
+in 1.46.0, so a later phase should decide whether to standardize on `codex-acp`
+or `chatgpt_codex`. Environment correction for all tasks: the codex 0.153.4 binary
+is at `~/.local/bin/codex`, not `/opt/homebrew/bin/codex` as the brief states
+(version and ChatGPT login match).
