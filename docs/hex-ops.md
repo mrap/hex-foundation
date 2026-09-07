@@ -514,3 +514,68 @@ sweep backups and databases into history.
   files by hand.
 - Treat a first upgrade to a new version as the moment to reconcile the ignore
   rules — new source files ship with minor/major bumps, not patch syncs.
+
+## Repo leak guards (`.githooks/pre-commit` + sanitize)
+
+Two leak classes must never reach a public branch: absolute **private home
+paths** (`/Users/<letter>...`, excluding the `/Users/test` fixture) and **build
+artifacts** (a worker tree-preservation commit once swept ~1230 cargo artifact
+files carrying ~6000 private path strings toward a public branch; caught by
+review pre-push, 2026-09-04). There are now two mechanical lines of defense.
+
+### The committed pre-commit hook
+
+`.githooks/pre-commit` is a committed hook (not a per-clone `.git/hooks/` file)
+with three independent guards; it runs all three and reports every failure at
+once, ending in an explicit `exit 0` so a no-match `grep` never rejects a clean
+commit under `pipefail`:
+
+1. **Legacy-rename guard** (pre-existing) — blocks renaming a script to
+   `.legacy.{sh,py}` while Rust callers under `system/harness/src/` still
+   reference it.
+2. **Private-path guard** — rejects staged **added** lines containing an
+   absolute `/Users/<letter>` path. The single allowance is `/Users/test`
+   (followed by `/` or end-of-token), mirroring the sanitize gate's boundary.
+3. **Artifact-deny-set guard** — rejects any staged path matching the deny set:
+   any `target*/` directory, `node_modules/`, `*.rlib`, `*.rmeta`, `*.o`,
+   `.DS_Store`.
+
+Operational note: the guard inspects staged **added** lines only, and the sole
+allowance is `/Users/test`. This repo's own test fixtures use other fake
+`/Users/<name>` paths tagged `personalization-audit`; re-staging those exact
+lines would trip guard 2. That is a deliberate, spec-faithful tradeoff —
+a second unspecified allowance would be a silent-skip channel (Standing Order
+S6). In practice you rarely re-stage those fixture lines; when you do, the
+sanitize gate already tolerates them and this guard's message names the path.
+
+### Wiring: `core.hooksPath`
+
+A committed hook only fires when git is told to look in `.githooks/`:
+
+- **`hex upgrade`** wires it automatically. `configure_hooks_path()` sets
+  `git config core.hooksPath .githooks` in any workspace that is its own git
+  top-level and carries `.githooks/`. It is idempotent (no-op when already set)
+  and loud-but-non-fatal on failure — a missing hooks wiring never blocks a
+  version sync.
+- **`hex doctor`** carries the standing backstop `git-hookspath` check: it
+  **skips** when the repo has no `.githooks/`, **passes** when `core.hooksPath`
+  points at `.githooks`, and **warns** when `.githooks/` is present but
+  `core.hooksPath` is unset or points elsewhere (the committed hook would be
+  dead code).
+- **Fresh clones** of the foundation repo have no `hex upgrade` step; run
+  `git config core.hooksPath .githooks` once (or `hex doctor` will warn until
+  you do). Note: the initial install path (`install.sh`) lives at the repo root,
+  outside this change's allowed scope, so clone-time wiring is via `hex doctor`
+  + the manual one-liner rather than the installer.
+
+### Release-time backstop: `sanitize`
+
+`system/harness/src/sanitize.rs`'s `scan()` is the last line at release time. It
+already flagged the `/Users/` leak class; it now also carries an
+**artifact-detection** category. That category keys on the **git index**
+(`git ls-files`), not a filesystem walk — the tree gitignores `target/` and uses
+out-of-repo `CARGO_TARGET_DIR` plus per-worktree `target-cq` dirs, so a raw walk
+would false-positive on gitignored build dirs. A non-git tree has no tracked
+paths (zero artifacts, correct); a genuine `git` failure is surfaced loudly. So
+`sanitize` catches a deny-set artifact that slips past the hook (e.g. committed
+before the hook was wired) before it can ship in a release.

@@ -1165,6 +1165,53 @@ fn is_own_git_toplevel(dir: &Path) -> bool {
     }
 }
 
+/// Point `core.hooksPath` at the committed `.githooks/` dir so the leak-guard
+/// pre-commit hook fires for clones and upgraded instances without a manual
+/// `git config` step. Idempotent: a no-op when already set to `.githooks`, and
+/// a no-op when the repo carries no `.githooks/` dir. Failures are surfaced
+/// loudly (S6: no quiet failures) but never abort the upgrade — a missing
+/// hooks wiring must not block a version sync. `hex doctor`'s `git-hookspath`
+/// check is the standing backstop that flags an unwired repo.
+fn configure_hooks_path(workspace: &Path) {
+    let githooks = workspace.join(".githooks");
+    if !githooks.is_dir() {
+        return;
+    }
+    let current = Command::new("git")
+        .args(["config", "--get", "core.hooksPath"])
+        .current_dir(workspace)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if current == ".githooks" {
+        return; // already wired
+    }
+    match Command::new("git")
+        .args(["config", "core.hooksPath", ".githooks"])
+        .current_dir(workspace)
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            println!("  [OK] Wired core.hooksPath → .githooks (leak-guard pre-commit hook).");
+        }
+        Ok(o) => {
+            eprintln!(
+                "  [WARN] Could not set core.hooksPath in {}: {}",
+                workspace.display(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "  [WARN] Could not run `git config core.hooksPath` in {}: {e}",
+                workspace.display()
+            );
+        }
+    }
+}
+
 /// After a successful sync + rebuild, commit the synced tracked files under
 /// `.hex/` in the instance workspace so the repo reflects the deployed version.
 /// This closes the "deployed-but-orphaned" blind spot (a live deploy left
@@ -1500,6 +1547,11 @@ pub fn run(args: &[String]) -> i32 {
     // instance's OWN repo; a failure here is LOUD (S6) and exits nonzero so the
     // operator knows the deploy is live but unrecorded in git.
     if is_own_git_toplevel(&hex_dir) {
+        // Wire the committed leak-guard hook so clones and instances get it
+        // without a manual `git config` step. Idempotent; loud on failure but
+        // never aborts the upgrade (a missing hooks wiring must not block a
+        // version sync).
+        configure_hooks_path(&hex_dir);
         // Read the version to name the commit. A missing/empty/unreadable
         // version.txt must NOT silently degrade (Standing Order S6: no quiet
         // failures) — the deploy still gets committed so the tree is consistent,

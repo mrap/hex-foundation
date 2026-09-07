@@ -476,6 +476,15 @@ Optional blocks: `[[decision]]` for authored decisions, `[[skill]]` to declare s
   documents it has done the right thing — judge documented deviations on merit. Undocumented
   deviations are review failures, full stop.
 
+### Verify-gate footguns
+
+Two spec-authoring mistakes that produce false passes or lost work — pin them in every spec:
+
+| Mistake | Fix |
+|---|---|
+| Two tasks emit to one shared doc/results file (one-emit-file-per-task) | One emit-file per task, e.g. `docs/research/<date>/<task-ref>.md`. A shared doc means the second worker overwrites or races the first and findings vanish silently — no test catches it. |
+| Gating a verify on `cargo fmt` / `cargo clippy`, or on a full suite that is already red on the base (dev-profile-test-gates) | Never gate on fmt/clippy — they are frequently known-red and unrelated to the change. Scope test gates to the change (`cargo test <module>`) and require **zero NEW** failures, not a fully green pre-existing suite. A gate that fails on state that was red before your change fails forever. |
+
 ### Rejected v1 fields (typed errors)
 
 The v2 parser rejects these with typed errors (see `boi/src/config/spec.rs:180-191`). Do NOT include them:

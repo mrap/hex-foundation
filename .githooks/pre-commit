@@ -1,16 +1,60 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# For each .legacy.{sh,py} file staged as a rename FROM a non-legacy name,
-# grep system/harness/src/ for the pre-legacy basename.
-# If any caller references it, fail with a clear error.
+# hex-foundation committed pre-commit hook.
+#
+# Wired via `core.hooksPath = .githooks` (set by `hex upgrade` and flagged by
+# `hex doctor`'s git-hookspath check). Three independent guards; each records a
+# failure but the script runs them all so the operator sees every reason at
+# once. Every detection is wrapped in an `if`, and the script ends with an
+# explicit `exit 0`, so a no-match `grep` (exit 1) can never become the hook's
+# status under `pipefail` and reject a clean commit.
+
+fail=0
+
+# --- Guard 1: legacy-rename guard (pre-existing behavior, unchanged) ---------
+# For each .legacy.{sh,py} file staged as a rename FROM a non-legacy name, grep
+# system/harness/src/ for the pre-legacy basename. If any caller references it,
+# fail with a clear error.
 for f in $(git diff --cached --name-only --diff-filter=R); do
   if [[ "$f" =~ \.legacy\.(sh|py)$ ]]; then
     base=$(basename "$f" | sed 's/\.legacy\././')
-    if grep -rqE "scripts/${base}([^.]|$)" system/harness/src/; then
+    if grep -rqE "scripts/${base}([^.]|$)" system/harness/src/ 2>/dev/null; then
       echo "ERROR: ${f} renamed to .legacy but Rust callers still reference ${base}"
       echo "Update all callers in system/harness/src/ before renaming to .legacy.*"
-      exit 1
+      fail=1
     fi
   fi
 done
+
+# --- Guard 2: absolute private /Users/<letter> path in staged content --------
+# Only the added lines of the staged diff are inspected. The /Users/test
+# fixture path (followed by /, or end-of-token) is the single allowance,
+# mirroring the sanitize gate's boundary.
+added=$(git diff --cached --unified=0 --no-color 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+' || true)
+private=$(printf '%s\n' "$added" \
+  | grep -oE '/Users/[A-Za-z][A-Za-z0-9_.@/+-]*' \
+  | grep -vE '^/Users/test(/|$)' || true)
+if [ -n "$private" ]; then
+  echo "ERROR: staged change contains an absolute private /Users/ path:"
+  printf '%s\n' "$private" | sed 's/^/  /'
+  echo "Use \$HOME, ~, or HEX_DIR — private home paths must never reach a public branch."
+  fail=1
+fi
+
+# --- Guard 3: build-artifact deny-set path staged for commit -----------------
+# any target*/ directory, node_modules/, *.rlib, *.rmeta, *.o, .DS_Store.
+artifact_re='(^|/)target[^/]*/|(^|/)node_modules/|\.rlib$|\.rmeta$|\.o$|(^|/)\.DS_Store$'
+staged_paths=$(git diff --cached --name-only 2>/dev/null || true)
+artifacts=$(printf '%s\n' "$staged_paths" | grep -E "$artifact_re" || true)
+if [ -n "$artifacts" ]; then
+  echo "ERROR: staged path(s) match the build-artifact deny set:"
+  printf '%s\n' "$artifacts" | sed 's/^/  /'
+  echo "target*/, node_modules/, *.rlib, *.rmeta, *.o, and .DS_Store must never be committed."
+  fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+  exit 1
+fi
+exit 0

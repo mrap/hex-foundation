@@ -1,0 +1,28 @@
+# Off-machine alert rail configuration.
+#
+# INSTANCE data — copy this file to $HEX_DIR/.hex/config/alerts.toml and fill in
+# your real values. The foundation ships only this template and the loader;
+# a real topic URL or email address must NEVER be committed to the foundation
+# repo.
+#
+# When this file is absent, the harness behaves exactly as before: loud stderr
+# + a telemetry row + a macOS banner, deduped per key over a 6h window, with a
+# single loud line per process noting the off-machine rail is unconfigured.
+#
+# When present, every alert additionally pushes to ntfy; the three severity
+# classes (spend threshold crossed, harness down, work order terminally failed)
+# also send an email second rail and push at urgent priority.
+
+# Required for the PUSH rail. An ntfy topic URL you control. Push BODIES are
+# generic (alert key + short title only) because the push service is
+# third-party — never point this at a topic whose name reveals anything.
+ntfy_topic_url = "https://ntfy.sh/REPLACE-WITH-YOUR-PRIVATE-TOPIC"
+
+# Required for the EMAIL rail (the three severity classes). Delivered via the
+# gws CLI (gmail send). This is your own mailbox, so the email may carry detail.
+email = "you@example.com"
+
+# Cap on human-facing pushes per rolling hour, across all alert keys. Overflow
+# collapses into one visible summary push naming the suppressed count; stderr +
+# telemetry still fire for every alert, so nothing is ever silent. Default: 6.
+max_pushes_per_hour = 6
