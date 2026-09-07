@@ -36,6 +36,106 @@ The first developer message rendered these roots and skills (temp paths redacted
 - skill-creator: ... (file: r0/skill-creator/SKILL.md)
 - skill-installer: ... (file: r0/skill-installer/SKILL.md)
 - hex-doctor: Validate hex agent structure and repair issues. ... (file: r1/hex-doctor/SKILL.md)
+## Hook payloads
+
+Facts recorded 2026-09-07 against codex-cli 0.153.4 (ChatGPT auth). Every probe
+used a temp CODEX_HOME plus a temp git project. The same dump hook was installed
+in BOTH layers: the user layer `$CODEX_HOME/hooks.json` and the project layer
+`<proj>/.codex/hooks.json`. The dump hook is a silent script that writes each
+hook invocation's stdin JSON to its own file and exits 0. Hooks ran headless via
+`--dangerously-bypass-hook-trust` (no interactive trust is possible headless; a
+trusted-hash run is T3's concern).
+
+Setup (abridged):
+
+```
+T=$(mktemp -d) && mkdir -p "$T/home" "$T/proj/.codex"
+cp ~/.codex/auth.json "$T/home/auth.json" && chmod 600 "$T/home/auth.json"
+# dump.sh writes stdin to a per-probe log dir, silent, exit 0
+# hooks.json registers dump.sh for all 12 events; copied to $T/home/hooks.json
+#   and $T/proj/.codex/hooks.json
+printf '[projects."%s"]\ntrust_level = "trusted"\n' "$T/proj" > "$T/home/config.toml"
+( cd "$T/proj" && git init -q && git commit --allow-empty -qm init )
+```
+
+### Both hook layers fire
+
+Every event fired twice under one run: once from the user-layer
+`$CODEX_HOME/hooks.json` and once from the project-layer
+`<proj>/.codex/hooks.json`. Both layers are read and both run. Command:
+
+```
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -s workspace-write \
+  --dangerously-bypass-hook-trust -C "$T/proj" \
+  "Run the shell command: echo hello-from-probe-A . After it runs, reply with the single word DONE and stop." \
+  < /dev/null
+```
+
+The two-layer conclusion is not just a doubled count: the run's own notices name
+both files by path (from the probe D stream, scrubbed):
+
+```
+clamping SessionEnd hook timeout to 3s in <TMP>/home/hooks.json
+clamping SessionEnd hook timeout to 3s in <TMP>/proj/.codex/hooks.json
+```
+
+### Common envelope
+
+Most events share: `session_id`, `turn_id`, `transcript_path`, `cwd`,
+`hook_event_name`, `model`, `permission_mode`. Under `codex exec` the approval
+policy is `never`, so `permission_mode` reads `"bypassPermissions"` in every
+payload (this reflects exec's default approval policy, not the hook-trust
+bypass). `SessionStart` and `SessionEnd` omit `turn_id`; `SessionEnd` also omits
+`model` and `permission_mode`. Fixtures live under `tests/fixtures/codex/hooks/`
+(temp paths, ids, and account fields scrubbed to `<TMP>`, `<SESSION_ID>`,
+`<TURN_ID>`, `<TOOL_USE_ID>`, `<AGENT_ID>`, `<HOME_DIR>`).
+
+### Per-event notes
+
+- SessionStart carries `source`. Observed values: `"startup"` (normal start) and
+  `"compact"` (a fresh SessionStart fires after an auto-compaction). Fixtures:
+  `session-start.json`, `session-start-compact.json`.
+- UserPromptSubmit carries `prompt` (the raw user text). Fixture:
+  `user-prompt-submit.json`.
+- PreToolUse carries `tool_name`, `tool_input`, `tool_use_id`. The shell tool is
+  reported as `tool_name: "Bash"`; patches as `tool_name: "apply_patch"`.
+  Fixtures: `pre-tool-use-shell.json`, `pre-tool-use-apply-patch.json`.
+- PostToolUse adds `tool_response` to the PreToolUse shape. Fixture:
+  `post-tool-use.json`.
+- Stop carries `stop_hook_active` (observed `false`) and `last_assistant_message`
+  (observed `"DONE"`). Both keys are present. Fixture: `stop.json`.
+- SessionEnd fires on exec completion. It carries `reason` (observed `"other"`)
+  and a minimal envelope (`session_id`, `transcript_path`, `cwd`,
+  `hook_event_name`). Its hook timeout is clamped to 3s regardless of the
+  configured value (the run emits a notice `clamping SessionEnd hook timeout to
+  3s`). Fixture: `session-end.json`.
+
+### apply_patch from a subdirectory
+
+Run from a subdirectory with `-C <proj>/sub`, editing a pre-created file:
+
+```
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -s workspace-write \
+  --dangerously-bypass-hook-trust -C "$T/proj/sub" \
+  "Edit the file target.txt in the current directory: append a third line ... Use the apply_patch tool ..." \
+  < /dev/null
+```
+
+The PreToolUse payload's `cwd` is the subdirectory, and the patch body in
+`tool_input.command` names the file cwd-relative (`*** Update File: target.txt`),
+NOT as an absolute path and NOT relative to the git root. Patch paths are
+resolved against the invocation cwd. Fixture: `pre-tool-use-apply-patch.json`.
+
+### Subagent events (multi_agent)
+
+`multi_agent` is a stable feature and effective by default; the probe added
+`--enable multi_agent` and asked the model to spawn one subagent:
+
+```
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -s workspace-write \
+  --enable multi_agent --dangerously-bypass-hook-trust -C "$T/proj" \
+  "Launch one subagent (use your agent/task tool) to compute 2+2 and report ..." \
+  < /dev/null
 ```
 
 Findings:
@@ -109,3 +209,72 @@ Findings:
 
 - Codex project skills live under `.agents/skills/<name>/SKILL.md`; symlinked skill dirs are followed; only `name` and `description` frontmatter are used and extra keys are ignored silently. Where Claude Code discovers project skills was not probed in this spike; a shared `SKILL.md` body still needs to be reachable from whatever root each runtime scans, and Codex following symlinks makes a single physical skill dir bridgeable.
 - Codex reads `AGENTS.md` by default and reads `CLAUDE.md` only when `project_doc_fallback_filenames` includes it. Claude Code reads `CLAUDE.md` by default and follows a `CLAUDE.md` symlink. A `CLAUDE.md -> AGENTS.md` symlink is therefore a workable single-source-of-truth bridge for Claude; for Codex the `project_doc_fallback_filenames = ["CLAUDE.md"]` key is the bridge in the other direction.
+- SubagentStart carries `agent_id` and `agent_type` (observed `"default"`); its
+  `session_id` is the PARENT session. Fixture: `subagent-start.json`.
+- SubagentStop carries `agent_id`, `agent_type`, `agent_transcript_path` (the
+  subagent's own rollout), `stop_hook_active`, and `last_assistant_message` (the
+  subagent's answer, observed `"4"`). Fixture: `subagent-stop.json`.
+- The parent's orchestration tool calls are `spawn_agent` and
+  `multi_agent_v1wait_agent`; each produced its own PreToolUse and PostToolUse.
+- UserPromptSubmit DOES fire for the subagent's prompt. In the subagent run
+  UserPromptSubmit fired for both the parent prompt and the subagent prompt
+  (`"Compute 2+2 and report only the result succinctly."`).
+- PreToolUse and PostToolUse DO fire for the subagent's own tool calls. A second
+  probe instructed the subagent to run `echo i-am-the-subagent`; that Bash call
+  produced its own PreToolUse and PostToolUse.
+- Stop does NOT fire separately for the subagent. Only the main agent emits Stop;
+  the subagent's terminal hook is SubagentStop.
+
+### Compaction events
+
+Reachable headless by shrinking the context window and driving several turns:
+
+```
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -s workspace-write \
+  -c model_context_window=16000 --dangerously-bypass-hook-trust -C "$T/proj" \
+  "Do the following one command at a time ... (1) run 'seq 1 400'; ... (5) run 'seq 1601 2000'. After all five, reply DONE." \
+  < /dev/null
+```
+
+PreCompact and PostCompact both fired, each carrying `trigger` (observed
+`"auto"`) plus the common envelope. After the auto-compaction a new SessionStart
+fired with `source: "compact"`. Fixtures: `pre-compact.json`,
+`post-compact.json`. Limitation: each fixture was scrubbed independently, so
+`session-start.json` and `session-start-compact.json` both show `<SESSION_ID>`
+and the committed fixtures cannot answer whether an auto-compaction keeps the same
+session id or starts a new thread. A fresh live run is needed to settle that.
+
+### Events not reached headless
+
+- PermissionRequest did not fire under the invocations probed here, which all ran
+  `approval_policy = never` (the exec default; no interactive approval requests are
+  raised). The `codex exec --approve-for-me` path routes approval requests through
+  automated review and was not probed, so PermissionRequest may be reachable there.
+- Interrupt did not fire under the one-shot runs probed here; it needs an interrupt
+  signal, which these headless runs did not produce. Not probed via other paths.
+
+### HookStarted / HookCompleted are NOT in the --json stream
+
+Grepping the captured `--json` stream found no `HookStarted`/`HookCompleted`
+lines (also checked case-insensitive and snake_case). Command:
+
+```
+grep -iE 'hookstarted|hookcompleted|hook_started|hook_completed' probeA.jsonl
+```
+
+The `--json` stream event types are `thread.started`, `turn.started`,
+`turn.completed`, `item.started`, `item.completed`. Hook activity surfaces only
+as `item.completed` records of `type: "error"` (for example the hook-trust bypass
+warning and the timeout-clamp notices); there is no dedicated hook lifecycle
+event in the stream. A consumer that needs hook observability must read the hook
+process side effects, not the JSON stream.
+
+### Manual TUI check (S0.11, cannot run headless)
+
+One interactive TUI turn is not reproducible headless. Manual step for Mike:
+start `codex` (interactive TUI) inside a project that has the dump hook
+installed, submit one prompt that triggers a shell tool call, and confirm the
+same event sequence lands in the hook log dir (SessionStart, UserPromptSubmit,
+PreToolUse, PostToolUse, Stop) plus any PermissionRequest raised when a command
+needs approval. The interactive PermissionRequest payload is the one field this
+headless spike could not capture; record its shape when performed.

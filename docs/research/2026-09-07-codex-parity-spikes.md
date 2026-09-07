@@ -52,3 +52,118 @@ Decision or Follow-up.
 - Codex parity plan: ship hex skills to Codex as `.agents/skills/<name>/SKILL.md` (symlinks are fine); keep only `name` and `description` in frontmatter that Codex must honor (extra hex keys are ignored, not rejected). To have Codex read a hex `CLAUDE.md`, set `project_doc_fallback_filenames = ["CLAUDE.md"]` in the user config; it survives `--strict-config`.
 - Claude parity: a `CLAUDE.md -> AGENTS.md` symlink lets a single instruction file feed Claude Code, since the symlink is followed. Follow-up: characterize whether Claude Code 2.1.263 reads `AGENTS.md` at all when a `CLAUDE.md` is present (this probe saw `CLAUDE.md` win and `AGENTS.md` not contribute); that precedence question is out of scope for S0.5 and belongs to a later phase.
 - Isolation follow-up recorded: `CLAUDE_CONFIG_DIR` redirects both config and credential lookup, so any headless Claude probe must seed credentials into the temp config dir.
+## S0.2 Codex hook payloads per event
+
+Question: What JSON does Codex 0.153.4 send to each hook event under `codex exec`,
+and which events are reachable headless? Do both the user and project hook layers
+fire? Do HookStarted/HookCompleted appear in the `--json` stream?
+
+Method: Built a temp CODEX_HOME and temp git project. Installed one silent dump
+hook (writes stdin to a per-probe file, exits 0) for all 12 events in BOTH
+`$CODEX_HOME/hooks.json` and `<proj>/.codex/hooks.json`. Trusted the project via
+`[projects."<proj>"] trust_level = "trusted"` in the temp user config. Ran hooks
+headless with `--dangerously-bypass-hook-trust`. Probes:
+
+```
+# Probe A: shell tool run (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, SessionEnd)
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -s workspace-write \
+  --dangerously-bypass-hook-trust -C "$T/proj" \
+  "Run the shell command: echo hello-from-probe-A . ... reply ... DONE and stop." < /dev/null
+
+# Probe B: apply_patch edit from a subdirectory (-C points at proj/sub)
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -s workspace-write \
+  --dangerously-bypass-hook-trust -C "$T/proj/sub" \
+  "Edit the file target.txt ... Use the apply_patch tool ..." < /dev/null
+
+# Probe C/C2: spawn one subagent (--enable multi_agent); C2 makes the subagent run a shell command
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -s workspace-write \
+  --enable multi_agent --dangerously-bypass-hook-trust -C "$T/proj" \
+  "Launch one subagent ... compute 2+2 ..." < /dev/null
+
+# Probe D: force compaction with a small context window
+CODEX_HOME="$T/home" codex exec --json -m gpt-5.4-mini -s workspace-write \
+  -c model_context_window=16000 --dangerously-bypass-hook-trust -C "$T/proj" \
+  "Do the following one command at a time ... seq 1 400 ... seq 1601 2000 ... DONE." < /dev/null
+```
+
+Result:
+
+- Both hook layers fire. Every event fired twice per run, once per layer.
+- Reachable headless: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,
+  Stop, SessionEnd, SubagentStart, SubagentStop, PreCompact, PostCompact.
+- Not reached by the invocations probed here: PermissionRequest (all probes ran
+  `approval_policy = never`; the `codex exec --approve-for-me` path routes approval
+  requests and was not probed) and Interrupt (needs an interrupt signal; not probed
+  via other paths).
+- SessionStart `source`: `"startup"` normally, `"compact"` after an auto-compact.
+- PreToolUse/PostToolUse `tool_name` is `"Bash"` for the shell tool and
+  `"apply_patch"` for patches; subagent orchestration uses `spawn_agent` and
+  `multi_agent_v1wait_agent`.
+- apply_patch paths are cwd-relative. With `-C proj/sub`, the payload `cwd` is the
+  subdirectory and the patch names the file as bare `target.txt`, not absolute and
+  not git-root-relative.
+- Stop has `stop_hook_active` and `last_assistant_message`. SessionEnd has
+  `reason` (`"other"`) and its timeout is clamped to 3s.
+- Subagents: UserPromptSubmit fires for the subagent prompt; PreToolUse and
+  PostToolUse fire for the subagent's own tool calls; Stop fires only for the main
+  agent, while the subagent ends with SubagentStop (which carries `agent_id`,
+  `agent_type`, `agent_transcript_path`, `last_assistant_message`).
+- PreCompact/PostCompact carry `trigger` (`"auto"`).
+- HookStarted/HookCompleted do NOT appear in the `--json` stream. Stream types are
+  `thread.started`, `turn.started`, `turn.completed`, `item.started`,
+  `item.completed`. Hook notices appear only as `item.completed` error records.
+
+Fixtures committed: tests/fixtures/codex/hooks/{session-start, session-start-compact,
+user-prompt-submit, pre-tool-use-shell, pre-tool-use-apply-patch, post-tool-use,
+stop, session-end, subagent-start, subagent-stop, pre-compact, post-compact}.json
+(scrubbed). See docs/runtimes.md "## Hook payloads".
+
+Decision or Follow-up: hex must not rely on the `--json` stream for hook
+observability; watch hook process side effects instead. Re-verify `permission_mode`
+under a trusted-hash run (not bypass) once T3 lands the hook hash, since this spike
+only exercised the exec `approval_policy = never` path.
+
+## S0.11 Interactive TUI turn (manual, cannot run headless)
+
+Question: Does one interactive TUI turn produce the same hook sequence as
+`codex exec`, and what does an interactive PermissionRequest payload look like?
+
+Method: Not runnable in this spike. Interactive `codex` is forbidden headless and
+PermissionRequest never fires under exec (`approval_policy = never`).
+
+Result: Deferred to a manual step for Mike.
+
+Decision or Follow-up: Manual check for Mike. Start `codex` (interactive TUI) in a
+project that has the dump hook installed. Submit one prompt that triggers a shell
+tool call and, if possible, one command that needs approval. Confirm the hook log
+dir shows SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, and any
+PermissionRequest. Record the PermissionRequest payload shape; it is the one event
+this headless spike could not capture.
+
+## S0.12 apply_patch path form and subagent hook coverage
+
+Question: Are apply_patch paths in the hook payload absolute or cwd-relative when
+the run starts in a subdirectory? Do UserPromptSubmit, PreToolUse, and Stop fire
+for subagents?
+
+Method: Covered by S0.2 Probe B (subdirectory apply_patch) and Probes C/C2
+(subagent). See the commands above.
+
+Result:
+
+- apply_patch paths are cwd-relative. Running with `-C proj/sub`, the PreToolUse
+  payload `cwd` was the subdirectory and the patch body read
+  `*** Update File: target.txt` (bare, relative to cwd), not an absolute path and
+  not relative to the git root.
+- UserPromptSubmit fires for the subagent's prompt (observed the subagent prompt
+  `"Compute 2+2 ..."` as its own UserPromptSubmit).
+- PreToolUse and PostToolUse fire for the subagent's own tool calls (observed the
+  subagent's `echo i-am-the-subagent` Bash call).
+- Stop does NOT fire for the subagent; the subagent's terminal hook is
+  SubagentStop.
+
+Decision or Follow-up: hex hook adapters that key on paths must treat apply_patch
+paths as cwd-relative and resolve them against the payload `cwd`. Hook logic that
+should also cover subagents can rely on UserPromptSubmit / PreToolUse / PostToolUse
+firing inside subagents, but must treat SubagentStop (not Stop) as the subagent
+terminal signal.
