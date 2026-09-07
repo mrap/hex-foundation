@@ -12,6 +12,7 @@ pub mod capability_exec;
 pub mod capability_guard;
 pub mod charter;
 pub mod claude_runs;
+pub mod codex_hook_hash;
 pub mod dial;
 pub mod doctor;
 pub mod failures;

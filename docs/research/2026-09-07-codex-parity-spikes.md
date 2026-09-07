@@ -39,6 +39,42 @@ ln -s "INSTRUCTIONS-REAL.md" "$T/projc/CLAUDE.md"
 CT=$(mktemp -d)  # temp CLAUDE_CONFIG_DIR so ~/.claude.json is not mutated
 cd "$T/projc" && CLAUDE_CONFIG_DIR="$CT" claude -p --model sonnet --output-format json \
   "List every codeword that appears in your project instructions."
+# Codex parity Phase 0 spikes (2026-09-07)
+
+Dated research ledger for the codex-parity Phase 0 spikes. Each entry:
+Question / Method (exact commands) / Result / Decision or Follow-up. Plain
+language, short sentences, no em dashes.
+
+## S0.3 Hook trust hash reproduction
+
+Question. Can the hex harness recompute Codex's per-hook `trusted_hash` exactly,
+so it can tell whether a hook it is about to install is already trusted in the
+user's `~/.codex/config.toml`?
+
+Method (exact commands).
+
+```
+# Pin the source. Tag rust-v0.153.4 is annotated; dereference to the commit.
+curl -sSL "https://api.github.com/repos/openai/codex/git/ref/tags/rust-v0.153.4"        # tag obj 042fb41b7c813ac7999105e886b2b7aa715b5081
+curl -sSL "https://api.github.com/repos/openai/codex/git/tags/042fb41b7c813ac7999105e886b2b7aa715b5081"   # commit 3d2ee51ca2d5db578f328aa75e20aa22c0197c9a
+
+# Fetch the algorithm and type definitions.
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/hooks/src/engine/discovery.rs"
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/hooks/src/config_rules.rs"
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/config/src/fingerprint.rs"
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/config/src/hook_config.rs"
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/hooks/src/lib.rs"
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/hooks/src/events/session_end.rs"
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/hooks/src/output_spill.rs"
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/hooks/src/events/common.rs"
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/Cargo.lock"
+
+# Derive the expected hash independently (mirrors canonical_json + serde_json::to_vec).
+python3 -c "import hashlib,json; s=json.dumps({'event_name':'session_start','hooks':[{'type':'command','command':'/bin/echo hi','timeout':600,'async':False}]},separators=(',',':'),sort_keys=True); print('sha256:'+hashlib.sha256(s.encode()).hexdigest())"
+
+# Implement and test.
+export PATH="/opt/homebrew/bin:$PATH"
+cargo test --manifest-path system/harness/Cargo.toml codex_hook_hash
 ```
 
 Result.
@@ -539,3 +575,41 @@ in 1.46.0, so a later phase should decide whether to standardize on `codex-acp`
 or `chatgpt_codex`. Environment correction for all tasks: the codex 0.153.4 binary
 is at `~/.local/bin/codex`, not `/opt/homebrew/bin/codex` as the brief states
 (version and ChatGPT login match).
+- The `trusted_hash` is a hash of a normalized identity, not of hook source
+  text. Pipeline: build identity `{ event_name (snake_case key label), matcher,
+  hooks: [one normalized handler] }`, then `toml::Value::try_from` (which drops
+  every `None` field because TOML has no null), then `serde_json::to_value`,
+  then `canonical_json` (recursively sort object keys), then
+  `serde_json::to_vec` (compact), then SHA-256, formatted `sha256:<hex>`.
+- The state key is `<abs hooks.json path>:<event_label>:<group_index>:<handler_index>`.
+- Managed hooks (System `/etc/codex/requirements.toml`, MDM, enterprise) are not
+  trust-hashed at all: `is_managed` gives `HookTrustStatus::Managed`, they are
+  always enabled, and `hook_trusted_hash` returns `None` for them (no
+  `[hooks.state.*]` entry). Trade-off recorded in docs/runtimes.md under
+  "Managed hooks and requirements.toml".
+- Normalization before hashing: `command_windows` forced to `None`; `timeout`
+  defaulted (600 floor 1 for most events; 1 clamped to `[1,3]` for
+  session_end/interrupt); `additional_context_limit` kept only for
+  pre_tool_use/post_tool_use/session_start/user_prompt_submit/subagent_start and
+  dropped when equal to the 2500 default; matcher forced to `None` for
+  user_prompt_submit/stop/interrupt.
+- `system/harness/src/codex_hook_hash.rs` implements
+  `hook_hash(event_name, matcher, handlers_json) -> Result<String, String>` and
+  is registered in `system/harness/src/lib.rs`. The unit tests derive two hashes
+  by hand (SessionStart no matcher; PreToolUse with matcher) and pass:
+  `sha256:3524dc80a43d23e5b183b4775038027cc6e152a7d9a8f8b0cd49c90a3410ccdf` and
+  `sha256:a0fed18c4c7a2b85d069b4b7afb578daa0c412c668f819ee9e14b894a11156cb`.
+- Dependency divergence: codex-config resolves `toml` 0.9.11; this harness pins
+  `toml` 0.8. Output is identical for the `Value` variants a hook identity uses.
+
+Decision or Follow-up.
+
+- Stay on `toml` 0.8 in the harness (spec says use existing deps; 0.8 and 0.9
+  serialize these `Value` variants identically). The divergence risk is retired
+  by the live test.
+- PENDING run: `trusted_hash_matches_codex_written_entry` is `#[ignore]`d and
+  needs Mike to trust at least one JSON hook on this machine, which writes a
+  `[hooks.state."<key>"] trusted_hash` entry into `~/.codex/config.toml`. After
+  that, run
+  `cargo test --manifest-path system/harness/Cargo.toml codex_hook_hash -- --ignored`
+  to confirm the reproduction against a hash Codex itself wrote.

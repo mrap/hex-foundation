@@ -862,3 +862,159 @@ Command (distinguish the two providers' env var names):
 `strings ~/.local/bin/goose | grep -oE '(CHATGPT_)?CODEX_REASONING_EFFORT' | sort -u`
 Result: both `CODEX_REASONING_EFFORT` (the `codex` CLI provider) and
 `CHATGPT_CODEX_REASONING_EFFORT` (the `chatgpt_codex` OAuth provider) are present.
+# Runtime facts: Codex CLI parity
+
+Verified facts about the OpenAI Codex CLI (and Claude Code where noted) that the
+hex harness depends on for parity. Each fact carries the exact command that
+produced it. Environment: codex-cli 0.153.4 on macOS, 2026-09-07.
+
+## Hook trust
+
+Codex records a per-hook trust decision in the USER `config.toml` as
+`[hooks.state."<key>"] trusted_hash = "sha256:<hex>"`. A discovered hook only
+runs when the identity hash Codex recomputes at discovery equals that stored
+value; otherwise the hook is marked `Untrusted` (or `Modified`) and skipped
+after one warning, unless `--dangerously-bypass-hook-trust` is passed.
+
+Source of truth pinned to tag `rust-v0.153.4`. The tag is annotated; it
+dereferences to commit `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a`:
+
+```
+curl -sSL "https://api.github.com/repos/openai/codex/git/ref/tags/rust-v0.153.4"
+# -> object.type = "tag", object.sha = 042fb41b7c813ac7999105e886b2b7aa715b5081
+curl -sSL "https://api.github.com/repos/openai/codex/git/tags/042fb41b7c813ac7999105e886b2b7aa715b5081"
+# -> object.sha = 3d2ee51ca2d5db578f328aa75e20aa22c0197c9a  (the commit)
+```
+
+### The hash algorithm
+
+The stored value is NOT a hash of the hook source text. It is a hash of a
+normalized, config-derived identity, so an equivalent hook coming from
+`config.toml` `[[hooks.*]]` tables and from a `hooks.json` file converge on the
+same trust identity. Pulled from:
+
+```
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/hooks/src/engine/discovery.rs"   # NormalizedHookIdentity, hook_hash (lines 766-792)
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/config/src/fingerprint.rs"        # version_for_toml, canonical_json
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/config/src/hook_config.rs"        # MatcherGroup, HookHandlerConfig
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/hooks/src/lib.rs"                 # hook_event_key_label (lines 95-110)
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/hooks/src/config_rules.rs"        # hook_states_from_stack (layer merge)
+```
+
+State is composed across config layers before it is compared. From
+`config_rules.rs::hook_states_from_stack`, entries for the same key from later
+layers override earlier ones (last layer wins on `trusted_hash`). So the user
+`~/.codex/config.toml` is the authoritative source for user-layer hooks, but it
+is not the only layer that can carry a `trusted_hash`; a full reproduction would
+walk the whole layer stack. The `#[ignore]` live test reads only the user
+`config.toml`, which is what the S0.3 brief asks for.
+
+The identity struct is `{ event_name, <flattened MatcherGroup> }` where the
+group carries a single normalized handler. The pipeline (`hook_hash` then
+`version_for_toml`):
+
+1. `toml::Value::try_from(identity)`. TOML has no null value, so its table
+   serializer catches `Error::UnsupportedNone` and DROPS every `None` field,
+   including through `#[serde(flatten)]`. That is why `matcher`,
+   `commandWindows`, `statusMessage`, and `additionalContextLimit` disappear
+   when unset rather than serializing as JSON `null`.
+2. `serde_json::to_value(&toml_value)`.
+3. `canonical_json`: recursively sort every object's keys (arrays keep order).
+4. `serde_json::to_vec` (compact, no whitespace) then SHA-256.
+5. Format as `"sha256:<lowercase hex>"`.
+
+`event_name` in the identity uses the snake_case key label
+(`hook_event_key_label`), for example `session_start`, NOT the CamelCase
+`SessionStart`.
+
+Worked derivation for a SessionStart command hook (matcher `None`,
+`command = "/bin/echo hi"`, normalized `timeout = 600`, `async = false`). The
+canonical JSON that gets hashed is:
+
+```
+{"event_name":"session_start","hooks":[{"async":false,"command":"/bin/echo hi","timeout":600,"type":"command"}]}
+```
+
+Recompute the hash independently (mirrors `canonical_json` + `serde_json::to_vec`):
+
+```
+python3 -c "import hashlib,json; s=json.dumps({'event_name':'session_start','hooks':[{'type':'command','command':'/bin/echo hi','timeout':600,'async':False}]},separators=(',',':'),sort_keys=True); print('sha256:'+hashlib.sha256(s.encode()).hexdigest())"
+# -> sha256:3524dc80a43d23e5b183b4775038027cc6e152a7d9a8f8b0cd49c90a3410ccdf
+```
+
+### State key format
+
+The state-table key is the source path joined with the event label and indices,
+from `discovery.rs` (`key_source = source_path.display().to_string()`) and
+`hooks/src/lib.rs::hook_key`:
+
+```
+<absolute path to hooks.json>:<event_label>:<group_index>:<handler_index>
+```
+
+Parse it from the right: the last three colon-separated fields are
+`handler_index`, `group_index`, `event_label`; everything before is the path.
+For a `config.toml`-defined hook the path segment is the `config.toml` path
+instead of a `hooks.json`.
+
+### Handler normalization before hashing
+
+The handler is normalized in `discovery.rs::append_matcher_groups` before it is
+hashed, so a recomputation must apply the same steps:
+
+- `command_windows` is forced to `None` (on non-Windows the `command` field is used as-is).
+- `timeout_sec` is always set: default 600 and floored at 1 for most events; for `session_end` and `interrupt` it defaults to 1 and is clamped to `[1, 3]`. Constants confirmed with:
+  `curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/hooks/src/events/session_end.rs"` (SESSION_END_DEFAULT_TIMEOUT_SEC = 1, SESSION_END_MAX_TIMEOUT_SEC = 3).
+- `additional_context_limit` is kept only for `pre_tool_use`, `post_tool_use`, `session_start`, `user_prompt_submit`, `subagent_start`, and is dropped when it equals the 2500-token default. Default confirmed with:
+  `curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/hooks/src/output_spill.rs"` (DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT = 2500).
+- The matcher is forced to `None` for `user_prompt_submit`, `stop`, `interrupt`. Confirmed in `matcher_pattern_for_event`:
+  `curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/hooks/src/events/common.rs"` (lines 112-128).
+
+### Managed hooks and requirements.toml (the trade-off)
+
+Managed hooks (from `/etc/codex/requirements.toml` System layer, MDM, or
+enterprise-managed config) are NOT trust-hashed at all. From
+`discovery.rs::hook_trust_status`, `hook_enabled`, and `hook_trusted_hash`
+(lines 794-821) and `hook_metadata_for_config_layer_source` (lines 823-831):
+
+- A managed source sets `is_managed = true`, giving `HookTrustStatus::Managed`; the `current_hash` is never compared against a stored value.
+- Managed hooks are always enabled (`is_builtin || is_managed || ...`).
+- `hook_trusted_hash` returns `None` for managed hooks: they never carry a `[hooks.state.*]` entry.
+
+Trade-off: putting a hook in `/etc/codex/requirements.toml` makes it trusted by
+construction with no per-machine trust prompt and no `trusted_hash` to keep in
+sync, at the cost of requiring root to write `/etc/codex` (a fleet-admin
+surface, not a per-user one). The `hook_hash` reproduction in
+`system/harness/src/codex_hook_hash.rs` therefore applies only to user-layer and
+project-layer JSON/TOML hooks, which are the ones that actually get a computed
+`current_hash` compared against a stored `trusted_hash`.
+
+### Reproduction in the harness
+
+`system/harness/src/codex_hook_hash.rs` exposes
+`pub fn hook_hash(event_name: &str, matcher: Option<&str>, handlers_json: &str) -> Result<String, String>`
+returning `"sha256:<hex>"`. It replays the exact pipeline using the same crate
+family (`toml`, `serde_json`, `sha2`). Dependency note: codex-config resolves
+`toml` 0.9.11 while this harness pins `toml` 0.8; for the scalar/table/array
+`Value` variants a hook identity uses, `Serialize` output is identical across
+those versions. Codex versions confirmed with:
+
+```
+curl -sSL "https://raw.githubusercontent.com/openai/codex/rust-v0.153.4/codex-rs/Cargo.lock"   # toml 0.9.11, serde_json 1.0.149, sha2 0.10.9/0.11.0
+```
+
+Unit tests derive the expected hash by hand (documented in the test) and pass:
+
+```
+export PATH="/opt/homebrew/bin:$PATH" && cargo test --manifest-path system/harness/Cargo.toml codex_hook_hash
+```
+
+The live cross-check `trusted_hash_matches_codex_written_entry` is `#[ignore]`d.
+It reads `~/.codex/config.toml`, and for each `[hooks.state.*]` entry whose key
+names an existing `hooks.json`, recomputes the hash and asserts equality. That
+run is PENDING: it needs Mike to trust at least one JSON hook on this machine
+first, then:
+
+```
+cargo test --manifest-path system/harness/Cargo.toml codex_hook_hash -- --ignored
+```
