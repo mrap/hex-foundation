@@ -149,9 +149,10 @@ fn registry() -> Vec<LineCheck> {
         exclude_dirs: COMMON_EXCLUDE_DIRS,
         filters: {
             let mut f = compile(COMMON_FILTERS);
-            // Word boundary so prose forms (`/Users/test` in backticks, followed
-            // by punctuation, or at end of sentence) pass while /Users/testuser
-            // still flags — the leak-guard docs describe the rule they enforce.
+            // Word boundary so prose forms (the fixture path in backticks,
+            // followed by punctuation, or at end of sentence) pass while a
+            // longer username sharing the prefix still flags — the leak-guard
+            // docs describe the rule they enforce.
             f.push(re(r"/Users/test\b")); // personalization-audit: filter literal
             f.push(re(r"^\./CHANGELOG\.md:"));
             f
