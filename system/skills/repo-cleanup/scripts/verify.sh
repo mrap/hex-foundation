@@ -93,15 +93,23 @@ if [ -f package.json ]; then
   ran_anything=1
   if command -v npm >/dev/null 2>&1; then
     run_step "npm run build (if defined)" gate npm run --if-present build
-    run_step "npm test" gate npm test --if-present
+    run_step "npm test" gate npm test
     run_step "npm run lint (report-only)" report npm run --if-present lint
+  else
+    echo "ERROR: package.json found but npm is unavailable; tests did not run." >&2
+    overall_status=1
   fi
 fi
 
 if [ -f pyproject.toml ] || [ -f setup.py ]; then
   ran_anything=1
   command -v ruff >/dev/null 2>&1 && run_step "ruff check (report-only)" report ruff check .
-  command -v pytest >/dev/null 2>&1 && run_step "pytest" gate pytest -q
+  if command -v pytest >/dev/null 2>&1; then
+    run_step "pytest" gate pytest -q
+  else
+    echo "ERROR: Python project found but pytest is unavailable; tests did not run." >&2
+    overall_status=1
+  fi
 fi
 
 if [ -f go.mod ]; then
