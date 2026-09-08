@@ -173,12 +173,31 @@ fn copy_file_with_perms(src: &Path, dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn backup_path(backup_dir: &Path, dst_dir: &Path, relative: &Path) -> PathBuf {
-    let scope = backup_dir
-        .parent()
+fn read_file_state(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn backup_path(
+    backup_dir: &Path,
+    dst_dir: &Path,
+    relative: &Path,
+    scope_root: Option<&Path>,
+) -> PathBuf {
+    let scope = scope_root
         .and_then(|root| dst_dir.strip_prefix(root).ok())
         .filter(|path| !path.as_os_str().is_empty())
         .map(Path::to_path_buf)
+        .or_else(|| {
+            backup_dir
+                .parent()
+                .and_then(|root| dst_dir.strip_prefix(root).ok())
+                .filter(|path| !path.as_os_str().is_empty())
+                .map(Path::to_path_buf)
+        })
         .or_else(|| dst_dir.file_name().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("scope"));
     backup_dir.join(scope).join(relative)
@@ -239,7 +258,7 @@ fn apply_sync_protected(
         return Ok(0);
     }
     let mut count = 0;
-    for src_file in walk_files(src_dir) {
+    for src_file in walk_files_checked(src_dir)? {
         let rel = match src_file.strip_prefix(src_dir) {
             Ok(r) => r,
             Err(_) => continue,
@@ -253,7 +272,7 @@ fn apply_sync_protected(
         }
         if let Some(bak) = backup_dir {
             if dst_file.exists() && files_differ(&src_file, &dst_file) {
-                let bak_file = backup_path(bak, dst_dir, rel);
+                let bak_file = backup_path(bak, dst_dir, rel, protection.map(|(root, _)| root));
                 if let Some(p) = bak_file.parent() {
                     fs::create_dir_all(p)?;
                 }
@@ -261,9 +280,10 @@ fn apply_sync_protected(
             }
         }
         if !dst_file.exists() || files_differ(&src_file, &dst_file) {
+            let source_bytes = fs::read(&src_file)?;
             copy_file_with_perms(&src_file, &dst_file)?;
             if let Some(paths) = owned.as_deref_mut() {
-                paths.insert(dst_file.clone(), fs::read(&dst_file).ok());
+                paths.insert(dst_file.clone(), Some(source_bytes));
             }
             count += 1;
         }
@@ -296,7 +316,7 @@ fn deletion_pass_protected(
             if let Some((workspace, snapshot)) = protection {
                 protect_sync_path(workspace, &dst_file, None, snapshot)?;
             }
-            let bak_file = backup_path(backup_dir, dst_dir, rel);
+            let bak_file = backup_path(backup_dir, dst_dir, rel, protection.map(|(root, _)| root));
             if let Some(p) = bak_file.parent() {
                 fs::create_dir_all(p)?;
             }
@@ -346,14 +366,15 @@ fn atomic_install_binary(src: &Path, dst: &Path) -> io::Result<()> {
     result
 }
 
-fn make_scripts_executable(dir: &Path, protection: Option<(&Path, &UpgradeGitSnapshot)>) {
+fn make_scripts_executable(
+    dir: &Path,
+    protection: Option<(&Path, &UpgradeGitSnapshot)>,
+    owned: Option<&HashMap<PathBuf, Option<Vec<u8>>>>,
+) {
     for f in walk_files(dir) {
         if f.extension().and_then(|e| e.to_str()) == Some("sh") {
-            if let Some((workspace, snapshot)) = protection {
-                if f.strip_prefix(workspace)
-                    .ok()
-                    .is_some_and(|relative| snapshot.preexisting_paths.contains(relative))
-                {
+            if let Some((_workspace, _snapshot)) = protection {
+                if !owned.is_some_and(|paths| paths.contains_key(&f)) {
                     continue;
                 }
             }
@@ -605,7 +626,11 @@ fn record_upgrade_sha(
     fs::rename(&tmp, config_file)
         .map_err(|e| format!("could not install {}: {e}", config_file.display()))?;
     if let Some(paths) = owned.as_deref_mut() {
-        paths.insert(config_file.to_path_buf(), fs::read(config_file).ok());
+        paths.insert(
+            config_file.to_path_buf(),
+            read_file_state(config_file)
+                .map_err(|e| format!("could not read {}: {e}", config_file.display()))?,
+        );
     }
     // `sha` is `git rev-parse HEAD` output — hex ASCII, every byte a char boundary.
     #[allow(clippy::string_slice)]
@@ -804,7 +829,13 @@ fn sync_versions_file_protected(
         BinaryStepFailure::Build
     })?;
     if let Some(paths) = owned.as_deref_mut() {
-        paths.insert(versions_file.clone(), fs::read(&versions_file).ok());
+        paths.insert(
+            versions_file.clone(),
+            read_file_state(&versions_file).map_err(|e| {
+                eprintln!("  [FAIL] Could not read installed VERSIONS: {e}");
+                BinaryStepFailure::Build
+            })?,
+        );
     }
     println!("  [OK] VERSIONS → HEX_FOUNDATION_VERSION=v{cargo_ver}");
 
@@ -1375,6 +1406,7 @@ fn configure_hooks_path(workspace: &Path) {
 struct UpgradeGitSnapshot {
     preexisting_paths: HashSet<PathBuf>,
     preexisting_content: HashMap<PathBuf, Option<Vec<u8>>>,
+    baseline_content: HashMap<PathBuf, Option<Vec<u8>>>,
 }
 
 fn upgrade_git_snapshot(workspace: &Path) -> Result<UpgradeGitSnapshot, String> {
@@ -1417,9 +1449,35 @@ fn upgrade_git_snapshot(workspace: &Path) -> Result<UpgradeGitSnapshot, String> 
         content.insert(relative.clone(), state);
         paths.insert(relative);
     }
+    let mut baseline_content = HashMap::new();
+    for root in [workspace.join(".hex"), workspace.join(".claude/commands")] {
+        if root.exists() {
+            for path in walk_files_checked(&root)
+                .map_err(|e| format!("could not snapshot {}: {e}", root.display()))?
+            {
+                let relative = path
+                    .strip_prefix(workspace)
+                    .map_err(|_| format!("snapshot path escaped workspace: {}", path.display()))?
+                    .to_path_buf();
+                baseline_content.insert(
+                    relative,
+                    read_file_state(&path)
+                        .map_err(|e| format!("could not snapshot {}: {e}", path.display()))?,
+                );
+            }
+        }
+    }
+    let versions = workspace.join("VERSIONS");
+    if versions.exists() {
+        baseline_content.insert(
+            PathBuf::from("VERSIONS"),
+            read_file_state(&versions).map_err(|e| format!("could not snapshot VERSIONS: {e}"))?,
+        );
+    }
     Ok(UpgradeGitSnapshot {
         preexisting_paths: paths,
         preexisting_content: content,
+        baseline_content,
     })
 }
 
@@ -1432,24 +1490,29 @@ fn protect_sync_path(
     let Ok(relative) = path.strip_prefix(workspace) else {
         return Ok(());
     };
-    if !snapshot.preexisting_paths.contains(relative) {
+    let Some(before) = snapshot.baseline_content.get(relative) else {
+        if path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("operator file appeared during upgrade: {}", path.display()),
+            ));
+        }
         return Ok(());
-    }
+    };
     let current = match fs::read(path) {
         Ok(bytes) => Some(bytes),
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
-    let before = snapshot
-        .preexisting_content
-        .get(relative)
-        .cloned()
-        .unwrap_or(None);
+    let before = before.clone();
     if current != before {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!("operator edit changed during upgrade: {}", path.display()),
         ));
+    }
+    if !snapshot.preexisting_paths.contains(relative) {
+        return Ok(());
     }
     let desired_bytes = desired.map(fs::read).transpose()?;
     protect_sync_bytes(path, desired_bytes.as_deref(), &before)
@@ -1483,24 +1546,28 @@ fn protect_generated_path(
     let Ok(relative) = path.strip_prefix(workspace) else {
         return Ok(());
     };
-    if !snapshot.preexisting_paths.contains(relative) {
+    let Some(before) = snapshot.baseline_content.get(relative).cloned() else {
+        if path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("operator file appeared during upgrade: {}", path.display()),
+            ));
+        }
         return Ok(());
-    }
+    };
     let current = match fs::read(path) {
         Ok(bytes) => Some(bytes),
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
     };
-    let before = snapshot
-        .preexisting_content
-        .get(relative)
-        .cloned()
-        .unwrap_or(None);
     if current != before {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!("operator edit changed during upgrade: {}", path.display()),
         ));
+    }
+    if !snapshot.preexisting_paths.contains(relative) {
+        return Ok(());
     }
     protect_sync_bytes(path, Some(generated), &before)
 }
@@ -1557,7 +1624,8 @@ fn commit_synced_files_since(
                             workspace.join(relative).display()
                         ));
                     }
-                    let current = fs::read(workspace.join(relative)).ok();
+                    let current = read_file_state(&workspace.join(relative))
+                        .map_err(|e| format!("could not inspect {}: {e}", relative.display()))?;
                     if &current != expected {
                         return Err(format!(
                             "operator edit changed upgrade-owned path before commit: {}",
@@ -1902,7 +1970,7 @@ pub fn run(args: &[String]) -> i32 {
         println!("  → Deletion pass: nothing to prune");
     }
 
-    make_scripts_executable(&hex_dot_dir, protection);
+    make_scripts_executable(&hex_dot_dir, protection, Some(&owned_paths));
 
     // Update version.txt for v2 layout
     if let Some(src_ver_file) = &src_dirs.version_txt {
@@ -1922,15 +1990,22 @@ pub fn run(args: &[String]) -> i32 {
                     failures.push(message);
                 }
                 Ok(()) => {
+                    let source_bytes = match fs::read(src_ver_file) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            let message = format!("version.txt read failed: {e}");
+                            eprintln!("  [FAIL] {message}");
+                            failures.push(message);
+                            Vec::new()
+                        }
+                    };
                     if let Err(e) = fs::copy(src_ver_file, hex_dot_dir.join("version.txt")) {
                         let message = format!("version.txt copy failed: {e}");
                         eprintln!("  [FAIL] {message}");
                         failures.push(message);
                     } else {
-                        owned_paths.insert(
-                            hex_dot_dir.join("version.txt"),
-                            fs::read(hex_dot_dir.join("version.txt")).ok(),
-                        );
+                        let version_path = hex_dot_dir.join("version.txt");
+                        owned_paths.insert(version_path.clone(), Some(source_bytes));
                     }
                 }
             }
@@ -3245,6 +3320,71 @@ CUSTOM_INSTANCE_PIN=abc123
         assert_eq!(
             fs::read_to_string(ws.join(".hex/scripts/foo.sh")).unwrap(),
             "operator\n"
+        );
+    }
+
+    #[test]
+    fn protected_sync_rejects_clean_file_edited_before_first_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        init_test_repo(ws);
+        write_file(&ws.join(".hex/scripts/foo.sh"), "base\n");
+        seed_commit(ws, "seed");
+        let snapshot = upgrade_git_snapshot(ws).unwrap();
+        write_file(&ws.join(".hex/scripts/foo.sh"), "operator-before-write\n");
+        let source = ws.join("source");
+        write_file(&source.join("foo.sh"), "foundation\n");
+        let result = apply_sync_protected(
+            &source,
+            &ws.join(".hex/scripts"),
+            None,
+            Some((ws, &snapshot)),
+            None,
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(ws.join(".hex/scripts/foo.sh")).unwrap(),
+            "operator-before-write\n"
+        );
+    }
+
+    #[test]
+    fn protected_backups_keep_same_relative_names_in_distinct_scopes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        init_test_repo(ws);
+        write_file(&ws.join(".hex/scripts/foo.sh"), "script-old\n");
+        write_file(&ws.join(".hex/hooks/foo.sh"), "hook-old\n");
+        seed_commit(ws, "seed");
+        let snapshot = upgrade_git_snapshot(ws).unwrap();
+        let script_src = ws.join("script-source");
+        let hook_src = ws.join("hook-source");
+        write_file(&script_src.join("foo.sh"), "script-new\n");
+        write_file(&hook_src.join("foo.sh"), "hook-new\n");
+        let backup = ws.join(".hex/.upgrade-backup-test");
+        apply_sync_protected(
+            &script_src,
+            &ws.join(".hex/scripts"),
+            Some(&backup),
+            Some((ws, &snapshot)),
+            None,
+        )
+        .unwrap();
+        apply_sync_protected(
+            &hook_src,
+            &ws.join(".hex/hooks"),
+            Some(&backup),
+            Some((ws, &snapshot)),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(backup.join(".hex/scripts/foo.sh")).unwrap(),
+            "script-old\n"
+        );
+        assert_eq!(
+            fs::read_to_string(backup.join(".hex/hooks/foo.sh")).unwrap(),
+            "hook-old\n"
         );
     }
 
