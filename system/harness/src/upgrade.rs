@@ -1614,7 +1614,7 @@ pub fn run(args: &[String]) -> i32 {
 mod tests {
     use super::*;
     use std::fs;
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     use std::os::unix::fs::MetadataExt;
 
     fn write_file(path: &Path, content: &str) {
