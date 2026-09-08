@@ -21,7 +21,10 @@ The hook does not enforce permissions or command safety. Runtime hooks must keep
 ## Verification
 
 ```sh
-python3 -B tests/test_gdd_style_gate.py
+python3 -I -B tests/test_gdd_style_gate.py
 ```
 
 The tests use standard-library mocks and do not call a model, read secrets, or run privileged commands.
+
+The `advisory hook contract tests` CI job runs the same suite. It tests the
+hook's nonblocking behavior, not the writing style of worker answers.

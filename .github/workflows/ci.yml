@@ -19,6 +19,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  style-hook-contract:
+    name: advisory hook contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -I -B tests/test_gdd_style_gate.py
+
   fmt:
     name: cargo fmt --check
     runs-on: ubuntu-latest
