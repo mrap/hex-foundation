@@ -148,8 +148,10 @@ pub(crate) fn try_roundtrip(
         .map_err(|e| format!("read failed (want {RESPONSE_BYTES} bytes): {e}"))?;
 
     let vec: Vec<f32> = buf
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect();
     if vec.len() != EMBED_DIM {
         return Err(format!(
