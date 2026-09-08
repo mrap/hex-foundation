@@ -14,6 +14,7 @@
 //! tick's persisted snapshot, and alerts on exactly two transition classes:
 //!   1. a spec newly reaching a terminal status (completed / failed / canceled)
 //!   2. a task newly entering `state='blocked'` (any reason)
+//!
 //! Detection only, never remediates (same doctrine as `hex failures`).
 //!
 //! Failure stance (S6): boi.db absent → quiet no-op (this worker ships in
@@ -191,7 +192,7 @@ fn diff(prev: Option<&PersistedState>, cur: &Snapshot) -> Vec<Transition> {
     for t in &cur.tasks {
         match task_watch_state(t).as_str() {
             "blocked" => {
-                let newly = prev.tasks.get(&t.task_id).map_or(true, |w| w != "blocked");
+                let newly = prev.tasks.get(&t.task_id).is_none_or(|w| w != "blocked");
                 if newly {
                     out.push(Transition::TaskBlocked {
                         task_id: t.task_id.clone(),
@@ -202,7 +203,7 @@ fn diff(prev: Option<&PersistedState>, cur: &Snapshot) -> Vec<Transition> {
                 }
             }
             "starved" => {
-                let newly = prev.tasks.get(&t.task_id).map_or(true, |w| w != "starved");
+                let newly = prev.tasks.get(&t.task_id).is_none_or(|w| w != "starved");
                 if newly {
                     out.push(Transition::TaskStarved {
                         task_id: t.task_id.clone(),

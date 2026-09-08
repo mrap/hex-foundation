@@ -152,7 +152,7 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
                         findings.push(Finding {
                             file: file.clone(),
                             line: new_line,
-                            pattern: *name,
+                            pattern: name,
                             matched_len: m.as_str().chars().count(),
                         });
                     }

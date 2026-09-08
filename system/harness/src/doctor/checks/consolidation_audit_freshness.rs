@@ -9,6 +9,7 @@
 //!     disabled via `hex module disable` — the operator turned the feed off; or
 //!   - `evolution/` does not exist; or
 //!   - `evolution/` exists but holds no `consolidation-audit-*.md` yet.
+//!
 //! The last two are one family: "no audits to measure." An instance can have an
 //! `evolution/` dir from the Improvement Engine (observations.md / suggestions.md)
 //! without ever having run a full consolidation, so an empty result must NOT

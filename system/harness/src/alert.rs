@@ -33,9 +33,10 @@ const RATE_WINDOW_SECS: u64 = 3600;
 /// send the email rail and push at urgent priority. Adding this parameter did
 /// not change any existing call site — `notify`/`notify_at` keep their exact
 /// signatures and pass [`AlertClass::Default`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlertClass {
     /// Push only, normal priority. The default for every historical call site.
+    #[default]
     Default,
     /// Spend threshold crossed (burn guard). Push (urgent) + email.
     Spend,
@@ -43,12 +44,6 @@ pub enum AlertClass {
     HarnessDown,
     /// A work order terminally failed (boi-spec-watch). Push (urgent) + email.
     WorkOrderFailed,
-}
-
-impl Default for AlertClass {
-    fn default() -> Self {
-        AlertClass::Default
-    }
 }
 
 impl AlertClass {
