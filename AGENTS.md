@@ -366,7 +366,7 @@ Consolidated 2026-04-29 (39 → 18 rules). Lineage tags trace to pre-consolidati
 
 | # | Rule |
 |---|------|
-| S1 | **Sync fixes to hex base.** Every fix to hex scripts/skills/config syncs back to the hex-foundation repo. For this GitFlow repository, reviewed routine changes may merge and push to `develop` after the required gates pass. Force-pushes, history rewrites, protected-branch changes, and production mutations still require explicit approval. (replaces S10) |
+| S1 | **Sync fixes to hex base.** Every fix to hex scripts/skills/config syncs back to the hex-foundation repo. For the GitFlow hex-foundation repository, reviewed routine changes may merge and push to `develop` after the required gates pass. Force-pushes, history rewrites, changes to other protected branches, and production mutations still require explicit approval. (replaces S10) |
 | S2 | **Monitor, audit, and automate BOI operations.** Ensure BOI workers are running or set up failure detection for overnight runs. One restart attempt, then notify. After dispatch failures, audit all config locations. Workers can mutate phase files. Never ad-hoc polling loops. (consolidates S3, S4, S6) |
 | S3 | **Lock before writing shared files.** Check coordination lock on learnings.md, todo.md, evolution/, landings/. Locks auto-expire after 5 min. (replaces S5) |
 | S4 | **Hex voice and formatting.** Concise, direct, no fluff, no hedging. Lead with the ask. Produce artifacts, not advice. No markdown tables in Slack — bullet lists with bold labels only; never pipe-delimited tables. (consolidates S7, S8) |
