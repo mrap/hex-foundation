@@ -147,7 +147,10 @@ mod tests {
         crate::memory::vector::insert_fact_vec(&c, "f-dead-1", &v).unwrap();
 
         let n_real = backfill(&c, Path::new("/nonexistent-hex-dir")).unwrap();
-        assert_eq!(n_real, 0, "the production wrapper must not load a model when idle");
+        assert_eq!(
+            n_real, 0,
+            "the production wrapper must not load a model when idle"
+        );
 
         let n = backfill_with(&c, |_| {
             panic!("the deterministic backend must not run with no pending facts")
