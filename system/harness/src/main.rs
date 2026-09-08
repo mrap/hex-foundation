@@ -1173,7 +1173,10 @@ fn main() {
                             }) {
                                 Ok(()) => 0,
                                 Err(e) => {
-                                    eprintln!("embed-serve: socket error on {}: {e}", sock.display());
+                                    eprintln!(
+                                        "embed-serve: socket error on {}: {e}",
+                                        sock.display()
+                                    );
                                     1
                                 }
                             }

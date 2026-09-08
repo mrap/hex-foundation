@@ -576,15 +576,12 @@ mod tests {
         // artifact that hides the billing waste).
         let evo = dir.path().join("evolution");
         if evo.exists() {
-            let wrote_audit = fs::read_dir(&evo)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .any(|e| {
-                    e.file_name()
-                        .to_str()
-                        .map(|n| n.starts_with("consolidation-audit-"))
-                        .unwrap_or(false)
-                });
+            let wrote_audit = fs::read_dir(&evo).unwrap().filter_map(|e| e.ok()).any(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with("consolidation-audit-"))
+                    .unwrap_or(false)
+            });
             assert!(
                 !wrote_audit,
                 "no consolidation-audit file may be written for an empty body"

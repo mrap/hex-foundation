@@ -198,7 +198,8 @@ fn query_terms(query: &str) -> HashSet<String> {
             t.len() >= 3
                 && !matches!(
                     *t,
-                    "the" | "and"
+                    "the"
+                        | "and"
                         | "for"
                         | "are"
                         | "was"
@@ -383,11 +384,10 @@ fn m2_entity(
             Ok(s) => s,
             Err(_) => continue,
         };
-        let window: Vec<(FactHit, f64)> = match stmt
-            .query_map(
-                rusqlite::params![subj, (TOP_K_PER_MOVE * 3) as i64],
-                fact_from_row,
-            ) {
+        let window: Vec<(FactHit, f64)> = match stmt.query_map(
+            rusqlite::params![subj, (TOP_K_PER_MOVE * 3) as i64],
+            fact_from_row,
+        ) {
             Ok(rows) => rows.filter_map(Result::ok).collect(),
             Err(_) => Vec::new(),
         };
@@ -402,20 +402,16 @@ fn m2_entity(
         // Relevance first, importance breaks ties. Stable sort preserves the
         // SQL importance/recency order within an equal (relevance, importance).
         ranked.sort_by(|a, b| {
-            b.2.cmp(&a.2).then(
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            )
+            b.2.cmp(&a.2)
+                .then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
         });
         ranked.truncate(TOP_K_PER_MOVE);
         scored.extend(ranked);
     }
     // Same blended key across subjects for a stable overall rank ordering.
     scored.sort_by(|a, b| {
-        b.2.cmp(&a.2).then(
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal),
-        )
+        b.2.cmp(&a.2)
+            .then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
     });
     let hits: Vec<(FactHit, f64)> = scored.into_iter().map(|(f, imp, _)| (f, imp)).collect();
     let cands = facts_to_candidates(hits, MoveId::M2EntityFilter, true, cfg);
@@ -1177,7 +1173,14 @@ mod tests {
         insert_fact(&c, "e1", "fleet-coordinator", "has", "three arms", false);
         insert_fact(&c, "e2", "hex project", "has", "a recall eval", false);
         insert_fact(&c, "e3", "hex-v2-arch", "has", "a merge stage", false);
-        insert_fact(&c, "e4", "person:brand-lead", "avoids", "public pricing", false);
+        insert_fact(
+            &c,
+            "e4",
+            "person:brand-lead",
+            "avoids",
+            "public pricing",
+            false,
+        );
 
         let m = detect_entity_subjects(&c, "who owns the fleet coordinator rewrite");
         assert!(
@@ -1539,7 +1542,9 @@ mod tests {
             "first same-pair fact missing from merge"
         );
         assert!(
-            objects.iter().any(|o| o.contains("parallel-moves assembler")),
+            objects
+                .iter()
+                .any(|o| o.contains("parallel-moves assembler")),
             "second same-pair fact was evicted by the object-blind dedup key"
         );
 
@@ -1671,7 +1676,12 @@ mod tests {
     fn recall_entity_scoped_window_beats_flooding() {
         let c = fresh_db();
         // Innocuous M1 chunk — must NOT mention the entity or predicate.
-        insert_chunk(&c, "docs/notes.md", "general workspace scheduling notes", false);
+        insert_chunk(
+            &c,
+            "docs/notes.md",
+            "general workspace scheduling notes",
+            false,
+        );
 
         // Target: tara's `blocked-by` fact. Deliberately LOW importance so a
         // global importance-ranked M3 window would never pick it over the
@@ -1715,8 +1725,14 @@ mod tests {
             .per_move_stats
             .iter()
             .any(|s| s.move_id == MoveId::M3PredicateQuery && s.fired);
-        assert!(m2_fired, "M2 must detect the entity `tara` for this test to be meaningful");
-        assert!(m3_fired, "M3 must fire on the `blocker` cue for this test to be meaningful");
+        assert!(
+            m2_fired,
+            "M2 must detect the entity `tara` for this test to be meaningful"
+        );
+        assert!(
+            m3_fired,
+            "M3 must fire on the `blocker` cue for this test to be meaningful"
+        );
 
         // Subjects of every `blocked-by` fact that reached the assembled context.
         let blocked_by_subjects: Vec<String> = r

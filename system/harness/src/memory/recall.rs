@@ -1345,10 +1345,30 @@ mod plan2_tests {
         // arm so the fusion order is non-trivial and sensitive to every
         // lifted constant (arm weights + RRF k).
         let rows = [
-            ("f1", "project:hex", "uses", "sqlite-vec for the vector store"),
-            ("f2", "person:alexandra", "prefers", "quiet mornings and vector math"),
-            ("f3", "project:hex", "decided", "to store the vector index on disk"),
-            ("f4", "person:bob", "wrote", "the store migration for vectors"),
+            (
+                "f1",
+                "project:hex",
+                "uses",
+                "sqlite-vec for the vector store",
+            ),
+            (
+                "f2",
+                "person:alexandra",
+                "prefers",
+                "quiet mornings and vector math",
+            ),
+            (
+                "f3",
+                "project:hex",
+                "decided",
+                "to store the vector index on disk",
+            ),
+            (
+                "f4",
+                "person:bob",
+                "wrote",
+                "the store migration for vectors",
+            ),
         ];
         for (id, s, p, o) in rows {
             c.execute(
@@ -1439,10 +1459,30 @@ mod plan2_tests {
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
         let rows = [
-            ("f1", "project:hex", "uses", "sqlite-vec for the vector store"),
-            ("f2", "person:alexandra", "prefers", "quiet mornings and vector math"),
-            ("f3", "project:hex", "decided", "to store the vector index on disk"),
-            ("f4", "person:bob", "wrote", "the store migration for vectors"),
+            (
+                "f1",
+                "project:hex",
+                "uses",
+                "sqlite-vec for the vector store",
+            ),
+            (
+                "f2",
+                "person:alexandra",
+                "prefers",
+                "quiet mornings and vector math",
+            ),
+            (
+                "f3",
+                "project:hex",
+                "decided",
+                "to store the vector index on disk",
+            ),
+            (
+                "f4",
+                "person:bob",
+                "wrote",
+                "the store migration for vectors",
+            ),
         ];
         for (id, s, p, o) in rows {
             c.execute(
@@ -1627,12 +1667,17 @@ mod plan2_tests {
 
         // `parallax` is the only surviving content token; every other word is a
         // generic question/filler word (or a sub-3-char token) and is dropped.
-        let hits: Vec<FactHit> =
-            facts_recall(&c, "what does this have to do with parallax", 6, None, false)
-                .unwrap()
-                .into_iter()
-                .map(|(f, _)| f)
-                .collect();
+        let hits: Vec<FactHit> = facts_recall(
+            &c,
+            "what does this have to do with parallax",
+            6,
+            None,
+            false,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|(f, _)| f)
+        .collect();
         assert!(
             hits.iter().any(|f| f.object.contains("parallax")),
             "the lone distinctive content token must still retrieve the fact: {:?}",

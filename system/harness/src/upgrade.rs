@@ -966,7 +966,11 @@ fn binary_step_failure_message(failure: &BinaryStepFailure) -> String {
 /// the developer's real harness). When no LaunchAgent is installed there is
 /// nothing to restart — success forever, and `restart_fn` is NOT invoked.
 /// Otherwise the restart action's `Result` propagates unchanged.
-fn restart_harness_with<F>(hex_dir: &Path, agent_installed: bool, restart_fn: F) -> Result<(), String>
+fn restart_harness_with<F>(
+    hex_dir: &Path,
+    agent_installed: bool,
+    restart_fn: F,
+) -> Result<(), String>
 where
     F: FnOnce(&Path) -> Result<(), String>,
 {
@@ -2432,7 +2436,8 @@ CUSTOM_INSTANCE_PIN=abc123
         let build_failure_msg = "Upgrade FAILED — the hex binary was NOT updated (see Step 5).";
 
         let restart_err = "launchctl bootstrap failed: EIO".to_string();
-        let msg = binary_step_failure_message(&BinaryStepFailure::RestartFailed(restart_err.clone()));
+        let msg =
+            binary_step_failure_message(&BinaryStepFailure::RestartFailed(restart_err.clone()));
 
         assert_ne!(
             msg, build_failure_msg,

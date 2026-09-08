@@ -310,7 +310,16 @@ fn deliver_email(to: &str, subject: &str, body: &str) {
     #[cfg(not(test))]
     {
         let status = std::process::Command::new("gws")
-            .args(["gmail", "send", "--to", to, "--subject", subject, "--body", body])
+            .args([
+                "gmail",
+                "send",
+                "--to",
+                to,
+                "--subject",
+                subject,
+                "--body",
+                body,
+            ])
             .status();
         match status {
             Ok(s) if s.success() => {}
@@ -592,7 +601,10 @@ mod tests {
         assert_eq!(cfg.max_pushes_per_hour, 2);
 
         // Field omitted falls back to the built-in default of 6.
-        write_alerts_toml(&tmp, "ntfy_topic_url = \"https://ntfy.example.invalid/t\"\n");
+        write_alerts_toml(
+            &tmp,
+            "ntfy_topic_url = \"https://ntfy.example.invalid/t\"\n",
+        );
         let cfg = load_config(tmp.path()).expect("config present");
         assert_eq!(cfg.max_pushes_per_hour, 6);
     }
@@ -631,7 +643,12 @@ mod tests {
         // Prove the invariant against the exact value production sends: the
         // pure push_body(), not the sink. Seed a message stuffed with a path,
         // an email address, and personal tokens; none may reach the push body.
-        let seeded_tokens = ["PERSONA-ALPHA", "PERSONA-BRAVO", "hunter2", "SSN-000-00-0000"];
+        let seeded_tokens = [
+            "PERSONA-ALPHA",
+            "PERSONA-BRAVO",
+            "hunter2",
+            "SSN-000-00-0000",
+        ];
         let msg = "/Users/test/secret/report.pdf contact person@example.invalid \
                    PERSONA-ALPHA PERSONA-BRAVO hunter2 SSN-000-00-0000";
         let body = push_body("burn-guard", "Spend threshold crossed");
@@ -684,8 +701,16 @@ mod tests {
             assert_eq!(emails.len(), 1, "{class:?} should send exactly one email");
             assert_eq!(emails[0].to, "ops@example.invalid");
             // Email is first-party, so it carries the detail the push omits.
-            assert!(emails[0].subject.contains("title"), "email subject: {}", emails[0].subject);
-            assert!(emails[0].body.contains("detail"), "email body: {}", emails[0].body);
+            assert!(
+                emails[0].subject.contains("title"),
+                "email subject: {}",
+                emails[0].subject
+            );
+            assert!(
+                emails[0].body.contains("detail"),
+                "email body: {}",
+                emails[0].body
+            );
         }
     }
 
@@ -789,7 +814,9 @@ mod tests {
         write_alerts_toml(&tmp, "this is = = not valid toml ]][[");
         assert!(load_config(tmp.path()).is_none(), "malformed → None");
         assert!(
-            test_sink::warnings().iter().any(|w| w.contains("FAILED to parse")),
+            test_sink::warnings()
+                .iter()
+                .any(|w| w.contains("FAILED to parse")),
             "malformed config must warn loudly: {:?}",
             test_sink::warnings()
         );

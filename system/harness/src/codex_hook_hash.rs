@@ -220,8 +220,7 @@ mod tests {
     //   => sha256:3524dc80a43d23e5b183b4775038027cc6e152a7d9a8f8b0cd49c90a3410ccdf
     // -------------------------------------------------------------------------
     const F1_CANONICAL: &str = "{\"event_name\":\"session_start\",\"hooks\":[{\"async\":false,\"command\":\"/bin/echo hi\",\"timeout\":600,\"type\":\"command\"}]}";
-    const F1_HASH: &str =
-        "sha256:3524dc80a43d23e5b183b4775038027cc6e152a7d9a8f8b0cd49c90a3410ccdf";
+    const F1_HASH: &str = "sha256:3524dc80a43d23e5b183b4775038027cc6e152a7d9a8f8b0cd49c90a3410ccdf";
 
     // -------------------------------------------------------------------------
     // Fixture 2 - PreToolUse WITH a matcher, exercising the flatten path when
@@ -234,8 +233,7 @@ mod tests {
     //   => sha256:a0fed18c4c7a2b85d069b4b7afb578daa0c412c668f819ee9e14b894a11156cb
     // -------------------------------------------------------------------------
     const F2_CANONICAL: &str = "{\"event_name\":\"pre_tool_use\",\"hooks\":[{\"async\":false,\"command\":\"/bin/echo tool\",\"timeout\":600,\"type\":\"command\"}],\"matcher\":\"Bash\"}";
-    const F2_HASH: &str =
-        "sha256:a0fed18c4c7a2b85d069b4b7afb578daa0c412c668f819ee9e14b894a11156cb";
+    const F2_HASH: &str = "sha256:a0fed18c4c7a2b85d069b4b7afb578daa0c412c668f819ee9e14b894a11156cb";
 
     #[test]
     fn session_start_command_hash_matches_hand_derivation() {
@@ -322,7 +320,10 @@ mod tests {
         }
     }
 
-    fn matcher_pattern_for_event<'a>(event_label: &str, matcher: Option<&'a str>) -> Option<&'a str> {
+    fn matcher_pattern_for_event<'a>(
+        event_label: &str,
+        matcher: Option<&'a str>,
+    ) -> Option<&'a str> {
         match event_label {
             "user_prompt_submit" | "stop" | "interrupt" => None,
             _ => matcher,
@@ -332,7 +333,11 @@ mod tests {
     fn context_limit_event(event_label: &str) -> bool {
         matches!(
             event_label,
-            "pre_tool_use" | "post_tool_use" | "session_start" | "user_prompt_submit" | "subagent_start"
+            "pre_tool_use"
+                | "post_tool_use"
+                | "session_start"
+                | "user_prompt_submit"
+                | "subagent_start"
         )
     }
 
@@ -429,7 +434,10 @@ mod tests {
                 norm.insert("statusMessage".into(), serde_json::json!(sm));
             }
             if context_limit_event(event_label) {
-                if let Some(limit) = handler.get("additionalContextLimit").and_then(|v| v.as_u64()) {
+                if let Some(limit) = handler
+                    .get("additionalContextLimit")
+                    .and_then(|v| v.as_u64())
+                {
                     if limit != 2500 {
                         norm.insert("additionalContextLimit".into(), serde_json::json!(limit));
                     }

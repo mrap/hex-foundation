@@ -68,9 +68,7 @@ impl DoctorCheck for ConsolidationAuditFreshness {
                         "newest consolidation audit is {age}d old ({date}) — full consolidation Layer 3 stopped producing audits (>{STALE_DAYS}d stale); run `hex memory consolidate full`"
                     ))
                 } else {
-                    CheckResult::pass(format!(
-                        "newest consolidation audit {age}d old ({date})"
-                    ))
+                    CheckResult::pass(format!("newest consolidation audit {age}d old ({date})"))
                 }
             }
         }
@@ -123,7 +121,11 @@ mod tests {
         let today = chrono::Local::now().date_naive();
         write_audit(&evo, &today.format("%Y-%m-%d").to_string());
         let res = ConsolidationAuditFreshness.run(&ctx_for(tmp.path()));
-        assert_eq!(res.status, Status::Pass, "fresh audit must PASS, got {res:?}");
+        assert_eq!(
+            res.status,
+            Status::Pass,
+            "fresh audit must PASS, got {res:?}"
+        );
     }
 
     #[test]
@@ -134,7 +136,11 @@ mod tests {
         let old = chrono::Local::now().date_naive() - chrono::Duration::days(10);
         write_audit(&evo, &old.format("%Y-%m-%d").to_string());
         let res = ConsolidationAuditFreshness.run(&ctx_for(tmp.path()));
-        assert_eq!(res.status, Status::Fail, "stale audit must FAIL, got {res:?}");
+        assert_eq!(
+            res.status,
+            Status::Fail,
+            "stale audit must FAIL, got {res:?}"
+        );
     }
 
     #[test]
@@ -142,7 +148,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // No evolution/ created at all.
         let res = ConsolidationAuditFreshness.run(&ctx_for(tmp.path()));
-        assert_eq!(res.status, Status::Skip, "absent dir must SKIP, got {res:?}");
+        assert_eq!(
+            res.status,
+            Status::Skip,
+            "absent dir must SKIP, got {res:?}"
+        );
     }
 
     #[test]
