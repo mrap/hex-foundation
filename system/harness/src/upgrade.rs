@@ -136,6 +136,22 @@ fn walk_files(dir: &Path) -> impl Iterator<Item = PathBuf> {
         .map(|e| e.path().to_path_buf())
 }
 
+fn walk_files_checked(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    WalkDir::new(dir)
+        .into_iter()
+        .map(|entry| {
+            let entry = entry.map_err(io::Error::other)?;
+            let is_file = entry.file_type().is_file();
+            let in_pycache = entry
+                .path()
+                .components()
+                .any(|c| c.as_os_str() == "__pycache__");
+            Ok((is_file && !in_pycache).then(|| entry.path().to_path_buf()))
+        })
+        .filter_map(|result| result.transpose())
+        .collect()
+}
+
 fn files_differ(a: &Path, b: &Path) -> bool {
     match (fs::read(a), fs::read(b)) {
         (Ok(ac), Ok(bc)) => ac != bc,
@@ -155,6 +171,17 @@ fn copy_file_with_perms(src: &Path, dst: &Path) -> io::Result<()> {
         fs::set_permissions(dst, perms)?;
     }
     Ok(())
+}
+
+fn backup_path(backup_dir: &Path, dst_dir: &Path, relative: &Path) -> PathBuf {
+    let scope = backup_dir
+        .parent()
+        .and_then(|root| dst_dir.strip_prefix(root).ok())
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(|| dst_dir.file_name().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("scope"));
+    backup_dir.join(scope).join(relative)
 }
 
 /// Detect which files in src_dir differ from dst_dir.
@@ -226,7 +253,7 @@ fn apply_sync_protected(
         }
         if let Some(bak) = backup_dir {
             if dst_file.exists() && files_differ(&src_file, &dst_file) {
-                let bak_file = bak.join(rel);
+                let bak_file = backup_path(bak, dst_dir, rel);
                 if let Some(p) = bak_file.parent() {
                     fs::create_dir_all(p)?;
                 }
@@ -260,7 +287,7 @@ fn deletion_pass_protected(
         return Ok(0);
     }
     let mut deleted = 0;
-    for dst_file in walk_files(dst_dir) {
+    for dst_file in walk_files_checked(dst_dir)? {
         let rel = match dst_file.strip_prefix(dst_dir) {
             Ok(r) => r,
             Err(_) => continue,
@@ -269,7 +296,7 @@ fn deletion_pass_protected(
             if let Some((workspace, snapshot)) = protection {
                 protect_sync_path(workspace, &dst_file, None, snapshot)?;
             }
-            let bak_file = backup_dir.join(rel);
+            let bak_file = backup_path(backup_dir, dst_dir, rel);
             if let Some(p) = bak_file.parent() {
                 fs::create_dir_all(p)?;
             }
@@ -319,9 +346,17 @@ fn atomic_install_binary(src: &Path, dst: &Path) -> io::Result<()> {
     result
 }
 
-fn make_scripts_executable(dir: &Path) {
+fn make_scripts_executable(dir: &Path, protection: Option<(&Path, &UpgradeGitSnapshot)>) {
     for f in walk_files(dir) {
         if f.extension().and_then(|e| e.to_str()) == Some("sh") {
+            if let Some((workspace, snapshot)) = protection {
+                if f.strip_prefix(workspace)
+                    .ok()
+                    .is_some_and(|relative| snapshot.preexisting_paths.contains(relative))
+                {
+                    continue;
+                }
+            }
             if let Ok(meta) = fs::metadata(&f) {
                 let mut perms = meta.permissions();
                 perms.set_mode(perms.mode() | 0o111);
@@ -516,7 +551,13 @@ fn load_config_repo(config_file: &Path) -> Option<String> {
     v.get("repo")?.as_str().map(|s| s.to_string())
 }
 
-fn record_upgrade_sha(config_file: &Path, source_dir: &Path, repo_url: &str) -> Result<(), String> {
+fn record_upgrade_sha(
+    config_file: &Path,
+    source_dir: &Path,
+    repo_url: &str,
+    protection: Option<(&Path, &UpgradeGitSnapshot)>,
+    mut owned: Option<&mut HashMap<PathBuf, Option<Vec<u8>>>>,
+) -> Result<(), String> {
     let sha = Command::new("git")
         .arg("-C")
         .arg(source_dir)
@@ -551,9 +592,21 @@ fn record_upgrade_sha(config_file: &Path, source_dir: &Path, repo_url: &str) -> 
     let tmp = config_file.with_extension("tmp");
     let s = serde_json::to_string_pretty(&data)
         .map_err(|e| format!("could not encode {}: {e}", config_file.display()))?;
+    if let Some((workspace, snapshot)) = protection {
+        protect_generated_path(
+            workspace,
+            config_file,
+            format!("{s}\n").as_bytes(),
+            snapshot,
+        )
+        .map_err(|e| format!("upgrade.json operator edit conflict: {e}"))?;
+    }
     fs::write(&tmp, s + "\n").map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
     fs::rename(&tmp, config_file)
         .map_err(|e| format!("could not install {}: {e}", config_file.display()))?;
+    if let Some(paths) = owned.as_deref_mut() {
+        paths.insert(config_file.to_path_buf(), fs::read(config_file).ok());
+    }
     // `sha` is `git rev-parse HEAD` output — hex ASCII, every byte a char boundary.
     #[allow(clippy::string_slice)]
     {
@@ -908,16 +961,21 @@ fn sync_versions_file_protected(
                         println!("  [OK] hex binary rebuilt and swapped (atomic): v{cargo_ver}");
                         if let Some(ref sha) = source_sha {
                             let sha_tmp = installed_sha_file.with_extension("tmp");
-                            if fs::write(&sha_tmp, sha).is_ok() {
-                                let _ = fs::rename(&sha_tmp, &installed_sha_file);
-                                // `sha` is `git rev-parse HEAD` output — hex ASCII, every byte a char boundary.
-                                #[allow(clippy::string_slice)]
-                                {
-                                    println!(
-                                        "  → Recorded installed SHA: {}...",
-                                        &sha[..sha.len().min(8)]
-                                    );
-                                }
+                            fs::write(&sha_tmp, sha).map_err(|e| {
+                                eprintln!("  [FAIL] Could not write installed SHA: {e}");
+                                BinaryStepFailure::Build
+                            })?;
+                            fs::rename(&sha_tmp, &installed_sha_file).map_err(|e| {
+                                eprintln!("  [FAIL] Could not install installed SHA: {e}");
+                                BinaryStepFailure::Build
+                            })?;
+                            // `sha` is `git rev-parse HEAD` output — hex ASCII, every byte a char boundary.
+                            #[allow(clippy::string_slice)]
+                            {
+                                println!(
+                                    "  → Recorded installed SHA: {}...",
+                                    &sha[..sha.len().min(8)]
+                                );
                             }
                         }
                         // The binary changed, but the long-running harness
@@ -1316,7 +1374,7 @@ fn configure_hooks_path(workspace: &Path) {
 #[derive(Debug, Default)]
 struct UpgradeGitSnapshot {
     preexisting_paths: HashSet<PathBuf>,
-    preexisting_content: HashMap<PathBuf, Vec<u8>>,
+    preexisting_content: HashMap<PathBuf, Option<Vec<u8>>>,
 }
 
 fn upgrade_git_snapshot(workspace: &Path) -> Result<UpgradeGitSnapshot, String> {
@@ -1329,6 +1387,7 @@ fn upgrade_git_snapshot(workspace: &Path) -> Result<UpgradeGitSnapshot, String> 
             "--untracked-files=all",
             "--",
             ".hex",
+            "VERSIONS",
             ".claude/commands",
         ])
         .current_dir(workspace)
@@ -1350,9 +1409,12 @@ fn upgrade_git_snapshot(workspace: &Path) -> Result<UpgradeGitSnapshot, String> 
         let path = std::str::from_utf8(&record[3..])
             .map_err(|_| "git status returned a non-UTF-8 path".to_string())?;
         let relative = PathBuf::from(path);
-        if let Ok(bytes) = fs::read(workspace.join(&relative)) {
-            content.insert(relative.clone(), bytes);
-        }
+        let state = match fs::read(workspace.join(&relative)) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("could not snapshot {}: {e}", relative.display())),
+        };
+        content.insert(relative.clone(), state);
         paths.insert(relative);
     }
     Ok(UpgradeGitSnapshot {
@@ -1373,25 +1435,34 @@ fn protect_sync_path(
     if !snapshot.preexisting_paths.contains(relative) {
         return Ok(());
     }
-    let current = fs::read(path).unwrap_or_default();
+    let current = match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
     let before = snapshot
         .preexisting_content
         .get(relative)
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or(None);
     if current != before {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!("operator edit changed during upgrade: {}", path.display()),
         ));
     }
-    let desired_bytes = desired.map(|source| fs::read(source).unwrap_or_default());
+    let desired_bytes = desired.map(fs::read).transpose()?;
     protect_sync_bytes(path, desired_bytes.as_deref(), &before)
 }
 
-fn protect_sync_bytes(path: &Path, desired: Option<&[u8]>, before: &[u8]) -> io::Result<()> {
+fn protect_sync_bytes(
+    path: &Path,
+    desired: Option<&[u8]>,
+    before: &Option<Vec<u8>>,
+) -> io::Result<()> {
     match desired {
-        Some(bytes) if bytes == before => Ok(()),
+        Some(bytes) if Some(bytes.to_vec()) == *before => Ok(()),
+        None if before.is_none() => Ok(()),
         Some(_) => Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!("upgrade would overwrite operator edit: {}", path.display()),
@@ -1415,12 +1486,16 @@ fn protect_generated_path(
     if !snapshot.preexisting_paths.contains(relative) {
         return Ok(());
     }
-    let current = fs::read(path).unwrap_or_default();
+    let current = match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
     let before = snapshot
         .preexisting_content
         .get(relative)
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or(None);
     if current != before {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -1460,6 +1535,28 @@ fn commit_synced_files_since(
         Some(paths) => {
             for relative in &candidates {
                 if let Some(expected) = paths.get(&workspace.join(relative)) {
+                    let index = Command::new("git")
+                        .args([
+                            "diff",
+                            "--cached",
+                            "--quiet",
+                            "--",
+                            relative.to_string_lossy().as_ref(),
+                        ])
+                        .current_dir(workspace)
+                        .status()
+                        .map_err(|e| {
+                            format!(
+                                "could not inspect git index for {}: {e}",
+                                relative.display()
+                            )
+                        })?;
+                    if !index.success() {
+                        return Err(format!(
+                            "operator staged edit changed upgrade-owned path before commit: {}",
+                            workspace.join(relative).display()
+                        ));
+                    }
                     let current = fs::read(workspace.join(relative)).ok();
                     if &current != expected {
                         return Err(format!(
@@ -1805,7 +1902,7 @@ pub fn run(args: &[String]) -> i32 {
         println!("  → Deletion pass: nothing to prune");
     }
 
-    make_scripts_executable(&hex_dot_dir);
+    make_scripts_executable(&hex_dot_dir, protection);
 
     // Update version.txt for v2 layout
     if let Some(src_ver_file) = &src_dirs.version_txt {
@@ -1886,7 +1983,13 @@ pub fn run(args: &[String]) -> i32 {
 
     // Record provenance only after every required file operation and the
     // binary deployment have been classified as successful.
-    if let Err(e) = record_upgrade_sha(&config_file, &source_dir, &repo_url) {
+    if let Err(e) = record_upgrade_sha(
+        &config_file,
+        &source_dir,
+        &repo_url,
+        protection,
+        Some(&mut owned_paths),
+    ) {
         eprintln!("  [FAIL] Upgrade source SHA could not be recorded: {e}");
         return 1;
     }
@@ -1943,8 +2046,7 @@ pub fn run(args: &[String]) -> i32 {
                     "  The deployed version is live but not reflected in git (deployed-but-orphaned)."
                 );
                 eprintln!(
-                    "  Fix: git -C {ws} add -u -- .hex && git -C {ws} commit -m \"chore(hex): sync harness files to v{synced_version}\"",
-                    ws = hex_dir.display()
+                    "  Fix: inspect the scoped changed paths, then stage only those paths and commit them; do not use `git add -u -- .hex` while operator edits are present."
                 );
                 println!();
                 return 1;
@@ -2227,7 +2329,7 @@ mod tests {
         assert_eq!(result, "#!/bin/bash\nnew content");
         // Old file backed up
         assert!(
-            backup_dir.join("scripts/hook.sh").exists(),
+            backup_dir.join(".hex/hooks/scripts/hook.sh").exists(),
             "old hook must be backed up"
         );
     }
@@ -2247,7 +2349,7 @@ mod tests {
         assert_eq!(deleted, 1);
         assert!(!dst.join("stale.sh").exists(), "stale file must be removed");
         assert!(
-            bak.join("stale.sh").exists(),
+            bak.join("dst/stale.sh").exists(),
             "stale file must be backed up"
         );
         assert!(dst.join("current.sh").exists(), "current file must remain");
@@ -3187,5 +3289,40 @@ CUSTOM_INSTANCE_PIN=abc123
             fs::read_to_string(ws.join(".hex/owned.txt")).unwrap(),
             "operator-after\n"
         );
+    }
+
+    #[test]
+    fn commit_owned_path_rejects_operator_index_change_even_if_worktree_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        init_test_repo(ws);
+        write_file(&ws.join(".hex/owned.txt"), "base\n");
+        seed_commit(ws, "seed");
+        let snapshot = upgrade_git_snapshot(ws).unwrap();
+        write_file(&ws.join(".hex/owned.txt"), "upgrade\n");
+        let mut owned = HashMap::new();
+        owned.insert(
+            ws.join(".hex/owned.txt"),
+            Some(fs::read(ws.join(".hex/owned.txt")).unwrap()),
+        );
+        write_file(&ws.join(".hex/owned.txt"), "operator-staged\n");
+        Command::new("git")
+            .args(["add", ".hex/owned.txt"])
+            .current_dir(ws)
+            .status()
+            .unwrap();
+        write_file(&ws.join(".hex/owned.txt"), "upgrade\n");
+        let result = commit_synced_files_since(ws, "9.9.9-test", &snapshot, Some(&owned));
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(ws.join(".hex/owned.txt")).unwrap(),
+            "upgrade\n"
+        );
+        let staged = Command::new("git")
+            .args(["show", ":.hex/owned.txt"])
+            .current_dir(ws)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&staged.stdout), "operator-staged\n");
     }
 }
