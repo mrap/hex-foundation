@@ -39,11 +39,7 @@ ln -s "INSTRUCTIONS-REAL.md" "$T/projc/CLAUDE.md"
 CT=$(mktemp -d)  # temp CLAUDE_CONFIG_DIR so ~/.claude.json is not mutated
 cd "$T/projc" && CLAUDE_CONFIG_DIR="$CT" claude -p --model sonnet --output-format json \
   "List every codeword that appears in your project instructions."
-# Codex parity Phase 0 spikes (2026-09-07)
-
-Dated research ledger for the codex-parity Phase 0 spikes. Each entry:
-Question / Method (exact commands) / Result / Decision or Follow-up. Plain
-language, short sentences, no em dashes.
+```
 
 ## S0.3 Hook trust hash reproduction
 

@@ -36,6 +36,8 @@ The first developer message rendered these roots and skills (temp paths redacted
 - skill-creator: ... (file: r0/skill-creator/SKILL.md)
 - skill-installer: ... (file: r0/skill-installer/SKILL.md)
 - hex-doctor: Validate hex agent structure and repair issues. ... (file: r1/hex-doctor/SKILL.md)
+```
+
 ## Hook payloads
 
 Facts recorded 2026-09-07 against codex-cli 0.153.4 (ChatGPT auth). Every probe
