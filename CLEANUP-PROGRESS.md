@@ -174,10 +174,10 @@ export CARGO_TARGET_DIR="<historical-shared-target>"
 | Task | Behavior | Status |
 |------|----------|--------|
 | `Tyrgdn4ww` | Create this ledger from audit evidence (base SHA, accepted findings, retractions, known-red baseline, scope) before editing source | **Done** (2026-09-08) — created in working tree, no commit, base-drift precondition holds |
-| `T84q902a9` | Standalone `cargo fmt --all` commit; record SHA in `.git-blame-ignore-revs` + here | **Done** (2026-09-08) — fmt commit `1ef5a7f2d2a8bd27d25182d9c12a70055fc23108`; SHA recorded in `.git-blame-ignore-revs`; `cargo fmt --all -- --check` green |
+| `T84q902a9` | Standalone `cargo fmt --all` commit; record SHA in `.git-blame-ignore-revs` + here | **Done** (2026-09-08) — fmt commit `f3c1247518707f3f5ef10c6de47227e66aaaefe6`; SHA recorded in `.git-blame-ignore-revs`; `cargo fmt --all -- --check` green |
 | `T5n77bm6j` | Fix the 22 source Clippy errors without blanket suppression or assertion weakening | **Done** (2026-09-08) — 22 errors fixed on foundation source; one targeted per-function `#[allow]` (justified below), no crate-wide allow, no test weakening. See "Clippy fix inventory (task `T5n77bm6j`)" below. |
 
-**Format commit SHA:** `1ef5a7f2d2a8bd27d25182d9c12a70055fc23108`
+**Format commit SHA:** `f3c1247518707f3f5ef10c6de47227e66aaaefe6`
 — subject `style: cargo fmt --all (mechanical, no semantic change)`; standalone `cargo fmt --all` over
 `system/harness`, 11 files, whitespace/comma/closure-brace only (no identifier or literal changed;
 verified by normalized byte-compare of each file at `HEAD~1` vs `HEAD`). Also listed in
@@ -189,7 +189,7 @@ the branch is later squashed or rebased on merge.
 ## Clippy fix inventory (task `T5n77bm6j`)
 
 All 22 errors fixed on foundation source only (`system/harness/src/`). The semantic fixes are applied
-**on top of** the fmt commit `1ef5a7f2` and land as this task's own execute commit — kept separate from
+**on top of** the fmt commit `f3c12475` and land as this task's own execute commit — kept separate from
 the mechanical reformat so each stays independently reviewable. No crate-wide `#![allow]` was added; the
 one targeted per-function `#[allow]` (row 5) is justified inline in code and below. No test assertion was
 weakened.
