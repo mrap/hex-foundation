@@ -589,22 +589,13 @@ mod tests {
         }
     }
 
-    // Bin-crate-local HEX_DIR lock. The lib's `telemetry::test_support::ENV_LOCK`
-    // is `#[cfg(test)]` in the `hex` lib, so it is NOT compiled into the bin's
-    // own test build — bin tests that mutate the process-global HEX_DIR must
-    // serialize on a local mutex instead.
-    static HEX_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Task Tx6nx2jhv: the Layer 3 empty-response guard is a HARD error AND emits
     /// an error telemetry event (Rule S6: no quiet failures). We point HEX_DIR at
     /// a temp dir so `record_loud` writes into a throwaway telemetry db rather
     /// than a developer's real one, then read the event back to prove it landed.
     #[test]
     fn reject_empty_audit_body_is_hard_error() {
-        let _guard = HEX_DIR_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("HEX_DIR");
-        std::env::set_var("HEX_DIR", tmp.path());
+        let _environment = crate::test_env::isolate_hex_dir();
 
         for body in ["", "   ", "\n\t  \n"] {
             assert!(
@@ -636,11 +627,6 @@ mod tests {
             Some(1),
             "the empty-response telemetry event must carry a nonzero exit code"
         );
-
-        match prev {
-            Some(v) => std::env::set_var("HEX_DIR", v),
-            None => std::env::remove_var("HEX_DIR"),
-        }
     }
 
     /// Regression: there must be exactly ONE consolidate orchestrator, and it

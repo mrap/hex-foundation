@@ -22,6 +22,58 @@ mod usage;
 // ops lives in the lib (the in-process worker runtime calls it too); the bin
 // shares that one copy rather than compiling a second (mirrors hex::memory).
 use hex::ops;
+// Binary tests cannot use the library's cfg(test) environment helpers.
+#[cfg(test)]
+mod test_env {
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
+
+    static HEX_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct HexDirGuard {
+        previous: Option<OsString>,
+        _root: tempfile::TempDir,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    pub(crate) fn isolate_hex_dir() -> HexDirGuard {
+        let lock = HEX_DIR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("HEX_DIR");
+        std::env::set_var("HEX_DIR", root.path());
+        HexDirGuard {
+            previous,
+            _root: root,
+            _lock: lock,
+        }
+    }
+
+    impl Drop for HexDirGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("HEX_DIR", value),
+                None => std::env::remove_var("HEX_DIR"),
+            }
+        }
+    }
+
+    #[test]
+    fn guard_serializes_and_restores_environment_on_unwind() {
+        let previous = {
+            let _lock = HEX_DIR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            std::env::var_os("HEX_DIR")
+        };
+        let result = std::panic::catch_unwind(|| {
+            let guard = isolate_hex_dir();
+            assert!(HEX_DIR_LOCK.try_lock().is_err());
+            assert_eq!(std::env::var_os("HEX_DIR"), Some(guard._root.path().into()));
+            panic!("exercise environment restoration during unwinding");
+        });
+        assert!(result.is_err());
+        let _lock = HEX_DIR_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(std::env::var_os("HEX_DIR"), previous);
+    }
+}
 // Personal overlay (discovered, never named here). build.rs globs
 // $HEX_DIR/.hex/harness-personal/integration_*.rs → OUT_DIR/personal_mods.rs,
 // exposing `probe_registry() -> Vec<(&'static str, fn() -> i32)>`.
