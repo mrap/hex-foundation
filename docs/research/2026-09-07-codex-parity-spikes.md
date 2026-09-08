@@ -41,6 +41,12 @@ cd "$T/projc" && CLAUDE_CONFIG_DIR="$CT" claude -p --model sonnet --output-forma
   "List every codeword that appears in your project instructions."
 ```
 
+<!-- merged from task branch hook-trust-hash (fence repair 2026-09-07): duplicate h1 dropped, all content kept -->
+
+Dated research ledger for the codex-parity Phase 0 spikes. Each entry:
+Question / Method (exact commands) / Result / Decision or Follow-up. Plain
+language, short sentences, no em dashes.
+
 ## S0.3 Hook trust hash reproduction
 
 Question. Can the hex harness recompute Codex's per-hook `trusted_hash` exactly,
