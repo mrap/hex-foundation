@@ -139,6 +139,12 @@ fn walk_files(dir: &Path) -> impl Iterator<Item = PathBuf> {
 fn walk_files_checked(dir: &Path) -> io::Result<Vec<PathBuf>> {
     WalkDir::new(dir)
         .into_iter()
+        .filter_entry(|entry| {
+            !matches!(
+                entry.file_name().to_str(),
+                Some(".git" | "target" | "node_modules" | "__pycache__")
+            )
+        })
         .map(|entry| {
             let entry = entry.map_err(io::Error::other)?;
             let is_file = entry.file_type().is_file();
@@ -159,11 +165,11 @@ fn files_differ(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn copy_file_with_perms(src: &Path, dst: &Path) -> io::Result<()> {
+fn copy_file_with_perms(src: &Path, dst: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::copy(src, dst)?;
+    fs::write(dst, bytes)?;
     let src_mode = fs::metadata(src)?.permissions().mode();
     if src_mode & 0o111 != 0 {
         let mut perms = fs::metadata(dst)?.permissions();
@@ -269,7 +275,13 @@ fn apply_sync_protected(
         }
         let dst_file = dst_dir.join(rel);
         if let Some((workspace, snapshot)) = protection {
-            protect_sync_path(workspace, &dst_file, Some(&src_file), snapshot)?;
+            protect_sync_path(
+                workspace,
+                &dst_file,
+                Some(&src_file),
+                snapshot,
+                owned.as_deref(),
+            )?;
         }
         if let Some(bak) = backup_dir {
             if dst_file.exists() && files_differ(&src_file, &dst_file) {
@@ -277,12 +289,21 @@ fn apply_sync_protected(
                 if let Some(p) = bak_file.parent() {
                     fs::create_dir_all(p)?;
                 }
-                fs::copy(&dst_file, &bak_file)?;
+                if !owned
+                    .as_deref()
+                    .is_some_and(|paths| paths.contains_key(&dst_file))
+                {
+                    let mut backup = fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&bak_file)?;
+                    io::copy(&mut fs::File::open(&dst_file)?, &mut backup)?;
+                }
             }
         }
         if !dst_file.exists() || files_differ(&src_file, &dst_file) {
             let source_bytes = fs::read(&src_file)?;
-            copy_file_with_perms(&src_file, &dst_file)?;
+            copy_file_with_perms(&src_file, &dst_file, &source_bytes)?;
             if let Some(paths) = owned.as_deref_mut() {
                 paths.insert(dst_file.clone(), Some(source_bytes));
             }
@@ -316,13 +337,22 @@ fn deletion_pass_protected(
         };
         if !src_dir.join(rel).exists() {
             if let Some((workspace, snapshot)) = protection {
-                protect_sync_path(workspace, &dst_file, None, snapshot)?;
+                protect_sync_path(workspace, &dst_file, None, snapshot, owned.as_deref())?;
             }
             let bak_file = backup_path(backup_dir, dst_dir, rel, protection.map(|(root, _)| root));
             if let Some(p) = bak_file.parent() {
                 fs::create_dir_all(p)?;
             }
-            fs::copy(&dst_file, &bak_file)?;
+            if !owned
+                .as_deref()
+                .is_some_and(|paths| paths.contains_key(&dst_file))
+            {
+                let mut backup = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&bak_file)?;
+                io::copy(&mut fs::File::open(&dst_file)?, &mut backup)?;
+            }
             fs::remove_file(&dst_file)?;
             if let Some(paths) = owned.as_deref_mut() {
                 paths.insert(dst_file.clone(), None);
@@ -368,22 +398,19 @@ fn atomic_install_binary(src: &Path, dst: &Path) -> io::Result<()> {
     result
 }
 
-fn make_scripts_executable(
-    dir: &Path,
-    protection: Option<(&Path, &UpgradeGitSnapshot)>,
-    owned: Option<&HashMap<PathBuf, Option<Vec<u8>>>>,
-) -> io::Result<()> {
-    for f in walk_files_checked(dir)? {
-        if f.extension().and_then(|e| e.to_str()) == Some("sh") {
-            if let Some((_workspace, _snapshot)) = protection {
-                if !owned.is_some_and(|paths| paths.contains_key(&f)) {
-                    continue;
-                }
+fn make_scripts_executable(owned: &HashMap<PathBuf, Option<Vec<u8>>>) -> io::Result<()> {
+    for (path, expected) in owned {
+        if expected.is_some() && path.extension().and_then(|e| e.to_str()) == Some("sh") {
+            if read_file_state(path)? != *expected {
+                return Err(io::Error::other(format!(
+                    "operator edit before chmod: {}",
+                    path.display()
+                )));
             }
-            let meta = fs::metadata(&f)?;
+            let meta = fs::metadata(path)?;
             let mut perms = meta.permissions();
             perms.set_mode(perms.mode() | 0o111);
-            fs::set_permissions(&f, perms)?;
+            fs::set_permissions(path, perms)?;
         }
     }
     Ok(())
@@ -617,8 +644,14 @@ fn record_upgrade_sha(
         .map_err(|e| format!("could not encode {}: {e}", config_file.display()))?;
     let serialized = format!("{s}\n");
     if let Some((workspace, snapshot)) = protection {
-        protect_generated_path(workspace, config_file, serialized.as_bytes(), snapshot)
-            .map_err(|e| format!("upgrade.json operator edit conflict: {e}"))?;
+        protect_generated_path(
+            workspace,
+            config_file,
+            serialized.as_bytes(),
+            snapshot,
+            owned.as_deref(),
+        )
+        .map_err(|e| format!("upgrade.json operator edit conflict: {e}"))?;
     }
     fs::write(&tmp, &serialized).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
     fs::rename(&tmp, config_file)
@@ -780,7 +813,10 @@ fn sync_versions_file_protected(
     // rewrote the file with only HEX_FOUNDATION_VERSION, destroying
     // unmanaged pins like BOI_VERSION that install.sh parity reads
     // (2026-07-16 audit).
-    let existing = fs::read_to_string(&versions_file).unwrap_or_default();
+    let existing = fs::read_to_string(&versions_file).map_err(|e| {
+        eprintln!("  [FAIL] Could not read VERSIONS: {e}");
+        BinaryStepFailure::Build
+    })?;
     let managed_key = "HEX_FOUNDATION_VERSION";
     let managed_line = format!("{managed_key}=v{cargo_ver}");
     let mut replaced = false;
@@ -806,11 +842,17 @@ fn sync_versions_file_protected(
 
     let tmp = versions_file.with_extension("tmp");
     if let Some((workspace, snapshot)) = protection {
-        protect_generated_path(workspace, &versions_file, new_content.as_bytes(), snapshot)
-            .map_err(|e| {
-                eprintln!("  [FAIL] VERSIONS operator edit conflict: {e}");
-                BinaryStepFailure::Build
-            })?;
+        protect_generated_path(
+            workspace,
+            &versions_file,
+            new_content.as_bytes(),
+            snapshot,
+            owned.as_deref(),
+        )
+        .map_err(|e| {
+            eprintln!("  [FAIL] VERSIONS operator edit conflict: {e}");
+            BinaryStepFailure::Build
+        })?;
     }
     fs::write(&tmp, &new_content).map_err(|e| {
         eprintln!("  [FAIL] Could not write {}: {e}", tmp.display());
@@ -889,7 +931,7 @@ fn sync_versions_file_protected(
         if let Err(e) = apply_sync_protected(
             &harness_src,
             &harness_dst,
-            None,
+            Some(backup_dir),
             protection,
             owned.as_deref_mut(),
         ) {
@@ -926,7 +968,7 @@ fn sync_versions_file_protected(
             if let Err(e) = apply_sync_protected(
                 &codeintel_src,
                 &codeintel_dst,
-                None,
+                Some(backup_dir),
                 protection,
                 owned.as_deref_mut(),
             ) {
@@ -980,6 +1022,19 @@ fn sync_versions_file_protected(
                     Ok(()) => {
                         println!("  [OK] hex binary rebuilt and swapped (atomic): v{cargo_ver}");
                         if let Some(ref sha) = source_sha {
+                            if let Some((workspace, snapshot)) = protection {
+                                protect_generated_path(
+                                    workspace,
+                                    &installed_sha_file,
+                                    sha.as_bytes(),
+                                    snapshot,
+                                    owned.as_deref(),
+                                )
+                                .map_err(|e| {
+                                    eprintln!("  [FAIL] Installed SHA conflict: {e}");
+                                    BinaryStepFailure::Build
+                                })?;
+                            }
                             let sha_tmp = installed_sha_file.with_extension("tmp");
                             fs::write(&sha_tmp, sha).map_err(|e| {
                                 eprintln!("  [FAIL] Could not write installed SHA: {e}");
@@ -989,6 +1044,12 @@ fn sync_versions_file_protected(
                                 eprintln!("  [FAIL] Could not install installed SHA: {e}");
                                 BinaryStepFailure::Build
                             })?;
+                            if let Some(paths) = owned {
+                                paths.insert(
+                                    installed_sha_file.clone(),
+                                    Some(sha.as_bytes().to_vec()),
+                                );
+                            }
                             // `sha` is `git rev-parse HEAD` output — hex ASCII, every byte a char boundary.
                             #[allow(clippy::string_slice)]
                             {
@@ -1397,21 +1458,19 @@ struct UpgradeGitSnapshot {
     baseline_content: HashMap<PathBuf, Option<Vec<u8>>>,
 }
 
+#[cfg(test)]
 fn upgrade_git_snapshot(workspace: &Path) -> Result<UpgradeGitSnapshot, String> {
-    upgrade_git_snapshot_for(
-        workspace,
-        &[
-            workspace.join(".hex"),
-            workspace.join(".claude/commands"),
-            workspace.join("VERSIONS"),
-        ],
-    )
+    let mut planned = Vec::new();
+    for root in [workspace.join(".hex"), workspace.join(".claude/commands")] {
+        if root.exists() {
+            planned.extend(walk_files_checked(&root).map_err(|e| e.to_string())?);
+        }
+    }
+    planned.push(workspace.join("VERSIONS"));
+    upgrade_git_snapshot_for(workspace, &planned)
 }
 
-fn upgrade_git_snapshot_for(
-    workspace: &Path,
-    managed_roots: &[PathBuf],
-) -> Result<UpgradeGitSnapshot, String> {
+fn upgrade_dirty_paths(workspace: &Path) -> Result<HashSet<PathBuf>, String> {
     let output = Command::new("git")
         .args([
             "status",
@@ -1444,38 +1503,108 @@ fn upgrade_git_snapshot_for(
         let relative = PathBuf::from(path);
         paths.insert(relative);
     }
+    Ok(paths)
+}
+
+/// Read only the exact destinations admitted by the operation inventory.
+/// Explicit absence is a baseline; an unknown path is never assumed absent.
+fn upgrade_git_snapshot_for(
+    workspace: &Path,
+    planned_paths: &[PathBuf],
+) -> Result<UpgradeGitSnapshot, String> {
+    let preexisting_paths = upgrade_dirty_paths(workspace)?;
     let mut baseline_content = HashMap::new();
-    for root in managed_roots {
-        if root.is_file() {
-            let relative = root
-                .strip_prefix(workspace)
-                .map_err(|_| format!("snapshot path escaped workspace: {}", root.display()))?
-                .to_path_buf();
-            baseline_content.insert(
-                relative,
-                read_file_state(root)
-                    .map_err(|e| format!("could not snapshot {}: {e}", root.display()))?,
-            );
-        } else if root.exists() {
-            for path in walk_files_checked(root)
-                .map_err(|e| format!("could not snapshot {}: {e}", root.display()))?
-            {
-                let relative = path
-                    .strip_prefix(workspace)
-                    .map_err(|_| format!("snapshot path escaped workspace: {}", path.display()))?
-                    .to_path_buf();
-                baseline_content.insert(
-                    relative,
-                    read_file_state(&path)
-                        .map_err(|e| format!("could not snapshot {}: {e}", path.display()))?,
-                );
+    for path in planned_paths {
+        let relative = path
+            .strip_prefix(workspace)
+            .map_err(|_| format!("snapshot path escaped workspace: {}", path.display()))?;
+        baseline_content.insert(
+            relative.to_path_buf(),
+            read_file_state(path)
+                .map_err(|e| format!("could not snapshot {}: {e}", path.display()))?,
+        );
+    }
+    Ok(UpgradeGitSnapshot {
+        preexisting_paths,
+        baseline_content,
+    })
+}
+
+/// Enumerate source-selected writes and only the established deletion scopes.
+/// Additive runtime directories are never traversed on the destination side.
+fn planned_upgrade_paths(
+    workspace: &Path,
+    source_dir: &Path,
+    sources: &SourceDirs,
+) -> io::Result<Vec<PathBuf>> {
+    let hex = workspace.join(".hex");
+    let pairs = [
+        (sources.scripts.clone(), hex.join("scripts"), true),
+        (sources.skills.clone(), hex.join("skills"), true),
+        (sources.commands.clone(), hex.join("commands"), true),
+        (sources.hooks.clone(), hex.join("hooks"), true),
+        (sources.iii.clone(), hex.join("iii"), false),
+        (sources.templates.clone(), hex.join("templates"), false),
+        (
+            sources.commands.clone(),
+            workspace.join(".claude/commands"),
+            true,
+        ),
+        (
+            source_dir.join("system/harness"),
+            hex.join("harness"),
+            false,
+        ),
+        (
+            source_dir.join("system/code-intel"),
+            hex.join("code-intel"),
+            false,
+        ),
+    ];
+    let mut paths = HashSet::new();
+    for (source, destination, prune) in &pairs {
+        if !source.exists() {
+            continue;
+        }
+        for file in walk_files_checked(source)? {
+            let relative = file.strip_prefix(source).map_err(io::Error::other)?;
+            if !relative.to_string_lossy().contains("settings.local.json") {
+                paths.insert(destination.join(relative));
+            }
+        }
+        let deletion_roots = if *prune {
+            vec![(source.clone(), destination.clone())]
+        } else if *destination == hex.join("harness") || *destination == hex.join("code-intel") {
+            ["src", "tests"]
+                .iter()
+                .map(|sub| (source.join(sub), destination.join(sub)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for (source_root, destination_root) in deletion_roots {
+            if !source_root.exists() || !destination_root.exists() {
+                continue;
+            }
+            for file in walk_files_checked(&destination_root)? {
+                let relative = file
+                    .strip_prefix(&destination_root)
+                    .map_err(io::Error::other)?;
+                if !source_root.join(relative).exists() {
+                    paths.insert(file);
+                }
             }
         }
     }
-    Ok(UpgradeGitSnapshot {
-        preexisting_paths: paths,
-        baseline_content,
-    })
+    paths.extend([
+        hex.join("version.txt"),
+        hex.join("bin/hex.sha"),
+        hex.join("upgrade.json"),
+        workspace.join("VERSIONS"),
+    ]);
+    let mut paths: Vec<_> = paths.into_iter().collect();
+    paths.sort();
+    Ok(paths)
 }
 
 fn protect_sync_path(
@@ -1483,36 +1612,35 @@ fn protect_sync_path(
     path: &Path,
     desired: Option<&Path>,
     snapshot: &UpgradeGitSnapshot,
+    owned: Option<&HashMap<PathBuf, Option<Vec<u8>>>>,
 ) -> io::Result<()> {
-    let Ok(relative) = path.strip_prefix(workspace) else {
-        return Ok(());
-    };
-    let Some(before) = snapshot.baseline_content.get(relative) else {
-        if path.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("operator file appeared during upgrade: {}", path.display()),
-            ));
-        }
-        return Ok(());
-    };
-    let current = match fs::read(path) {
-        Ok(bytes) => Some(bytes),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
-    };
-    let before = before.clone();
-    if current != before {
+    let desired = desired.map(fs::read).transpose()?;
+    protect_write(workspace, path, desired.as_deref(), snapshot, owned)
+}
+
+fn protect_write(
+    workspace: &Path,
+    path: &Path,
+    desired: Option<&[u8]>,
+    snapshot: &UpgradeGitSnapshot,
+    owned: Option<&HashMap<PathBuf, Option<Vec<u8>>>>,
+) -> io::Result<()> {
+    let relative = path.strip_prefix(workspace).map_err(io::Error::other)?;
+    let original = snapshot.baseline_content.get(relative).ok_or_else(|| {
+        io::Error::other(format!("unplanned upgrade destination: {}", path.display()))
+    })?;
+    let prior_owned = owned.and_then(|paths| paths.get(path));
+    let before = prior_owned.unwrap_or(original);
+    if read_file_state(path)? != *before {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             format!("operator edit changed during upgrade: {}", path.display()),
         ));
     }
-    if !snapshot.preexisting_paths.contains(relative) {
-        return Ok(());
+    if snapshot.preexisting_paths.contains(relative) {
+        protect_sync_bytes(path, desired, original)?;
     }
-    let desired_bytes = desired.map(fs::read).transpose()?;
-    protect_sync_bytes(path, desired_bytes.as_deref(), &before)
+    Ok(())
 }
 
 fn protect_sync_bytes(
@@ -1539,34 +1667,9 @@ fn protect_generated_path(
     path: &Path,
     generated: &[u8],
     snapshot: &UpgradeGitSnapshot,
+    owned: Option<&HashMap<PathBuf, Option<Vec<u8>>>>,
 ) -> io::Result<()> {
-    let Ok(relative) = path.strip_prefix(workspace) else {
-        return Ok(());
-    };
-    let Some(before) = snapshot.baseline_content.get(relative).cloned() else {
-        if path.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("operator file appeared during upgrade: {}", path.display()),
-            ));
-        }
-        return Ok(());
-    };
-    let current = match fs::read(path) {
-        Ok(bytes) => Some(bytes),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
-    };
-    if current != before {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("operator edit changed during upgrade: {}", path.display()),
-        ));
-    }
-    if !snapshot.preexisting_paths.contains(relative) {
-        return Ok(());
-    }
-    protect_sync_bytes(path, Some(generated), &before)
+    protect_write(workspace, path, Some(generated), snapshot, owned)
 }
 
 /// After a successful sync + rebuild, commit only files changed by this
@@ -1589,9 +1692,8 @@ fn commit_synced_files_since(
     snapshot: &UpgradeGitSnapshot,
     owned_paths: Option<&HashMap<PathBuf, Option<Vec<u8>>>>,
 ) -> Result<bool, String> {
-    let after = upgrade_git_snapshot(workspace)?;
+    let after = upgrade_dirty_paths(workspace)?;
     let candidates: Vec<PathBuf> = after
-        .preexisting_paths
         .difference(&snapshot.preexisting_paths)
         .cloned()
         .collect();
@@ -1836,24 +1938,14 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     let git_snapshot = if is_own_git_toplevel(&hex_dir) {
-        let managed_roots = vec![
-            hex_dot_dir.join("scripts"),
-            hex_dot_dir.join("skills"),
-            hex_dot_dir.join("commands"),
-            hex_dot_dir.join("hooks"),
-            hex_dot_dir.join("iii"),
-            hex_dot_dir.join("templates"),
-            hex_dot_dir.join("harness/src"),
-            hex_dot_dir.join("harness/tests"),
-            hex_dot_dir.join("code-intel/src"),
-            hex_dot_dir.join("code-intel/tests"),
-            hex_dot_dir.join("version.txt"),
-            hex_dot_dir.join("bin/hex.sha"),
-            config_file.clone(),
-            hex_dir.join(".claude/commands"),
-            hex_dir.join("VERSIONS"),
-        ];
-        match upgrade_git_snapshot_for(&hex_dir, &managed_roots) {
+        let planned = match planned_upgrade_paths(&hex_dir, &source_dir, &src_dirs) {
+            Ok(paths) => paths,
+            Err(e) => {
+                eprintln!("  [FAIL] Could not inventory required upgrade paths: {e}");
+                return 1;
+            }
+        };
+        match upgrade_git_snapshot_for(&hex_dir, &planned) {
             Ok(snapshot) => Some(snapshot),
             Err(e) => {
                 eprintln!("  [FAIL] Could not snapshot operator edits before upgrade: {e}");
@@ -1988,7 +2080,7 @@ pub fn run(args: &[String]) -> i32 {
         println!("  → Deletion pass: nothing to prune");
     }
 
-    if let Err(e) = make_scripts_executable(&hex_dot_dir, protection, Some(&owned_paths)) {
+    if let Err(e) = make_scripts_executable(&owned_paths) {
         let message = format!("could not set script permissions: {e}");
         eprintln!("  [FAIL] {message}");
         failures.push(message);
@@ -2003,6 +2095,7 @@ pub fn run(args: &[String]) -> i32 {
                     &hex_dot_dir.join("version.txt"),
                     Some(src_ver_file),
                     snapshot,
+                    Some(&owned_paths),
                 )
             });
             match allowed {
@@ -2012,22 +2105,18 @@ pub fn run(args: &[String]) -> i32 {
                     failures.push(message);
                 }
                 Ok(()) => {
-                    let source_bytes = match fs::read(src_ver_file) {
-                        Ok(bytes) => bytes,
+                    match fs::read(src_ver_file).and_then(|bytes| {
+                        fs::write(hex_dot_dir.join("version.txt"), &bytes)?;
+                        Ok(bytes)
+                    }) {
+                        Ok(bytes) => {
+                            owned_paths.insert(hex_dot_dir.join("version.txt"), Some(bytes));
+                        }
                         Err(e) => {
-                            let message = format!("version.txt read failed: {e}");
+                            let message = format!("version.txt read/write failed: {e}");
                             eprintln!("  [FAIL] {message}");
                             failures.push(message);
-                            Vec::new()
                         }
-                    };
-                    if let Err(e) = fs::copy(src_ver_file, hex_dot_dir.join("version.txt")) {
-                        let message = format!("version.txt copy failed: {e}");
-                        eprintln!("  [FAIL] {message}");
-                        failures.push(message);
-                    } else {
-                        let version_path = hex_dot_dir.join("version.txt");
-                        owned_paths.insert(version_path.clone(), Some(source_bytes));
                     }
                 }
             }
@@ -3371,12 +3460,192 @@ CUSTOM_INSTANCE_PIN=abc123
     }
 
     #[test]
+    fn planned_snapshot_records_absence_and_rejects_unplanned_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        init_test_repo(ws);
+        write_file(&ws.join("seed"), "seed");
+        seed_commit(ws, "seed");
+        let planned = ws.join(".hex/scripts/new.sh");
+        let snapshot = upgrade_git_snapshot_for(ws, std::slice::from_ref(&planned)).unwrap();
+        assert_eq!(
+            snapshot
+                .baseline_content
+                .get(Path::new(".hex/scripts/new.sh")),
+            Some(&None)
+        );
+        assert!(protect_generated_path(ws, &planned, b"new", &snapshot, None).is_ok());
+        assert!(
+            protect_generated_path(ws, &ws.join(".hex/unplanned"), b"new", &snapshot, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn repeated_owned_sync_accepts_own_write_but_rejects_intervening_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        init_test_repo(ws);
+        let dst = ws.join(".hex/scripts/repeat.sh");
+        write_file(&dst, "base");
+        seed_commit(ws, "seed");
+        let snapshot = upgrade_git_snapshot_for(ws, std::slice::from_ref(&dst)).unwrap();
+        let src = ws.join("source");
+        write_file(&src.join("repeat.sh"), "first");
+        let mut owned = HashMap::new();
+        apply_sync_protected(
+            &src,
+            &ws.join(".hex/scripts"),
+            None,
+            Some((ws, &snapshot)),
+            Some(&mut owned),
+        )
+        .unwrap();
+        write_file(&src.join("repeat.sh"), "second");
+        apply_sync_protected(
+            &src,
+            &ws.join(".hex/scripts"),
+            None,
+            Some((ws, &snapshot)),
+            Some(&mut owned),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"second");
+        write_file(&dst, "operator");
+        write_file(&src.join("repeat.sh"), "third");
+        assert!(apply_sync_protected(
+            &src,
+            &ws.join(".hex/scripts"),
+            None,
+            Some((ws, &snapshot)),
+            Some(&mut owned)
+        )
+        .is_err());
+        assert_eq!(fs::read(&dst).unwrap(), b"operator");
+    }
+
+    #[test]
+    fn exact_inventory_includes_crate_roots_and_excludes_runtime_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("instance");
+        let source = tmp.path().join("source");
+        for file in [
+            "harness/Cargo.toml",
+            "harness/build.rs",
+            "harness/src/lib.rs",
+            "code-intel/Cargo.toml",
+            "code-intel/src/lib.rs",
+            "scripts/run.sh",
+            "iii/config.toml",
+            "templates/example",
+            "commands/do.md",
+        ] {
+            write_file(&source.join("system").join(file), "source");
+        }
+        for file in ["harness/target/debug/secret", "harness/node_modules/secret"] {
+            write_file(&source.join("system").join(file), "ignored source output");
+        }
+        for file in [
+            "harness/Cargo.toml",
+            "harness/build.rs",
+            "harness/src/old.rs",
+            "harness/target/debug/cache",
+            "code-intel/Cargo.toml",
+            "iii/data/state.db",
+            "iii/workers/node_modules/cache",
+            "templates/operator-only",
+            "memory.db",
+            "credentials.env",
+            "commands/old.md",
+        ] {
+            write_file(&ws.join(".hex").join(file), "existing");
+        }
+        let sources = source_dirs_for_layout("v2", &source).unwrap();
+        let plan = planned_upgrade_paths(&ws, &source, &sources).unwrap();
+        for file in [
+            "harness/Cargo.toml",
+            "harness/build.rs",
+            "harness/src/lib.rs",
+            "harness/src/old.rs",
+            "code-intel/Cargo.toml",
+            "scripts/run.sh",
+            "commands/old.md",
+        ] {
+            assert!(plan.contains(&ws.join(".hex").join(file)), "missing {file}");
+        }
+        for file in [
+            "harness/target/debug/cache",
+            "harness/target/debug/secret",
+            "harness/node_modules/secret",
+            "iii/data/state.db",
+            "iii/workers/node_modules/cache",
+            "templates/operator-only",
+            "memory.db",
+            "credentials.env",
+        ] {
+            assert!(
+                !plan.contains(&ws.join(".hex").join(file)),
+                "unplanned runtime read: {file}"
+            );
+        }
+        assert!(plan.contains(&ws.join(".claude/commands/do.md")));
+        init_test_repo(&ws);
+        seed_commit(&ws, "seed");
+        let snapshot = upgrade_git_snapshot_for(&ws, &plan).unwrap();
+        assert_eq!(snapshot.baseline_content.len(), plan.len());
+        assert!(snapshot
+            .baseline_content
+            .contains_key(Path::new(".hex/harness/Cargo.toml")));
+        // The real writer accepts both root files and new files from this exact inventory.
+        let mut owned = HashMap::new();
+        apply_sync_protected(
+            &source.join("system/harness"),
+            &ws.join(".hex/harness"),
+            None,
+            Some((&ws, &snapshot)),
+            Some(&mut owned),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(ws.join(".hex/harness/Cargo.toml")).unwrap(),
+            b"source"
+        );
+        assert!(!ws.join(".hex/harness/target/debug/secret").exists());
+    }
+
+    #[test]
+    fn commit_and_inventory_do_not_read_ignored_runtime_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        init_test_repo(ws);
+        write_file(&ws.join(".gitignore"), ".hex/memory.db\n.hex/iii/data/\n");
+        let managed = ws.join(".hex/scripts/run.sh");
+        write_file(&managed, "base");
+        seed_commit(ws, "seed");
+        let ignored = ws.join(".hex/memory.db");
+        write_file(&ignored, "private runtime bytes");
+        fs::set_permissions(&ignored, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = (|| -> Result<bool, String> {
+            let snapshot = upgrade_git_snapshot_for(ws, std::slice::from_ref(&managed))?;
+            assert_eq!(snapshot.baseline_content.len(), 1);
+            write_file(&managed, "new");
+            let owned = HashMap::from([(managed, Some(b"new".to_vec()))]);
+            commit_synced_files_since(ws, "test", &snapshot, Some(&owned))
+        })();
+        fs::set_permissions(&ignored, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(result.unwrap());
+        assert_eq!(fs::read(&ignored).unwrap(), b"private runtime bytes");
+    }
+
+    #[test]
     fn protected_backups_keep_same_relative_names_in_distinct_scopes() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path();
         init_test_repo(ws);
         write_file(&ws.join(".hex/scripts/foo.sh"), "script-old\n");
         write_file(&ws.join(".hex/hooks/foo.sh"), "hook-old\n");
+        write_file(&ws.join(".hex/commands/foo.sh"), "command-old\n");
+        write_file(&ws.join(".claude/commands/foo.sh"), "mirror-old\n");
         seed_commit(ws, "seed");
         let snapshot = upgrade_git_snapshot(ws).unwrap();
         let script_src = ws.join("script-source");
@@ -3400,6 +3669,24 @@ CUSTOM_INSTANCE_PIN=abc123
             None,
         )
         .unwrap();
+        for destination in [".hex/commands", ".claude/commands"] {
+            apply_sync_protected(
+                &script_src,
+                &ws.join(destination),
+                Some(&backup),
+                Some((ws, &snapshot)),
+                None,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            fs::read_to_string(backup.join(".hex/commands/foo.sh")).unwrap(),
+            "command-old\n"
+        );
+        assert_eq!(
+            fs::read_to_string(backup.join(".claude/commands/foo.sh")).unwrap(),
+            "mirror-old\n"
+        );
         assert_eq!(
             fs::read_to_string(backup.join(".hex/scripts/foo.sh")).unwrap(),
             "script-old\n"
