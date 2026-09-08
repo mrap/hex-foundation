@@ -243,6 +243,7 @@ fn detect_changes(
 
 /// Sync src_dir into dst_dir. Backs up overwritten files into backup_dir if provided.
 /// Returns count of files written.
+#[cfg(test)]
 pub fn apply_sync(src_dir: &Path, dst_dir: &Path, backup_dir: Option<&Path>) -> io::Result<usize> {
     apply_sync_protected(src_dir, dst_dir, backup_dir, None, None)
 }
@@ -292,6 +293,7 @@ fn apply_sync_protected(
 }
 
 /// Remove files in dst_dir that are absent from src_dir. Backs them up first.
+#[cfg(test)]
 pub fn deletion_pass(dst_dir: &Path, src_dir: &Path, backup_dir: &Path) -> io::Result<usize> {
     deletion_pass_protected(dst_dir, src_dir, backup_dir, None, None)
 }
@@ -370,21 +372,21 @@ fn make_scripts_executable(
     dir: &Path,
     protection: Option<(&Path, &UpgradeGitSnapshot)>,
     owned: Option<&HashMap<PathBuf, Option<Vec<u8>>>>,
-) {
-    for f in walk_files(dir) {
+) -> io::Result<()> {
+    for f in walk_files_checked(dir)? {
         if f.extension().and_then(|e| e.to_str()) == Some("sh") {
             if let Some((_workspace, _snapshot)) = protection {
                 if !owned.is_some_and(|paths| paths.contains_key(&f)) {
                     continue;
                 }
             }
-            if let Ok(meta) = fs::metadata(&f) {
-                let mut perms = meta.permissions();
-                perms.set_mode(perms.mode() | 0o111);
-                let _ = fs::set_permissions(&f, perms);
-            }
+            let meta = fs::metadata(&f)?;
+            let mut perms = meta.permissions();
+            perms.set_mode(perms.mode() | 0o111);
+            fs::set_permissions(&f, perms)?;
         }
     }
+    Ok(())
 }
 
 fn get_source_dir(args: &Args, hex_dir: &Path) -> Result<PathBuf, String> {
@@ -577,7 +579,7 @@ fn record_upgrade_sha(
     source_dir: &Path,
     repo_url: &str,
     protection: Option<(&Path, &UpgradeGitSnapshot)>,
-    mut owned: Option<&mut HashMap<PathBuf, Option<Vec<u8>>>>,
+    owned: Option<&mut HashMap<PathBuf, Option<Vec<u8>>>>,
 ) -> Result<(), String> {
     let sha = Command::new("git")
         .arg("-C")
@@ -613,24 +615,16 @@ fn record_upgrade_sha(
     let tmp = config_file.with_extension("tmp");
     let s = serde_json::to_string_pretty(&data)
         .map_err(|e| format!("could not encode {}: {e}", config_file.display()))?;
+    let serialized = format!("{s}\n");
     if let Some((workspace, snapshot)) = protection {
-        protect_generated_path(
-            workspace,
-            config_file,
-            format!("{s}\n").as_bytes(),
-            snapshot,
-        )
-        .map_err(|e| format!("upgrade.json operator edit conflict: {e}"))?;
+        protect_generated_path(workspace, config_file, serialized.as_bytes(), snapshot)
+            .map_err(|e| format!("upgrade.json operator edit conflict: {e}"))?;
     }
-    fs::write(&tmp, s + "\n").map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
+    fs::write(&tmp, &serialized).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
     fs::rename(&tmp, config_file)
         .map_err(|e| format!("could not install {}: {e}", config_file.display()))?;
-    if let Some(paths) = owned.as_deref_mut() {
-        paths.insert(
-            config_file.to_path_buf(),
-            read_file_state(config_file)
-                .map_err(|e| format!("could not read {}: {e}", config_file.display()))?,
-        );
+    if let Some(paths) = owned {
+        paths.insert(config_file.to_path_buf(), Some(serialized.into_bytes()));
     }
     // `sha` is `git rev-parse HEAD` output — hex ASCII, every byte a char boundary.
     #[allow(clippy::string_slice)]
@@ -736,6 +730,7 @@ fn detect_personal_overlay(hex_dot_dir: &Path) -> bool {
 /// after this run (sync failure, cargo build failure, install failure). The
 /// caller MUST fail the whole upgrade on `false` — printing "Upgrade
 /// complete." over a stale binary is the OBS-017 deploy black hole.
+#[cfg(test)]
 fn sync_versions_file(
     hex_dir: &Path,
     source_dir: &Path,
@@ -828,14 +823,8 @@ fn sync_versions_file_protected(
         );
         BinaryStepFailure::Build
     })?;
-    if let Some(paths) = owned.as_deref_mut() {
-        paths.insert(
-            versions_file.clone(),
-            read_file_state(&versions_file).map_err(|e| {
-                eprintln!("  [FAIL] Could not read installed VERSIONS: {e}");
-                BinaryStepFailure::Build
-            })?,
-        );
+    if let Some(paths) = owned.as_mut() {
+        paths.insert(versions_file.clone(), Some(new_content.into_bytes()));
     }
     println!("  [OK] VERSIONS → HEX_FOUNDATION_VERSION=v{cargo_ver}");
 
@@ -1405,11 +1394,24 @@ fn configure_hooks_path(workspace: &Path) {
 #[derive(Debug, Default)]
 struct UpgradeGitSnapshot {
     preexisting_paths: HashSet<PathBuf>,
-    preexisting_content: HashMap<PathBuf, Option<Vec<u8>>>,
     baseline_content: HashMap<PathBuf, Option<Vec<u8>>>,
 }
 
 fn upgrade_git_snapshot(workspace: &Path) -> Result<UpgradeGitSnapshot, String> {
+    upgrade_git_snapshot_for(
+        workspace,
+        &[
+            workspace.join(".hex"),
+            workspace.join(".claude/commands"),
+            workspace.join("VERSIONS"),
+        ],
+    )
+}
+
+fn upgrade_git_snapshot_for(
+    workspace: &Path,
+    managed_roots: &[PathBuf],
+) -> Result<UpgradeGitSnapshot, String> {
     let output = Command::new("git")
         .args([
             "status",
@@ -1433,7 +1435,6 @@ fn upgrade_git_snapshot(workspace: &Path) -> Result<UpgradeGitSnapshot, String> 
         ));
     }
     let mut paths = HashSet::new();
-    let mut content = HashMap::new();
     for record in output.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
         if record.len() < 4 {
             return Err("git status returned a malformed porcelain record".to_string());
@@ -1441,18 +1442,22 @@ fn upgrade_git_snapshot(workspace: &Path) -> Result<UpgradeGitSnapshot, String> 
         let path = std::str::from_utf8(&record[3..])
             .map_err(|_| "git status returned a non-UTF-8 path".to_string())?;
         let relative = PathBuf::from(path);
-        let state = match fs::read(workspace.join(&relative)) {
-            Ok(bytes) => Some(bytes),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-            Err(e) => return Err(format!("could not snapshot {}: {e}", relative.display())),
-        };
-        content.insert(relative.clone(), state);
         paths.insert(relative);
     }
     let mut baseline_content = HashMap::new();
-    for root in [workspace.join(".hex"), workspace.join(".claude/commands")] {
-        if root.exists() {
-            for path in walk_files_checked(&root)
+    for root in managed_roots {
+        if root.is_file() {
+            let relative = root
+                .strip_prefix(workspace)
+                .map_err(|_| format!("snapshot path escaped workspace: {}", root.display()))?
+                .to_path_buf();
+            baseline_content.insert(
+                relative,
+                read_file_state(root)
+                    .map_err(|e| format!("could not snapshot {}: {e}", root.display()))?,
+            );
+        } else if root.exists() {
+            for path in walk_files_checked(root)
                 .map_err(|e| format!("could not snapshot {}: {e}", root.display()))?
             {
                 let relative = path
@@ -1467,16 +1472,8 @@ fn upgrade_git_snapshot(workspace: &Path) -> Result<UpgradeGitSnapshot, String> 
             }
         }
     }
-    let versions = workspace.join("VERSIONS");
-    if versions.exists() {
-        baseline_content.insert(
-            PathBuf::from("VERSIONS"),
-            read_file_state(&versions).map_err(|e| format!("could not snapshot VERSIONS: {e}"))?,
-        );
-    }
     Ok(UpgradeGitSnapshot {
         preexisting_paths: paths,
-        preexisting_content: content,
         baseline_content,
     })
 }
@@ -1839,7 +1836,24 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     let git_snapshot = if is_own_git_toplevel(&hex_dir) {
-        match upgrade_git_snapshot(&hex_dir) {
+        let managed_roots = vec![
+            hex_dot_dir.join("scripts"),
+            hex_dot_dir.join("skills"),
+            hex_dot_dir.join("commands"),
+            hex_dot_dir.join("hooks"),
+            hex_dot_dir.join("iii"),
+            hex_dot_dir.join("templates"),
+            hex_dot_dir.join("harness/src"),
+            hex_dot_dir.join("harness/tests"),
+            hex_dot_dir.join("code-intel/src"),
+            hex_dot_dir.join("code-intel/tests"),
+            hex_dot_dir.join("version.txt"),
+            hex_dot_dir.join("bin/hex.sha"),
+            config_file.clone(),
+            hex_dir.join(".claude/commands"),
+            hex_dir.join("VERSIONS"),
+        ];
+        match upgrade_git_snapshot_for(&hex_dir, &managed_roots) {
             Ok(snapshot) => Some(snapshot),
             Err(e) => {
                 eprintln!("  [FAIL] Could not snapshot operator edits before upgrade: {e}");
@@ -1922,9 +1936,13 @@ pub fn run(args: &[String]) -> i32 {
             let message = format!("could not create runtime command directory: {e}");
             eprintln!("  [FAIL] {message}");
             failures.push(message);
-        } else if let Err(e) =
-            apply_sync_protected(&src_dirs.commands, &runtime_cmd_dir, None, protection, None)
-        {
+        } else if let Err(e) = apply_sync_protected(
+            &src_dirs.commands,
+            &runtime_cmd_dir,
+            Some(&backup_dir),
+            protection,
+            Some(&mut owned_paths),
+        ) {
             let message = format!("command mirror failed: {e}");
             eprintln!("  [FAIL] {message}");
             failures.push(message);
@@ -1953,7 +1971,7 @@ pub fn run(args: &[String]) -> i32 {
             &src_dirs.commands,
             &backup_dir,
             protection,
-            None,
+            Some(&mut owned_paths),
         ) {
             Ok(n) => deleted += n,
             Err(e) => {
@@ -1970,7 +1988,11 @@ pub fn run(args: &[String]) -> i32 {
         println!("  → Deletion pass: nothing to prune");
     }
 
-    make_scripts_executable(&hex_dot_dir, protection, Some(&owned_paths));
+    if let Err(e) = make_scripts_executable(&hex_dot_dir, protection, Some(&owned_paths)) {
+        let message = format!("could not set script permissions: {e}");
+        eprintln!("  [FAIL] {message}");
+        failures.push(message);
+    }
 
     // Update version.txt for v2 layout
     if let Some(src_ver_file) = &src_dirs.version_txt {
