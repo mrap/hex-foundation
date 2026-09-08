@@ -6,6 +6,7 @@
 //! Drift bug fix: the bash shim omitted hooks sync for v2 layout. This
 //! implementation syncs hooks unconditionally.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -483,7 +484,7 @@ fn load_config_repo(config_file: &Path) -> Option<String> {
     v.get("repo")?.as_str().map(|s| s.to_string())
 }
 
-fn record_upgrade_sha(config_file: &Path, source_dir: &Path, repo_url: &str) {
+fn record_upgrade_sha(config_file: &Path, source_dir: &Path, repo_url: &str) -> Result<(), String> {
     let sha = Command::new("git")
         .arg("-C")
         .arg(source_dir)
@@ -498,29 +499,35 @@ fn record_upgrade_sha(config_file: &Path, source_dir: &Path, repo_url: &str) {
             }
         });
 
-    let Some(sha) = sha else { return };
+    let Some(sha) = sha else {
+        return Err(format!(
+            "could not read source SHA from {}",
+            source_dir.display()
+        ));
+    };
 
     let mut data: serde_json::Value = if config_file.exists() {
-        fs::read_to_string(config_file)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(serde_json::json!({}))
+        let content = fs::read_to_string(config_file)
+            .map_err(|e| format!("could not read {}: {e}", config_file.display()))?;
+        serde_json::from_str(&content)
+            .map_err(|e| format!("could not parse {}: {e}", config_file.display()))?
     } else {
         serde_json::json!({ "repo": repo_url })
     };
 
     data["last_remote_sha"] = serde_json::Value::String(sha.clone());
     let tmp = config_file.with_extension("tmp");
-    if let Ok(s) = serde_json::to_string_pretty(&data) {
-        if fs::write(&tmp, s + "\n").is_ok() {
-            let _ = fs::rename(&tmp, config_file);
-            // `sha` is `git rev-parse HEAD` output — hex ASCII, every byte a char boundary.
-            #[allow(clippy::string_slice)]
-            {
-                println!("  → Recorded upgrade SHA: {}...", &sha[..sha.len().min(8)]);
-            }
-        }
+    let s = serde_json::to_string_pretty(&data)
+        .map_err(|e| format!("could not encode {}: {e}", config_file.display()))?;
+    fs::write(&tmp, s + "\n").map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, config_file)
+        .map_err(|e| format!("could not install {}: {e}", config_file.display()))?;
+    // `sha` is `git rev-parse HEAD` output — hex ASCII, every byte a char boundary.
+    #[allow(clippy::string_slice)]
+    {
+        println!("  → Recorded upgrade SHA: {}...", &sha[..sha.len().min(8)]);
     }
+    Ok(())
 }
 
 /// Pure decision: is the installed binary stale relative to source?
@@ -683,10 +690,18 @@ fn sync_versions_file(
     new_content.push('\n');
 
     let tmp = versions_file.with_extension("tmp");
-    if fs::write(&tmp, &new_content).is_ok() {
-        let _ = fs::rename(&tmp, &versions_file);
-        println!("  [OK] VERSIONS → HEX_FOUNDATION_VERSION=v{cargo_ver}");
-    }
+    fs::write(&tmp, &new_content).map_err(|e| {
+        eprintln!("  [FAIL] Could not write {}: {e}", tmp.display());
+        BinaryStepFailure::Build
+    })?;
+    fs::rename(&tmp, &versions_file).map_err(|e| {
+        eprintln!(
+            "  [FAIL] Could not install {}: {e}",
+            versions_file.display()
+        );
+        BinaryStepFailure::Build
+    })?;
+    println!("  [OK] VERSIONS → HEX_FOUNDATION_VERSION=v{cargo_ver}");
 
     // Rebuild hex binary if version or commit SHA changed
     let hex_dot_dir = hex_dir.join(".hex");
@@ -756,7 +771,8 @@ fn sync_versions_file(
             let src_sub = harness_src.join(sub);
             if dst_sub.exists() && src_sub.exists() {
                 if let Err(e) = deletion_pass(&dst_sub, &src_sub, backup_dir) {
-                    eprintln!("  [WARN] Harness deletion pass on {sub}/ failed: {e}");
+                    eprintln!("  [FAIL] Harness deletion pass on {sub}/ failed: {e}");
+                    return Err(BinaryStepFailure::Build);
                 }
             }
         }
@@ -779,7 +795,8 @@ fn sync_versions_file(
                 let src_sub = codeintel_src.join(sub);
                 if dst_sub.exists() && src_sub.exists() {
                     if let Err(e) = deletion_pass(&dst_sub, &src_sub, backup_dir) {
-                        eprintln!("  [WARN] code-intel deletion pass on {sub}/ failed: {e}");
+                        eprintln!("  [FAIL] code-intel deletion pass on {sub}/ failed: {e}");
+                        return Err(BinaryStepFailure::Build);
                     }
                 }
             }
@@ -1216,95 +1233,135 @@ fn configure_hooks_path(workspace: &Path) {
     }
 }
 
-/// After a successful sync + rebuild, commit the synced tracked files under
-/// `.hex/` in the instance workspace so the repo reflects the deployed version.
-/// This closes the "deployed-but-orphaned" blind spot (a live deploy left
-/// uncommitted that git — and `hex upgrade`'s own change detection — reads as
-/// "nothing changed").
+/// Paths already dirty when the upgrade started are never eligible for the
+/// upgrade bookkeeping commit. This snapshot is intentionally small: it
+/// records only porcelain paths under `.hex`, including untracked operator
+/// files, and leaves their index/worktree state untouched.
+#[derive(Debug, Default)]
+struct UpgradeGitSnapshot {
+    preexisting_paths: HashSet<PathBuf>,
+}
+
+fn upgrade_git_snapshot(workspace: &Path) -> Result<UpgradeGitSnapshot, String> {
+    let output = Command::new("git")
+        .args([
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--no-renames",
+            "--untracked-files=all",
+            "--",
+            ".hex",
+        ])
+        .current_dir(workspace)
+        .output()
+        .map_err(|e| format!("could not run git status in {}: {e}", workspace.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git status failed in {}: {}",
+            workspace.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let mut paths = HashSet::new();
+    for record in output.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+        if record.len() < 4 {
+            return Err("git status returned a malformed porcelain record".to_string());
+        }
+        let path = std::str::from_utf8(&record[3..])
+            .map_err(|_| "git status returned a non-UTF-8 path".to_string())?;
+        paths.insert(PathBuf::from(path));
+    }
+    Ok(UpgradeGitSnapshot {
+        preexisting_paths: paths,
+    })
+}
+
+/// After a successful sync + rebuild, commit only files changed by this
+/// upgrade under `.hex` in the instance workspace. Pre-existing dirty paths
+/// are excluded, so the upgrade never consumes operator work.
+///
+/// The snapshot must be taken before any sync writes occur. A path that was
+/// already dirty is left in the index/worktree exactly as the operator left
+/// it. The scoped `git add` and `git commit --only` preserve unrelated staged
+/// paths as well.
 ///
 /// Returns:
 ///   Ok(true)  — a commit was made.
 ///   Ok(false) — the synced tree was already clean (no-op success, NOT an error).
 ///   Err(msg)  — the commit could not be made; the caller MUST surface this
 ///               LOUDLY (S6: no quiet failures), never a silent skip.
-///
-/// Scope: only tracked changes under `.hex/` are staged (`git add -u -- .hex`),
-/// so the operator's unrelated tracked work (todo.md, me/, projects/, landings/)
-/// is never swept into the upgrade commit. New, untracked files are deliberately
-/// left out — see docs/hex-ops.md on the instance-side gitignore shadowing of
-/// new harness source files.
-fn commit_synced_files(workspace: &Path, version: &str) -> Result<bool, String> {
-    // Lead with `git status` — it yields all three outcomes deterministically and,
-    // unlike `git add -u -- <pathspec>`, does NOT exit-128 when the pathspec matches
-    // no tracked files (which would otherwise spuriously fail a clean upgrade).
-    // `-uno` = tracked changes only (no untracked noise).
-    let status = Command::new("git")
-        .args(["status", "--porcelain", "-uno", "--", ".hex"])
-        .current_dir(workspace)
-        .output()
-        .map_err(|e| format!("could not run git status in {}: {e}", workspace.display()))?;
-    if !status.status.success() {
-        // Non-zero here means git could not operate here at all (e.g. exit 128:
-        // not a git repository). The caller surfaces this loudly.
-        return Err(format!(
-            "git status failed in {}: {}",
-            workspace.display(),
-            String::from_utf8_lossy(&status.stderr).trim()
-        ));
-    }
-    if status.stdout.is_empty() {
-        // Clean synced tree — nothing to commit. No-op success.
+fn commit_synced_files_since(
+    workspace: &Path,
+    version: &str,
+    snapshot: &UpgradeGitSnapshot,
+) -> Result<bool, String> {
+    let after = upgrade_git_snapshot(workspace)?;
+    let owned: Vec<PathBuf> = after
+        .preexisting_paths
+        .difference(&snapshot.preexisting_paths)
+        .cloned()
+        .collect();
+    if owned.is_empty() {
         return Ok(false);
     }
 
-    // There ARE tracked changes under .hex/: stage exactly those.
-    let add = Command::new("git")
-        .args(["add", "-u", "--", ".hex"])
+    let mut add = Command::new("git");
+    add.args(["add", "-A", "--"]);
+    for path in &owned {
+        add.arg(path);
+    }
+    let add = add
         .current_dir(workspace)
         .output()
         .map_err(|e| format!("could not run git add in {}: {e}", workspace.display()))?;
     if !add.status.success() {
         return Err(format!(
-            "git add -u -- .hex failed in {}: {}",
+            "git add upgrade-owned .hex paths failed in {}: {}",
             workspace.display(),
             String::from_utf8_lossy(&add.stderr).trim()
         ));
     }
 
-    // Commit with a message naming the version. gpgsign is disabled and hooks are
-    // skipped for this bookkeeping commit so it can never hang on a passphrase or
-    // pre-commit prompt inside an unattended `hex upgrade`. The commit is given the
-    // SAME `.hex` pathspec as the `add` above (`--only -- .hex`): without a pathspec,
-    // `git commit` records the WHOLE index, so any work the operator had pre-staged
-    // (`git add todo.md`) before running `hex upgrade` would be swept into this
-    // bookkeeping commit. `--only -- .hex` records only the working-tree content of
-    // `.hex`, leaving every other staged path untouched — matching the scope
-    // guarantee documented in docs/hex-ops.md.
     let msg = format!("chore(hex): sync harness files to v{version}");
-    let commit = Command::new("git")
-        .args([
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "--no-verify",
-            "--only",
-            "-q",
-            "-m",
-            &msg,
-            "--",
-            ".hex",
-        ])
+    let mut commit = Command::new("git");
+    commit.args([
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--no-verify",
+        "--only",
+        "-q",
+        "-m",
+        &msg,
+        "--",
+    ]);
+    for path in &owned {
+        commit.arg(path);
+    }
+    let commit = commit
         .current_dir(workspace)
         .output()
         .map_err(|e| format!("could not run git commit in {}: {e}", workspace.display()))?;
     if !commit.status.success() {
         return Err(format!(
-            "git commit failed in {}: {}",
+            "git commit upgrade-owned .hex paths failed in {}: {}",
             workspace.display(),
             String::from_utf8_lossy(&commit.stderr).trim()
         ));
     }
     Ok(true)
+}
+
+/// Compatibility wrapper for callers that do not have a pre-sync snapshot.
+/// The full upgrade flow always uses `commit_synced_files_since`.
+#[cfg(test)]
+fn commit_synced_files(workspace: &Path, version: &str) -> Result<bool, String> {
+    // Test-only compatibility seam. The production flow always supplies the
+    // pre-sync snapshot; an empty snapshot preserves the historical helper's
+    // direct-call behavior for older unit tests.
+    let snapshot = UpgradeGitSnapshot::default();
+    commit_synced_files_since(workspace, version, &snapshot)
 }
 
 pub fn run(args: &[String]) -> i32 {
@@ -1442,10 +1499,26 @@ pub fn run(args: &[String]) -> i32 {
         return 0;
     }
 
+    let git_snapshot = if is_own_git_toplevel(&hex_dir) {
+        match upgrade_git_snapshot(&hex_dir) {
+            Ok(snapshot) => Some(snapshot),
+            Err(e) => {
+                eprintln!("  [FAIL] Could not snapshot operator edits before upgrade: {e}");
+                return 1;
+            }
+        }
+    } else {
+        None
+    };
+
     // Step 4: Apply changes
     println!("\n4. Apply Changes");
     let backup_dir = hex_dot_dir.join(format!(".upgrade-backup-{}", now.format("%Y%m%d-%H%M%S")));
-    fs::create_dir_all(&backup_dir).ok();
+    if let Err(e) = fs::create_dir_all(&backup_dir) {
+        eprintln!("  [FAIL] Could not create upgrade backup directory: {e}");
+        return 1;
+    }
+    let mut failures = Vec::new();
 
     let sync_pairs: &[(&PathBuf, PathBuf)] = &[
         (&src_dirs.scripts, hex_dot_dir.join("scripts")),
@@ -1459,7 +1532,11 @@ pub fn run(args: &[String]) -> i32 {
         if src.exists() {
             match apply_sync(src, dst, Some(&backup_dir)) {
                 Ok(n) => applied += n,
-                Err(e) => eprintln!("  [WARN] Sync failed for {}: {e}", src.display()),
+                Err(e) => {
+                    let message = format!("sync failed for {}: {e}", src.display());
+                    eprintln!("  [FAIL] {message}");
+                    failures.push(message);
+                }
             }
         }
     }
@@ -1474,7 +1551,11 @@ pub fn run(args: &[String]) -> i32 {
         if src.exists() {
             match apply_sync(src, dst, Some(&backup_dir)) {
                 Ok(n) => applied += n,
-                Err(e) => eprintln!("  [WARN] Sync failed for {}: {e}", src.display()),
+                Err(e) => {
+                    let message = format!("sync failed for {}: {e}", src.display());
+                    eprintln!("  [FAIL] {message}");
+                    failures.push(message);
+                }
             }
         }
     }
@@ -1482,8 +1563,15 @@ pub fn run(args: &[String]) -> i32 {
     // Mirror commands to runtime slash-command dir
     let runtime_cmd_dir = hex_dir.join(".claude/commands");
     if src_dirs.commands.exists() {
-        fs::create_dir_all(&runtime_cmd_dir).ok();
-        apply_sync(&src_dirs.commands, &runtime_cmd_dir, None).ok();
+        if let Err(e) = fs::create_dir_all(&runtime_cmd_dir) {
+            let message = format!("could not create runtime command directory: {e}");
+            eprintln!("  [FAIL] {message}");
+            failures.push(message);
+        } else if let Err(e) = apply_sync(&src_dirs.commands, &runtime_cmd_dir, None) {
+            let message = format!("command mirror failed: {e}");
+            eprintln!("  [FAIL] {message}");
+            failures.push(message);
+        }
     }
 
     // Deletion pass
@@ -1491,11 +1579,25 @@ pub fn run(args: &[String]) -> i32 {
     let mut deleted = 0;
     for (src, dst) in sync_pairs {
         if src.exists() {
-            deleted += deletion_pass(dst, src, &backup_dir).unwrap_or(0);
+            match deletion_pass(dst, src, &backup_dir) {
+                Ok(n) => deleted += n,
+                Err(e) => {
+                    let message = format!("deletion pass failed for {}: {e}", dst.display());
+                    eprintln!("  [FAIL] {message}");
+                    failures.push(message);
+                }
+            }
         }
     }
     if src_dirs.commands.exists() {
-        deleted += deletion_pass(&runtime_cmd_dir, &src_dirs.commands, &backup_dir).unwrap_or(0);
+        match deletion_pass(&runtime_cmd_dir, &src_dirs.commands, &backup_dir) {
+            Ok(n) => deleted += n,
+            Err(e) => {
+                let message = format!("command deletion pass failed: {e}");
+                eprintln!("  [FAIL] {message}");
+                failures.push(message);
+            }
+        }
     }
 
     if deleted > 0 {
@@ -1509,13 +1611,24 @@ pub fn run(args: &[String]) -> i32 {
     // Update version.txt for v2 layout
     if let Some(src_ver_file) = &src_dirs.version_txt {
         if src_ver_file.exists() {
-            fs::copy(src_ver_file, hex_dot_dir.join("version.txt")).ok();
+            if let Err(e) = fs::copy(src_ver_file, hex_dot_dir.join("version.txt")) {
+                let message = format!("version.txt copy failed: {e}");
+                eprintln!("  [FAIL] {message}");
+                failures.push(message);
+            }
         }
     }
 
     println!("  [OK] Applied {applied} file(s)");
 
-    record_upgrade_sha(&config_file, &source_dir, &repo_url);
+    if !failures.is_empty() {
+        eprintln!(
+            "  Upgrade INCOMPLETE: {} required step(s) failed; successful files and backups remain on disk.",
+            failures.len()
+        );
+        return 1;
+    }
+
     let _ = fs::remove_file(hex_dot_dir.join(".update-available"));
 
     // Step 5: Sync VERSIONS + rebuild binary if needed
@@ -1541,6 +1654,13 @@ pub fn run(args: &[String]) -> i32 {
             eprintln!("  The workspace files may have synced, but the running code is stale.");
         }
         println!();
+        return 1;
+    }
+
+    // Record provenance only after every required file operation and the
+    // binary deployment have been classified as successful.
+    if let Err(e) = record_upgrade_sha(&config_file, &source_dir, &repo_url) {
+        eprintln!("  [FAIL] Upgrade source SHA could not be recorded: {e}");
         return 1;
     }
 
@@ -1578,7 +1698,10 @@ pub fn run(args: &[String]) -> i32 {
                 "unknown".to_string()
             }
         };
-        match commit_synced_files(&hex_dir, &synced_version) {
+        let snapshot = git_snapshot
+            .as_ref()
+            .expect("own git repo must have a pre-upgrade snapshot");
+        match commit_synced_files_since(&hex_dir, &synced_version, snapshot) {
             Ok(true) => {
                 println!("  [OK] Committed synced files (v{synced_version}) in instance repo.");
             }
@@ -2722,5 +2845,52 @@ CUSTOM_INSTANCE_PIN=abc123
             "pre-staged operator work (todo.md) must NOT be swept into the \
              upgrade commit"
         );
+    }
+
+    #[test]
+    fn commit_synced_files_preserves_preexisting_dirty_hex_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        init_test_repo(ws);
+        write_file(&ws.join(".hex/operator-staged.txt"), "base staged\n");
+        write_file(&ws.join(".hex/operator-unstaged.txt"), "base unstaged\n");
+        write_file(&ws.join(".hex/upgrade-owned.txt"), "base upgrade\n");
+        seed_commit(ws, "seed");
+
+        write_file(&ws.join(".hex/operator-staged.txt"), "operator staged\n");
+        Command::new("git")
+            .args(["add", ".hex/operator-staged.txt"])
+            .current_dir(ws)
+            .status()
+            .unwrap();
+        write_file(
+            &ws.join(".hex/operator-unstaged.txt"),
+            "operator unstaged\n",
+        );
+        let snapshot = upgrade_git_snapshot(ws).unwrap();
+
+        write_file(&ws.join(".hex/upgrade-owned.txt"), "upgrade result\n");
+        let made = commit_synced_files_since(ws, "9.9.9-test", &snapshot).unwrap();
+        assert!(made);
+        assert!(!path_is_dirty(ws, ".hex/upgrade-owned.txt"));
+        assert!(path_is_dirty(ws, ".hex/operator-staged.txt"));
+        assert!(path_is_dirty(ws, ".hex/operator-unstaged.txt"));
+        let staged = Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .current_dir(ws)
+            .output()
+            .unwrap();
+        let staged_files = String::from_utf8_lossy(&staged.stdout);
+        assert!(staged_files.contains(".hex/operator-staged.txt"));
+
+        let committed = Command::new("git")
+            .args(["show", "--format=", "--name-only", "HEAD"])
+            .current_dir(ws)
+            .output()
+            .unwrap();
+        let files = String::from_utf8_lossy(&committed.stdout);
+        assert!(files.contains(".hex/upgrade-owned.txt"));
+        assert!(!files.contains("operator-staged.txt"));
+        assert!(!files.contains("operator-unstaged.txt"));
     }
 }
