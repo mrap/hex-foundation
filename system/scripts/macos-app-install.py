@@ -80,10 +80,18 @@ class ProcessSigner:
         _validate_lock_fd(lock_fd, paths)
         self._owner = (paths, lock_fd)
 
-    def _run(self, argv: list[str]) -> Mapping[str, Any]:
+    def _run(self, argv: list[str], *, receipt: Optional[Path] = None) -> Mapping[str, Any]:
+        if receipt is not None and os.path.lexists(receipt):
+            raise InstallError("signer receipt already exists")
         returncode, output, error = _run_guardian(self, argv)
         if returncode:
             raise InstallError(f"signer helper failed ({returncode}): {error.decode(errors='replace').strip()[-500:]}")
+        if receipt is not None:
+            # The standalone --receipt contract writes its result to this file,
+            # not stdout. Read only after successful owned-child cleanup.
+            if output:
+                raise InstallError("signer receipt mode returned unexpected stdout")
+            return _read_json(receipt, "signer receipt")
         try:
             value = json.loads(output.decode("utf-8"))
         except (ValueError, UnicodeError) as exc:
@@ -93,7 +101,7 @@ class ProcessSigner:
         return value
 
     def stage(self, source: Path, product: str, policy: Path, candidate: Path, receipt: Path, *, version: str = "1.0.0") -> Mapping[str, Any]:
-        return self._run([str(source), product, str(policy), str(candidate), "--version", version, "--receipt", str(receipt)])
+        return self._run([str(source), product, str(policy), str(candidate), "--version", version, "--receipt", str(receipt)], receipt=receipt)
 
     def verify_installed(self, bundle: Path, product: str, policy: Optional[Path], expected: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
         args = ["verify-installed", str(bundle), product]

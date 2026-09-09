@@ -385,7 +385,7 @@ class MacAppInstallCLITests(unittest.TestCase):
         helper = base / "macos-signing.py"
         # Keep the exact accepted policy reader. Only the CLI crypto result is fake.
         shared = SOURCE.with_name("macos-signing.py").read_text().split('if __name__ == "__main__":')[0]
-        fake_cli = "import json, pathlib, shutil, sys\nargs=sys.argv[1:]\nif args[0] == 'verify-installed':\n    bundle=pathlib.Path(args[1]); product=args[2]\n    print(json.dumps({'identifier':'com.mrap.boi','version':'1.0.0','team_id':'TEAM123456','certificate_sha1':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA','designated_requirements':{'arm64':'anchor apple generic'},'mach_o_uuids':{'arm64':'11111111-1111-1111-1111-111111111111'}}))\nelse:\n    source=pathlib.Path(args[0]); candidate=pathlib.Path(args[3]); candidate.joinpath('Contents/MacOS').mkdir(parents=True); shutil.copy2(source,candidate/'Contents/MacOS/boi'); (candidate/'Contents/Info.plist').write_bytes(b'plist'); print(json.dumps({'identifier':'com.mrap.boi','version':'1.0.0','team_id':'TEAM123456','certificate_sha1':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA','designated_requirements':{'arm64':'anchor apple generic'},'mach_o_uuids':{'arm64':'11111111-1111-1111-1111-111111111111'}}))\n"
+        fake_cli = "import json, pathlib, shutil, sys\nargs=sys.argv[1:]\nif args[0] == 'verify-installed':\n    bundle=pathlib.Path(args[1]); product=args[2]\n    print(json.dumps({'identifier':'com.mrap.boi','version':'1.0.0','team_id':'TEAM123456','certificate_sha1':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA','designated_requirements':{'arm64':'anchor apple generic'},'mach_o_uuids':{'arm64':'11111111-1111-1111-1111-111111111111'}}))\nelse:\n    source=pathlib.Path(args[0]); candidate=pathlib.Path(args[3]); candidate.joinpath('Contents/MacOS').mkdir(parents=True); shutil.copy2(source,candidate/'Contents/MacOS/boi'); (candidate/'Contents/Info.plist').write_bytes(b'plist'); pathlib.Path(args[args.index('--receipt')+1]).write_text(json.dumps({'identifier':'com.mrap.boi','version':'1.0.0','team_id':'TEAM123456','certificate_sha1':'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA','designated_requirements':{'arm64':'anchor apple generic'},'mach_o_uuids':{'arm64':'11111111-1111-1111-1111-111111111111'}}))\n"
         helper.write_text(shared + "\nif __name__ == '__main__':\n" + "\n".join("    " + line for line in fake_cli.splitlines()) + "\n")
         self.helper = helper
         self.addCleanup(self.temp.cleanup)
@@ -544,6 +544,71 @@ def _cleanup_work(*args, **kwargs):
 
 
 class FinalBoundaryTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "actual staging rename is macOS-specific")
+    def test_process_signer_stage_uses_actual_cli_receipt_protocol(self):
+        import inspect
+        fixture_spec = importlib.util.spec_from_file_location("signer_command_fixture", Path(__file__).with_name("test_macos_signing.py"))
+        commands = importlib.util.module_from_spec(fixture_spec)
+        sys.modules[fixture_spec.name] = commands
+        fixture_spec.loader.exec_module(commands)
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td).resolve()
+            helper = base / "macos-signing.py"
+            # Retain the actual signer CLI and staging implementation. Inject
+            # only its existing Apple-command seam, never fake stdout/receipt.
+            source = SOURCE.with_name("macos-signing.py").read_text()
+            injection = ("import sys\nSIGN=sys.modules[__name__]\n"
+                         + "LEAF=" + repr(commands.LEAF) + "\n"
+                         + "FINGERPRINT=" + repr(commands.FINGERPRINT) + "\n"
+                         + "TEAM=" + repr(commands.TEAM) + "\n"
+                         + "UUIDS=" + repr(commands.UUIDS) + "\n"
+                         + inspect.getsource(commands.Runner)
+                         + "\n_real_stage=stage\ndef stage(*args,**kwargs):\n    kwargs['run']=Runner()\n    return _real_stage(*args,**kwargs)\n")
+            helper.write_text(source.replace('if __name__ == "__main__":', injection + '\nif __name__ == "__main__":'))
+            artifact = base / "artifact"
+            artifact.write_bytes(b"mock Apple-command-boundary executable")
+            policy = base / "policy.json"
+            policy.write_text(json.dumps({"schema_version": 1, "certificate_sha1": commands.FINGERPRINT, "team_id": commands.TEAM}))
+            standalone_receipt = base / "standalone.json"
+            standalone = subprocess.run([sys.executable, "-Werror", "-I", "-B", str(helper), str(artifact), "hex", str(policy), str(base / "Standalone.app"), "--version", "0.52.2", "--receipt", str(standalone_receipt)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(standalone.returncode, 0, standalone.stderr)
+            self.assertEqual(standalone.stdout, "")
+            self.assertEqual(json.loads(standalone_receipt.read_text())["identifier"], "com.mrap.hex")
+            paths = INSTALL.product_paths("hex", base / "owner")
+            receipt = base / "adapter.json"
+            with INSTALL._product_lock(paths) as fd:
+                runner = INSTALL.ProcessSigner(helper)
+                runner.bind_owner(paths, fd)
+                result = runner.stage(artifact, "hex", policy, base / "Adapter.app", receipt, version="0.52.2")
+            self.assertEqual(result, json.loads(receipt.read_text()))
+            self.assertEqual(result["identifier"], "com.mrap.hex")
+            self.assertEqual(result["version"], "0.52.2")
+            self.assertEqual((base / "Adapter.app/Contents/MacOS/hex").read_bytes(), artifact.read_bytes())
+
+    def test_receipt_transport_rejects_untrusted_or_failed_results(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            helper = base / "signer.py"
+            helper.write_text("# transport fixture; no commands execute\n")
+            runner = INSTALL.ProcessSigner(helper)
+            for defect in ("preexisting", "missing", "symlink", "oversize", "nonobject", "stdout", "failed"):
+                with self.subTest(defect=defect):
+                    receipt = base / (defect + ".json")
+                    if defect == "preexisting": receipt.write_text("{}")
+                    def transport(*args):
+                        if defect == "symlink": receipt.symlink_to(helper)
+                        elif defect == "oversize": receipt.write_bytes(b" " * (INSTALL.MAX_JSON_BYTES + 1))
+                        elif defect == "nonobject": receipt.write_text("[]")
+                        elif defect not in ("missing", "preexisting"): receipt.write_text("{}")
+                        return (7 if defect == "failed" else 0, b"{}" if defect == "stdout" else b"", b"fixture failure")
+                    with patch.object(INSTALL, "_run_guardian", side_effect=transport) as run:
+                        with self.assertRaises(INSTALL.InstallError):
+                            runner.stage(base / "source", "hex", base / "policy", base / "candidate", receipt)
+                    if defect == "preexisting": run.assert_not_called()
+                    else: run.assert_called_once()
+                    self.assertEqual(helper.read_text(), "# transport fixture; no commands execute\n")
+
     def test_no_missing_shared_reader_fallback(self):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as td:
