@@ -26,6 +26,131 @@ done
 TARGET_DIR="${TARGET_DIR:-$HOME/hex}"
 TARGET_DIR="${TARGET_DIR/#\~/$HOME}"
 
+# macOS signed-install integration is deliberately a thin caller boundary.
+# The common transaction owns mode detection, policy checks, staging,
+# publication, compatibility paths, and state. This script must not reproduce
+# any of those rules or fall back after a managed transaction fails.
+MACOS_APP_INSTALLER="$SCRIPT_DIR/system/scripts/macos-app-install.py"
+MACOS_APP_MODE="legacy-raw"
+MACOS_APP_MANAGED=false
+MACOS_APP_POLICY_AVAILABLE=false
+
+_macos_app_enabled() {
+    [ "$(uname -s)" = "Darwin" ]
+}
+
+_macos_app_json() {
+    local command=$1 product=$2 root=$3
+    shift 3
+    /usr/bin/python3 -I -B "$MACOS_APP_INSTALLER" "$command" "$product" --root "$root" "$@"
+}
+
+_macos_app_mode() {
+    local product=$1 root=$2 payload
+    payload="$(_macos_app_json mode "$product" "$root")" || return 1
+    /usr/bin/python3 -I -B -c '
+import json,sys
+value=json.loads(sys.stdin.read())
+product=sys.argv[1]
+if not isinstance(value, dict) or type(value.get("schema_version")) is not int or value.get("schema_version") != 1 or type(value.get("product")) is not str or value.get("product") != product:
+    raise SystemExit("invalid macOS app-installer mode response")
+if value.get("mode") not in {"empty", "legacy-raw", "configured-legacy", "signed-current", "signed-policy-missing", "ambiguous"}:
+    raise SystemExit("invalid macOS app-installer mode")
+if type(value.get("managed")) is not bool or type(value.get("policy_available")) is not bool:
+    raise SystemExit("invalid macOS app-installer mode flags")
+print("%s\t%s" % (value["mode"], str(value["managed"] or value["policy_available"]).lower()))
+' "$product" <<< "$payload"
+}
+
+_macos_app_preflight() {
+    local product=$1 root=$2
+    _macos_app_json preflight "$product" "$root" >/dev/null
+}
+
+_macos_app_verify_current() {
+    local product=$1 root=$2
+    _macos_app_json verify-current "$product" "$root"
+}
+
+_macos_app_install() {
+    local product=$1 root=$2 source=$3 version=$4 revision=$5 helper_revision=$6
+    _macos_app_json install "$product" "$root" \
+        --source "$source" --version "$version" --source-revision "$revision" \
+        --helper-source-revision "$helper_revision" >/dev/null
+}
+
+_macos_app_recheck() {
+    local product=$1 root=$2 managed_at_start=$3
+    if ! _macos_app_prepare "$product" "$root"; then
+        if [ "$managed_at_start" = true ]; then
+            MACOS_APP_MANAGED=true
+        fi
+        return 1
+    fi
+    if [ "$managed_at_start" = true ] && [ "$MACOS_APP_MANAGED" != true ]; then
+        MACOS_APP_MANAGED=true
+        echo "ERROR: managed macOS app state disappeared during $product build; refusing raw fallback" >&2
+        return 1
+    fi
+}
+
+_verify_pinned_checkout() {
+    local checkout=$1 tag=$2 expected=$3 actual status
+    actual=$(git -C "$checkout" rev-parse HEAD 2>/dev/null) || return 1
+    [ "$actual" = "$expected" ] || {
+        echo "ERROR: checkout $checkout is not at pinned tag $tag ($expected)" >&2
+        return 1
+    }
+    status=$(git -C "$checkout" status --porcelain --untracked-files=all 2>/dev/null) || {
+        echo "ERROR: cannot inspect checkout state: $checkout" >&2
+        return 1
+    }
+    if [ -n "$status" ]; then
+        echo "ERROR: checkout $checkout has local changes; refusing build" >&2
+        return 1
+    fi
+}
+
+_macos_app_prepare() {
+    local product=$1 root=$2
+    MACOS_APP_MODE="legacy-raw"
+    MACOS_APP_MANAGED=false
+    MACOS_APP_POLICY_AVAILABLE=false
+    if ! _macos_app_enabled; then
+        return 0
+    fi
+    if [ ! -f "$MACOS_APP_INSTALLER" ]; then
+        echo "ERROR: macOS app-install helper is missing: $MACOS_APP_INSTALLER" >&2
+        return 1
+    fi
+    local mode_result
+    mode_result="$(_macos_app_mode "$product" "$root")" || {
+        echo "ERROR: macOS app-install mode detection failed for $product" >&2
+        return 1
+    }
+    IFS=$'\t' read -r MACOS_APP_MODE MACOS_APP_POLICY_AVAILABLE <<< "$mode_result"
+    case "$MACOS_APP_MODE" in
+        configured-legacy|signed-current|signed-policy-missing)
+            MACOS_APP_MANAGED=true
+            ;;
+        empty)
+            [ "$MACOS_APP_POLICY_AVAILABLE" = true ] && MACOS_APP_MANAGED=true
+            ;;
+        legacy-raw)
+            ;;
+        *)
+            echo "ERROR: unknown macOS app-install mode '$MACOS_APP_MODE' for $product" >&2
+            return 1
+            ;;
+    esac
+    # Preflight is required before any build or same-version decision. A
+    # signed-policy-missing result is an error from the common boundary.
+    _macos_app_preflight "$product" "$root" || {
+        echo "ERROR: macOS app-install preflight failed for $product" >&2
+        return 1
+    }
+}
+
 echo "hex v${VERSION} installer"
 echo "========================"
 echo ""
@@ -331,6 +456,16 @@ fi
 BOI_VERSION=$(grep "^BOI_VERSION=" "$VERSIONS_FILE" | cut -d= -f2)
 HARNESS_VERSION=$(grep "^HARNESS_VERSION=" "$VERSIONS_FILE" | cut -d= -f2 || true)
 BOI_REPO="${HEX_BOI_REPO:-https://github.com/mrap/boi.git}"
+HEX_REPO="${HEX_FOUNDATION_REPO:-https://github.com/mrap/hex-foundation.git}"
+
+_resolve_git_tag() {
+    local repo=$1 tag=$2 refs sha
+    refs=$(git ls-remote "$repo" "refs/tags/$tag^{}" "refs/tags/$tag" 2>/dev/null) || return 1
+    sha=$(printf '%s\n' "$refs" | awk -v peeled="refs/tags/$tag^{}" -v direct="refs/tags/$tag" '$2 == peeled { print $1; exit }')
+    [ -n "$sha" ] || sha=$(printf '%s\n' "$refs" | awk -v direct="refs/tags/$tag" '$2 == direct { print $1; exit }')
+    /usr/bin/python3 -I -B -c 'import re,sys; raise SystemExit(0 if re.fullmatch(r"[0-9a-fA-F]{40}", sys.argv[1] or "") else 1)' "$sha" || return 1
+    printf '%s\n' "$sha"
+}
 
 # BOI — parallel worker dispatch (boi-v2: the canonical TOML engine).
 # Builds in a MACHINE-OWNED clone under ~/.boi/src/boi and never touches a
@@ -357,6 +492,17 @@ BOISH
 install_or_upgrade_boi() {
     local boi_build="$HOME/.boi/src/boi"
     local boi_bin="$HOME/.boi/bin/boi"
+    if ! _macos_app_prepare boi "$HOME/.boi"; then
+        return 1
+    fi
+    local boi_managed_at_start="$MACOS_APP_MANAGED"
+    local pinned_boi_revision=""
+    if [ "$boi_managed_at_start" = true ]; then
+        pinned_boi_revision=$(_resolve_git_tag "$BOI_REPO" "$BOI_VERSION") || {
+            echo "ERROR: managed BOI install requires a resolvable pinned source tag $BOI_VERSION; refusing raw fallback" >&2
+            return 1
+        }
+    fi
     mkdir -p "$HOME/.boi/bin" "$HOME/.boi/pids" "$HOME/.boi/logs" \
              "$HOME/.boi/worktrees" "$HOME/.boi/src"
 
@@ -370,22 +516,48 @@ install_or_upgrade_boi() {
 
     # Fast path: the machine-owned build already provides the pinned version.
     # (Also makes repeated install.sh runs — e.g. from test suites — no-ops.)
-    # `boi_bin` must be a REAL FILE, not a symlink (FIX-017, 2026-06-17): the old
-    # layout symlinked `boi_bin` → the cargo build output and rebuilt it in place,
-    # so a rebuild overwrote the very Mach-O the running daemon was mapped from →
-    # macOS AMFI invalidated the live process's code signature and SIGKILLed it
-    # ("Code Signature Invalid"). We now deploy a real-file copy via atomic
-    # rename. `[ ! -L ]` forces a one-time migration off any pre-existing symlink.
-    # `|| true` inside the substitution: a present-but-unrunnable binary (e.g.
-    # interrupted build) must fall through to the rebuild below, not errexit
-    # the whole installer.
-    if [ -x "$boi_bin" ] && [ ! -L "$boi_bin" ]; then
-        local current
-        current="v$("$boi_bin" --version 2>/dev/null | awk '/^boi /{print $2}' | tail -1 || true)"
-        if [ "$current" = "$BOI_VERSION" ]; then
+    # Raw installs use a real-file copy via atomic rename so a rebuild never
+    # overwrites the Mach-O mapped by a live daemon. Managed signed installs
+    # may expose the transaction-owned compatibility symlink. A present but
+    # unrunnable binary falls through to the rebuild below.
+    if [ -x "$boi_bin" ]; then
+        local fast_path=false current=""
+        if [ "$MACOS_APP_MANAGED" = true ]; then
+            if [ "$MACOS_APP_MODE" = signed-current ]; then
+                local verified_revision verified_version verified_metadata verified_fields
+                verified_metadata="$(_macos_app_verify_current boi "$HOME/.boi")" || {
+                    echo "ERROR: signed BOI installation failed verify-current; refusing raw fast path" >&2
+                    return 1
+                }
+                verified_fields=$(/usr/bin/python3 -I -B -c '
+import json,re,sys
+value=json.loads(sys.stdin.read())
+if not isinstance(value, dict) or type(value.get("schema_version")) is not int or value.get("schema_version") != 1 or value.get("product") != "boi" or value.get("mode") != "signed-current":
+    raise SystemExit("invalid verified BOI metadata")
+revision=value.get("source_revision")
+version=value.get("version")
+if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", revision) or not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+    raise SystemExit("invalid verified BOI source revision or version")
+print("%s\t%s" % (revision, version))
+' <<< "$verified_metadata") || {
+                    echo "ERROR: signed BOI metadata is invalid; refusing raw fast path" >&2
+                    return 1
+                }
+                IFS=$'\t' read -r verified_revision verified_version <<< "$verified_fields"
+                if [ "$verified_revision" = "$pinned_boi_revision" ] && [ "$verified_version" = "${BOI_VERSION#v}" ]; then
+                    fast_path=true
+                else
+                    echo "  BOI signed state differs from the pinned source; rebuilding through the common transaction"
+                fi
+            fi
+        elif [ ! -L "$boi_bin" ]; then
+            current="v$("$boi_bin" --version 2>/dev/null | awk '/^boi /{print $2}' | tail -1 || true)"
+            [ "$current" = "$BOI_VERSION" ] && fast_path=true
+        fi
+        if [ "$fast_path" = true ]; then
             echo "  BOI $BOI_VERSION already installed  ✓"
             write_boi_wrapper
-            return
+            return 0
         fi
     fi
 
@@ -405,12 +577,22 @@ install_or_upgrade_boi() {
         echo "  Cloning BOI build repo (machine-owned, ~/.boi/src/boi)..."
         git clone "$BOI_REPO" "$boi_build" 2>/dev/null || {
             echo "  BOI: failed to clone $BOI_REPO — keeping currently installed binary" >&2
-            return
+            return 1
         }
         ( cd "$boi_build" && git checkout -f --detach "$BOI_VERSION" 2>/dev/null ) || {
             echo "  BOI: tag $BOI_VERSION not found in $BOI_REPO — keeping currently installed binary" >&2
-            return
+            return 1
         }
+    fi
+    local resolved_boi_revision
+    resolved_boi_revision="$(_resolve_git_tag "$BOI_REPO" "$BOI_VERSION")" || {
+        echo "  BOI: pinned tag $BOI_VERSION could not be resolved after checkout" >&2
+        return 1
+    }
+    _verify_pinned_checkout "$boi_build" "$BOI_VERSION" "$resolved_boi_revision" || return 1
+    if [ "$boi_managed_at_start" = true ] && [ "$resolved_boi_revision" != "$pinned_boi_revision" ]; then
+        echo "ERROR: BOI checkout does not match the managed pinned revision; refusing signed build" >&2
+        return 1
     fi
 
     # Build the Rust binary (full log kept — a swallowed compiler error makes
@@ -418,10 +600,13 @@ install_or_upgrade_boi() {
     if command -v cargo &>/dev/null; then
         echo "  Building BOI binary..."
         local build_log="$HOME/.boi/logs/boi-build.log"
-        ( cd "$boi_build" && cargo build --release ) > "$build_log" 2>&1 || {
+        local boi_target_dir="${CARGO_TARGET_DIR:-$HOME/.boi/cargo-target}"
+        if [[ "$boi_target_dir" != /* ]]; then boi_target_dir="$boi_build/$boi_target_dir"; fi
+        boi_target_dir="$(mkdir -p "$boi_target_dir" && cd "$boi_target_dir" && pwd -P)" || return 1
+        ( cd "$boi_build" && CARGO_TARGET_DIR="$boi_target_dir" cargo build --release ) > "$build_log" 2>&1 || {
             echo "  BOI: cargo build failed — last 20 lines of $build_log:" >&2
             tail -20 "$build_log" >&2 || true
-            return
+            return 1
         }
         # Deploy as a STABLE real file via atomic rename — never symlink to (or
         # overwrite in place) the build output the running daemon is mapped from
@@ -429,17 +614,44 @@ install_or_upgrade_boi() {
         # a live daemon keeps its old inode alive until its next restart instead
         # of being AMFI-SIGKILLed ("Code Signature Invalid"). Temp on the SAME
         # filesystem (sibling path) so the rename cannot fall back to a copy.
-        local boi_tmp="$boi_bin.new.$$"
-        cp -f "$boi_build/target/release/boi" "$boi_tmp" && chmod +x "$boi_tmp" && mv -f "$boi_tmp" "$boi_bin" || {
-            echo "  BOI: failed to install built binary to $boi_bin" >&2
-            rm -f "$boi_tmp" 2>/dev/null || true
-            return
-        }
-        echo "  BOI $BOI_VERSION built and installed (atomic)  ✓"
+        local built_boi="$boi_target_dir/release/boi"
+        if [ ! -x "$built_boi" ]; then
+            echo "  BOI: expected build artifact missing: $built_boi" >&2
+            return 1
+        fi
+        if ! _macos_app_recheck boi "$HOME/.boi" "$boi_managed_at_start"; then
+            return 1
+        fi
+        if [ "$MACOS_APP_MANAGED" = true ]; then
+            local boi_revision
+            boi_revision="$pinned_boi_revision"
+            if [ -z "$boi_revision" ]; then
+                echo "  BOI: pinned source revision unavailable; refusing signed install" >&2
+                return 1
+            fi
+            local boi_helper_revision
+            boi_helper_revision=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || {
+                echo "  BOI: installer helper revision unavailable; refusing signed install" >&2
+                return 1
+            }
+            _macos_app_install boi "$HOME/.boi" "$built_boi" "${BOI_VERSION#v}" "$boi_revision" "$boi_helper_revision" || {
+                echo "  BOI: common signed app transaction failed; inspect its transaction result; no raw fallback was attempted" >&2
+                return 1
+            }
+            echo "  BOI $BOI_VERSION built and installed through signed app transaction  ✓"
+        else
+            local boi_tmp="$boi_bin.new.$$"
+            cp -f "$built_boi" "$boi_tmp" && chmod +x "$boi_tmp" && mv -f "$boi_tmp" "$boi_bin" || {
+                echo "  BOI: failed to install built binary to $boi_bin" >&2
+                rm -f "$boi_tmp" 2>/dev/null || true
+                return 1
+            }
+            echo "  BOI $BOI_VERSION built and installed (atomic)  ✓"
+        fi
     else
         echo "  ⚠️  Rust/cargo not found — cannot build BOI binary"
         echo "     Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-        return
+        return 1
     fi
 
     write_boi_wrapper
@@ -473,36 +685,55 @@ mkdir -p "$TARGET_DIR/.hex/bin"
 mkdir -p "$TARGET_DIR/.hex/data"
 mkdir -p "$TARGET_DIR/.hex/sse/topics"
 
-# Migration: remove old standalone hex-agent binary (replaced by symlink)
-if [ -f "$TARGET_DIR/.hex/bin/hex-agent" ] && [ ! -L "$TARGET_DIR/.hex/bin/hex-agent" ]; then
-    echo "  Migrating: replacing old hex-agent binary with hex + symlink..."
-    rm -f "$TARGET_DIR/.hex/bin/hex-agent"
-fi
-
 _harness_build_from_source() {
-    echo "  Building hex from source..."
-    ( cd "$SCRIPT_DIR/system/harness" && cargo build --release 2>&1 ) || return 1
-    # When system/harness is a member of a workspace (root Cargo.toml), cargo
-    # emits to the workspace-root target dir, NOT system/harness/target. Probe
-    # both so the cp doesn't silently fail and fall back to a network download.
-    local built=""
-    local candidate
-    for candidate in \
-        "$SCRIPT_DIR/system/harness/target/release/hex" \
-        "$SCRIPT_DIR/target/release/hex"; do
-        if [ -x "$candidate" ]; then built="$candidate"; break; fi
-    done
-    if [ -z "$built" ]; then
-        echo "  hex binary not found after build (checked system/harness/target and workspace target)" >&2
+    if ! _macos_app_prepare hex "$TARGET_DIR/.hex"; then
         return 1
     fi
-    cp "$built" "$TARGET_DIR/.hex/bin/hex"
-    chmod +x "$TARGET_DIR/.hex/bin/hex"
-    ln -sf hex "$TARGET_DIR/.hex/bin/hex-agent"
-    # Record the source SHA that produced THIS binary (atomic tmp+rename) so
-    # `hex upgrade` can verify binary freshness. Never fails the install (S6).
-    write_hex_sha_sidecar
-    _code_intel_build_and_deploy || true
+    local hex_managed_at_start="$MACOS_APP_MANAGED"
+    echo "  Building hex from source..."
+    local hex_target_dir="${CARGO_TARGET_DIR:-$TARGET_DIR/.hex/cargo-target}"
+    if [[ "$hex_target_dir" != /* ]]; then hex_target_dir="$SCRIPT_DIR/$hex_target_dir"; fi
+    hex_target_dir="$(mkdir -p "$hex_target_dir" && cd "$hex_target_dir" && pwd -P)" || return 1
+    ( cd "$SCRIPT_DIR/system/harness" && CARGO_TARGET_DIR="$hex_target_dir" cargo build --release 2>&1 ) || return 1
+    # Cargo receives an absolute target directory, so the artifact lookup uses
+    # the exact output path and cannot select a stale worktree artifact.
+    local built=""
+    built="$hex_target_dir/release/hex"
+    if [ ! -x "$built" ]; then
+        echo "  hex binary not found at the exact build output: $built" >&2
+        return 1
+    fi
+    if ! _macos_app_recheck hex "$TARGET_DIR/.hex" "$hex_managed_at_start"; then
+        return 1
+    fi
+    if [ "$MACOS_APP_MANAGED" = true ]; then
+        local hex_revision
+        hex_revision=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || {
+            echo "  hex: source revision unavailable; refusing signed install" >&2
+            return 1
+        }
+        local hex_helper_revision
+        hex_helper_revision=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || {
+            echo "  hex: installer helper revision unavailable; refusing signed install" >&2
+            return 1
+        }
+        _macos_app_install hex "$TARGET_DIR/.hex" "$built" "${VERSION#v}" "$hex_revision" "$hex_helper_revision" || {
+            echo "  hex: common signed app transaction failed; inspect its transaction result; no raw fallback was attempted" >&2
+            return 1
+        }
+    else
+        cp "$built" "$TARGET_DIR/.hex/bin/hex"
+        chmod +x "$TARGET_DIR/.hex/bin/hex"
+        ln -sf hex "$TARGET_DIR/.hex/bin/hex-agent"
+        # Record the source SHA that produced THIS binary (atomic tmp+rename) so
+        # `hex upgrade` can verify binary freshness. Never fails the install (S6).
+        write_hex_sha_sidecar
+    fi
+    if [ "$MACOS_APP_MANAGED" = true ]; then
+        echo "  code-intel binaries preserved; no signed product mapping is configured"
+    else
+        _code_intel_build_and_deploy "$hex_target_dir" || true
+    fi
     return 0
 }
 
@@ -517,8 +748,9 @@ _code_intel_build_and_deploy() {
     if [ ! -f "$SCRIPT_DIR/system/code-intel/Cargo.toml" ]; then
         return 0
     fi
+    local target_dir="${1:-${CARGO_TARGET_DIR:-$TARGET_DIR/.hex/cargo-target}}"
     echo "  Building code-intel binaries (cq, scipd)..."
-    if ! ( cd "$SCRIPT_DIR/system/code-intel" && cargo build --release 2>&1 ); then
+    if ! ( cd "$SCRIPT_DIR/system/code-intel" && CARGO_TARGET_DIR="$target_dir" cargo build --release 2>&1 ); then
         echo "  WARNING: code-intel build failed — cq/scipd not installed (hex still works)" >&2
         return 1
     fi
@@ -527,12 +759,8 @@ _code_intel_build_and_deploy() {
         ci_bin=""
         # Same dual probe as the hex binary: workspace builds emit to the
         # workspace-root target dir, standalone builds to the crate's own.
-        for candidate in \
-            "$SCRIPT_DIR/system/code-intel/target/release/$name" \
-            "$SCRIPT_DIR/target/release/$name"; do
-            if [ -x "$candidate" ]; then ci_bin="$candidate"; break; fi
-        done
-        if [ -n "$ci_bin" ]; then
+        ci_bin="$target_dir/release/$name"
+        if [ -x "$ci_bin" ]; then
             cp "$ci_bin" "$TARGET_DIR/.hex/bin/$name"
             chmod +x "$TARGET_DIR/.hex/bin/$name"
             echo "  $name binary           ✓"
@@ -544,6 +772,13 @@ _code_intel_build_and_deploy() {
 
 _harness_download_prebuilt() {
     local arch os harness_url
+    if ! _macos_app_prepare hex "$TARGET_DIR/.hex"; then
+        return 1
+    fi
+    if [ "$MACOS_APP_MANAGED" = true ]; then
+        echo "ERROR: managed macOS Hex prebuilt installation is unsupported until artifact provenance is verified" >&2
+        return 1
+    fi
     arch=$(uname -m)
     os=$(uname -s | tr '[:upper:]' '[:lower:]')
     harness_url="https://github.com/mrap/hex-foundation/releases/download/${HARNESS_VERSION}/hex-${os}-${arch}"
@@ -606,6 +841,10 @@ write_hex_sha_sidecar() {
 
 if command -v cargo &>/dev/null; then
     _harness_build_from_source || {
+        if [ "$MACOS_APP_MANAGED" = true ]; then
+            echo "ERROR: managed macOS source build failed; refusing prebuilt or raw fallback" >&2
+            exit 1
+        fi
         echo "  Build failed — trying pre-built binary download..."
         if command -v curl &>/dev/null; then
             _harness_download_prebuilt || _harness_warn_missing
@@ -616,7 +855,12 @@ if command -v cargo &>/dev/null; then
     }
 elif command -v curl &>/dev/null; then
     echo "  cargo not found — trying pre-built binary download..."
-    _harness_download_prebuilt || _harness_warn_missing
+    if ! _harness_download_prebuilt; then
+        if [ "$MACOS_APP_MANAGED" = true ]; then
+            exit 1
+        fi
+        _harness_warn_missing
+    fi
 else
     echo "  cargo and curl not found — skipping binary install"
     _harness_warn_missing
