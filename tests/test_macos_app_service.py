@@ -298,17 +298,37 @@ class MacAppServiceTests(unittest.TestCase):
         plist = home / "Library/LaunchAgents/com.hex.scipd.plist"
         plist.parent.mkdir(parents=True)
         plist.write_bytes(plistlib.dumps({"Label": copied.SCIPD_LAUNCHD_LABEL, "ProgramArguments": [str(paths.executable.absolute())]}, sort_keys=False))
+        fake_signer = """import json\nimport sys\nfrom pathlib import Path\ndef _read_policy(path):\n    json.loads(path.read_text(encoding='utf-8'))\nif len(sys.argv) > 1 and sys.argv[1] == 'verify-installed':\n    Path(%r).write_text(json.dumps(sys.argv))\n    state = Path(sys.argv[2]).parent / 'SCIPD.app.install-state.json'\n    print(json.dumps(json.loads(state.read_text(encoding='utf-8'))))\n""" % str(self.base / "signer-argv.json")
+        copied_signer.write_text(fake_signer, encoding="utf-8")
+        (paths.helper_dir / "macos-signing.py").write_text(fake_signer, encoding="utf-8")
+        state_path = paths.state
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["helpers"]["macos-signing.py"]["sha256"] = copied._sha256(copied_signer)
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        state_file = self.base / "launchctl-state.json"
+        state_file.write_text(json.dumps({"loaded": True, "program": str(paths.cli.absolute())}), encoding="utf-8")
+        fake_launchctl = self.base / "launchctl"
+        fake_launchctl.write_text("""#!/usr/bin/python3\nimport json\nimport plistlib\nimport sys\nfrom pathlib import Path\nstate = Path(%r)\ndata = json.loads(state.read_text())\nif sys.argv[1] == 'print':\n    if not data['loaded']:\n        print('Could not find service', file=sys.stderr)\n        raise SystemExit(1)\n    print('\\tprogram = ' + data['program'])\nelif sys.argv[1] == 'bootout':\n    data['loaded'] = False\n    state.write_text(json.dumps(data))\nelif sys.argv[1] == 'bootstrap':\n    plist = plistlib.loads(Path(sys.argv[-1]).read_bytes())\n    data.update(loaded=True, program=plist['ProgramArguments'][0])\n    state.write_text(json.dumps(data))\nelse:\n    raise SystemExit(2)\n""" % str(state_file), encoding="utf-8")
+        fake_launchctl.chmod(0o755)
+        copied_app.write_text(copied_app.read_text(encoding="utf-8").replace('command = ["/bin/launchctl", *argv]', f'command = [{str(fake_launchctl)!r}, *argv]'), encoding="utf-8")
+        subprocess_result = subprocess.run([sys.executable, "-I", "-B", str(copied_app), "service-reconcile", "code-intel-daemon", "--root", str(root)], capture_output=True, text=True, env={"HOME": str(home), "PATH": "/usr/bin:/bin"})
+        signer_log = (self.base / "signer-argv.json").read_text(encoding="utf-8") if (self.base / "signer-argv.json").exists() else "missing"
+        self.assertEqual(subprocess_result.returncode, 0, repr((subprocess_result.returncode, subprocess_result.stdout, subprocess_result.stderr, signer_log)))
+        subprocess_payload = json.loads(subprocess_result.stdout)
+        self.assertEqual(subprocess_payload["service_action"], "restarted")
+        self.assertEqual(json.loads(state_file.read_text(encoding="utf-8"))["program"], str(paths.executable.absolute()))
+        self.assertEqual(json.loads((self.base / "signer-argv.json").read_text(encoding="utf-8"))[1], "verify-installed")
         launchctl = FakeLaunchctl(paths, False, "")
         class InjectedSigner(FakeSigner):
             pass
         copied.ProcessSigner = InjectedSigner
-        copied._launchctl_default = launchctl
+        copied._launchctl_default = lambda argv, lock_fd=None: launchctl(argv)
         output = io.StringIO()
         with patch.dict(os.environ, {"HOME": str(home)}), patch("sys.stdout", output):
             self.assertEqual(copied.main(["service-reconcile", "code-intel-daemon", "--root", str(root)]), 0)
         result = json.loads(output.getvalue())
         self.assertEqual(result["product"], "code-intel-daemon")
-        self.assertEqual(result["service_action"], "updated-stopped")
+        self.assertEqual(result["service_action"], "stopped")
 
         completed = subprocess.run([sys.executable, "-I", "-B", str(copied_app), "service-reconcile", "code-intel-cli", "--root", str(root)], capture_output=True, text=True, env={"HOME": str(home), "PATH": "/usr/bin:/bin"})
         self.assertNotEqual(completed.returncode, 0)

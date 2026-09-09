@@ -590,10 +590,11 @@ def _read_service_plist(path: Path) -> tuple[Optional[dict[str, Any]], dict[str,
     return value, identity, identity["sha256"]
 
 
-def _launchctl_default(argv: list[str], timeout: float = 5.0) -> tuple[int, str, str]:
+def _launchctl_default(argv: list[str], timeout: float = 5.0, lock_fd: Optional[int] = None) -> tuple[int, str, str]:
     command = ["/bin/launchctl", *argv]
     try:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        pass_fds = (lock_fd,) if lock_fd is not None else ()
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=pass_fds)
     except OSError as exc:
         raise InstallError(f"launchctl unavailable: {exc}") from exc
     streams = (process.stdout, process.stderr)
@@ -797,10 +798,11 @@ def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: 
         raise InstallError("service-reconcile supports only code-intel-daemon")
     paths = product_paths(product, root)
     _path_guard(paths)
-    launchctl = launchctl or _launchctl_default
     plist = _service_plist_path(plist_path)
     domain = f"gui/{os.getuid()}/{SCIPD_LAUNCHD_LABEL}"
     with _product_lock(paths) as lock_fd:
+        if launchctl is None:
+            launchctl = lambda argv: _launchctl_default(argv, lock_fd=lock_fd)
         if isinstance(signer, ProcessSigner):
             signer.bind_owner(paths, lock_fd)
         owner = service_owner(product, root, signer, policy_path=policy_path, lock_held=True)
