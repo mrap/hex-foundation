@@ -62,7 +62,11 @@ def main():
         _read_policy(pathlib.Path(args[3]))
         print(json.dumps(_result()))
     else:
-        source=pathlib.Path(args[0]); candidate=pathlib.Path(args[3]); candidate.joinpath('Contents/MacOS').mkdir(parents=True); shutil.copy2(source,candidate/'Contents/MacOS/hex'); (candidate/'Contents/Info.plist').write_bytes(b'fixture plist'); print(json.dumps(_result()))
+        source=pathlib.Path(args[0]); candidate=pathlib.Path(args[3]); candidate.joinpath('Contents/MacOS').mkdir(parents=True); shutil.copy2(source,candidate/'Contents/MacOS/hex'); (candidate/'Contents/Info.plist').write_bytes(b'fixture plist')
+        if '--receipt' in args:
+            pathlib.Path(args[args.index('--receipt')+1]).write_text(json.dumps(_result()))
+        else:
+            print(json.dumps(_result()))
 if __name__ == '__main__':
     main()
 "#,
