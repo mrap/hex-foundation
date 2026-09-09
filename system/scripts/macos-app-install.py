@@ -149,12 +149,10 @@ class ProcessSigner:
         return value
 
     def stage(self, source: Path, product: str, policy: Path, candidate: Path, receipt: Path, *, version: str = "1.0.0") -> Mapping[str, Any]:
-        signer_product = {"code-intel-daemon": "hex.scipd", "code-intel-cli": "hex.cq"}.get(product, product)
-        return self._run([str(source), signer_product, str(policy), str(candidate), "--version", version, "--receipt", str(receipt)])
+        return self._run([str(source), product, str(policy), str(candidate), "--version", version, "--receipt", str(receipt)])
 
     def verify_installed(self, bundle: Path, product: str, policy: Optional[Path], expected: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
-        signer_product = {"code-intel-daemon": "hex.scipd", "code-intel-cli": "hex.cq"}.get(product, product)
-        args = ["verify-installed", str(bundle), signer_product]
+        args = ["verify-installed", str(bundle), product]
         if policy is not None:
             args.append(str(policy))
         return self._run(args)

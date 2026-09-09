@@ -28,7 +28,28 @@ The optional keychain path must be absolute. It is passed to both identity looku
 python3 system/scripts/macos-signing.py SOURCE hex POLICY.json OUTPUT.app --version 1.2.3 --receipt RECEIPT.json
 ```
 
-Supported products are `hex`, `boi`, `hex.scipd`, and `hex.cq`. The common installer maps these last two signer names to its `code-intel-daemon` and `code-intel-cli` products. Each has a fixed bundle identifier, real executable name, and product-specific usage descriptions. The code-intel products use `com.mrap.hex.scipd` for `scipd` and `com.mrap.hex.cq` for `cq`. The version must have three numeric components: major from 0 through 9999, minor and patch from 0 through 99. A zero major is valid for current Cargo versions, including Hex `0.52.2` and code-intel `0.1.0`. Apple documents the numeric `CFBundleVersion` and `CFBundleShortVersionString` formats in [`CFBundleVersion`](https://developer.apple.com/documentation/bundleresources/information-property-list/cfbundleversion) and [`CFBundleShortVersionString`](https://developer.apple.com/documentation/bundleresources/information-property-list/cfbundleshortversionstring). Prerelease/build suffixes and leading zeroes are rejected. This component supports this bounded numeric subset and does not map arbitrary semantic versions into Apple build versions.
+The signer and installer use the same fixed product names:
+
+| Product | Executable | Bundle identifier |
+|---|---|---|
+| `hex` | `hex` | `com.mrap.hex` |
+| `boi` | `boi` | `com.mrap.boi` |
+| `code-intel-daemon` | `scipd` | `com.mrap.hex.scipd` |
+| `code-intel-cli` | `cq` | `com.mrap.hex.cq` |
+
+Each product has its own app name and usage descriptions. Product support in
+these helpers does not establish integration with a build or service caller.
+
+The version must have three numeric components. The major component permits
+0 through 9999; minor and patch permit 0 through 99. Zero-major Cargo versions
+are supported without changing the release number.
+
+Apple defines the numeric formats in
+[`CFBundleVersion`](https://developer.apple.com/documentation/bundleresources/information-property-list/cfbundleversion)
+and [`CFBundleShortVersionString`](https://developer.apple.com/documentation/bundleresources/information-property-list/cfbundleshortversionstring).
+This helper accepts a bounded subset and rejects leading zeroes and prerelease
+or build suffixes. It does not map arbitrary semantic versions into Apple build
+versions.
 
 The source must be regular and have no setuid, setgid, or sticky bits. The helper copies a pinned source inode into private staging and sets the staged executable to `0755`. It records the source mode and hash and rejects detected source changes before publication. It never signs or changes the source file.
 

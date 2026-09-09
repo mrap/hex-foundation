@@ -25,6 +25,17 @@ sys.modules[sign_test_spec.name] = SIGN_TEST
 sign_test_spec.loader.exec_module(SIGN_TEST)
 
 
+class ProductContractTests(unittest.TestCase):
+    def test_signer_and_installer_agree_on_every_supported_product(self):
+        self.assertEqual(set(INSTALL.PRODUCTS), set(SIGN.PRODUCTS))
+        for name, product in INSTALL.PRODUCTS.items():
+            with self.subTest(product=name):
+                signer = SIGN.PRODUCTS[name]
+                self.assertEqual(product.bundle_identifier, signer["identifier"])
+                self.assertEqual(product.executable, signer["executable"])
+                self.assertEqual(product.app_name, signer["bundle"])
+
+
 class FakeSigner:
     def __init__(self, version):
         self.calls = []
@@ -103,13 +114,13 @@ class CodeIntelProductTests(unittest.TestCase):
     def test_standalone_signer_stages_and_verifies_code_intel_products(self):
         signer_policy = self.base / "signer-policy.json"
         signer_policy.write_text(json.dumps({"schema_version": 1, "certificate_sha1": SIGN_TEST.FINGERPRINT, "team_id": SIGN_TEST.TEAM}), encoding="utf-8")
-        for product in ("hex.scipd", "hex.cq"):
+        for product, identity in (("code-intel-daemon", "hex.scipd"), ("code-intel-cli", "hex.cq")):
             output = self.base / f"{product}.app"
-            runner = SIGN_TEST.Runner(product)
+            runner = SIGN_TEST.Runner(identity)
             result = SIGN.stage(self.source, product, signer_policy, output, self.codeintel_version, run=runner)
-            self.assertEqual(result["identifier"], SIGN.PRODUCTS[product]["identifier"])
+            self.assertEqual(result["identifier"], "com.mrap." + identity)
             self.assertEqual(result["version"], self.codeintel_version)
-            readonly = SIGN_TEST.Runner(product)
+            readonly = SIGN_TEST.Runner(identity)
             readonly.signed = True
             verified = SIGN.verify_installed(output, product, signer_policy, run=readonly)
             self.assertTrue(verified["verified"])
