@@ -6,6 +6,7 @@ import io
 import json
 import os
 import plistlib
+import re
 import stat
 import sys
 import tempfile
@@ -22,6 +23,14 @@ LEAF = b"public DER bytes are mocked only at the codesign command boundary"
 FINGERPRINT = hashlib.sha1(LEAF).hexdigest().upper()
 TEAM = "TEAM123456"
 UUIDS = {"arm64": "12345678-1234-1234-1234-1234567890AB", "x86_64": "87654321-4321-4321-4321-BA0987654321"}
+
+
+def hex_cargo_version():
+    manifest = Path(__file__).parents[1] / "system/harness/Cargo.toml"
+    match = re.search(r'^version = "([^"]+)"$', manifest.read_text(encoding="utf-8"), re.MULTILINE)
+    if match is None:
+        raise AssertionError(f"package version missing from {manifest}")
+    return match.group(1)
 
 
 class Runner:
@@ -165,11 +174,16 @@ class StageTests(unittest.TestCase):
             self.assertFalse(self.output.exists())
 
     def test_hex_cargo_version_with_zero_major_is_supported(self):
-        result = self.stage(version="0.52.2")
-        self.assertEqual(result["version"], "0.52.2")
+        runner = Runner()
+        version = hex_cargo_version()
+        self.assertTrue(version.startswith("0."), version)
+        result = self.stage(runner, version=version)
+        verified = SIGN.verify_installed(self.output, "hex", self.policy, run=runner)
+        self.assertEqual(result["version"], version)
+        self.assertEqual(verified["version"], version)
         info = plistlib.loads((self.output / "Contents/Info.plist").read_bytes())
-        self.assertEqual(info["CFBundleVersion"], "0.52.2")
-        self.assertEqual(info["CFBundleShortVersionString"], "0.52.2")
+        self.assertEqual(info["CFBundleVersion"], version)
+        self.assertEqual(info["CFBundleShortVersionString"], version)
 
     def test_invalid_later_architecture_uuid_prevents_signing(self):
         runner = Runner()
