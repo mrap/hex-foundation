@@ -10,8 +10,90 @@ use std::path::{Path, PathBuf};
 pub const HEX_APP_ID: &str = "com.mrap.hex";
 const POLICY_RELATIVE: &str = "Library/Application Support/Hex/build-signing/policy.json";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodeIntelProduct {
+    Cli,
+    Daemon,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AppProduct {
+    Hex,
+    CodeIntelCli,
+    CodeIntelDaemon,
+}
+
+impl AppProduct {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Hex => "hex",
+            Self::CodeIntelCli => "code-intel-cli",
+            Self::CodeIntelDaemon => "code-intel-daemon",
+        }
+    }
+
+    fn installer_product(self) -> &'static str {
+        match self {
+            Self::Hex => "hex",
+            Self::CodeIntelCli => "code-intel-cli",
+            Self::CodeIntelDaemon => "code-intel-daemon",
+        }
+    }
+
+    fn bundle_name(self) -> &'static str {
+        match self {
+            Self::Hex => "Hex.app",
+            Self::CodeIntelCli => "CQ.app",
+            Self::CodeIntelDaemon => "SCIPD.app",
+        }
+    }
+
+    fn executable_name(self) -> &'static str {
+        match self {
+            Self::Hex => "hex",
+            Self::CodeIntelCli => "cq",
+            Self::CodeIntelDaemon => "scipd",
+        }
+    }
+
+    fn bundle_identifier(self) -> &'static str {
+        match self {
+            Self::Hex => HEX_APP_ID,
+            Self::CodeIntelCli => "com.mrap.hex.cq",
+            Self::CodeIntelDaemon => "com.mrap.hex.scipd",
+        }
+    }
+
+    fn helper_dir(self) -> &'static str {
+        match self {
+            Self::Hex => "libexec",
+            Self::CodeIntelCli => "libexec/cq",
+            Self::CodeIntelDaemon => "libexec/scipd",
+        }
+    }
+
+    fn root_name(self) -> &'static str {
+        match self {
+            Self::Hex => ".hex",
+            Self::CodeIntelCli | Self::CodeIntelDaemon => ".codeintel",
+        }
+    }
+}
+
+impl From<CodeIntelProduct> for AppProduct {
+    fn from(product: CodeIntelProduct) -> Self {
+        match product {
+            CodeIntelProduct::Cli => Self::CodeIntelCli,
+            CodeIntelProduct::Daemon => Self::CodeIntelDaemon,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AppPaths {
+    product: AppProduct,
+    pub bundle_identifier: &'static str,
+    pub helper_dir: PathBuf,
     pub home: PathBuf,
     pub root: PathBuf,
     pub policy: PathBuf,
@@ -25,25 +107,41 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn new(home: &Path, hex_dir: &Path) -> io::Result<Self> {
-        if !home.is_absolute() || !hex_dir.is_absolute() {
+        Self::for_product(home, hex_dir, AppProduct::Hex)
+    }
+
+    fn for_product(home: &Path, root_base: &Path, product: AppProduct) -> io::Result<Self> {
+        if !home.is_absolute() || !root_base.is_absolute() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "app paths must be absolute",
             ));
         }
-        let root = hex_dir.join(".hex");
-        let app = root.join("Hex.app");
+        let root =
+            if root_base.file_name().and_then(|name| name.to_str()) == Some(product.root_name()) {
+                root_base.to_owned()
+            } else {
+                root_base.join(product.root_name())
+            };
+        let app = root.join(product.bundle_name());
         Ok(Self {
+            product,
+            bundle_identifier: product.bundle_identifier(),
+            helper_dir: root.join(product.helper_dir()),
             home: home.to_owned(),
             policy: home.join(POLICY_RELATIVE),
-            executable: app.join("Contents/MacOS/hex"),
+            executable: app.join(format!("Contents/MacOS/{}", product.executable_name())),
             app,
-            cli: root.join("bin/hex"),
-            state: root.join("Hex.app.install-state.json"),
-            lock: root.join(".hex.app-install.lock"),
-            journal: root.join(".hex.app-install.journal.json"),
+            cli: root.join(format!("bin/{}", product.executable_name())),
+            state: root.join(format!("{}.install-state.json", product.bundle_name())),
+            lock: root.join(format!(".{}.app-install.lock", product.name())),
+            journal: root.join(format!(".{}.app-install.journal.json", product.name())),
             root,
         })
+    }
+
+    pub fn code_intel(home: &Path, product: CodeIntelProduct) -> io::Result<Self> {
+        Self::for_product(home, &home.join(".codeintel"), product.into())
     }
 
     /// Conservative admission only. The shared helper validates actual state.
@@ -54,20 +152,22 @@ impl AppPaths {
                 return Ok(true);
             }
         }
-        let alias = self.root.join("bin/hex-agent");
-        match fs::symlink_metadata(&alias) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                let target = fs::read_link(&alias)?;
-                // The old compatibility alias points to the raw CLI. A direct
-                // app alias is signed evidence even when the app is now absent.
-                if target != Path::new("hex") && target != self.cli {
-                    return Ok(true);
+        if self.product == AppProduct::Hex {
+            let alias = self.root.join("bin/hex-agent");
+            match fs::symlink_metadata(&alias) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    let target = fs::read_link(&alias)?;
+                    // The old compatibility alias points to the raw CLI. A direct
+                    // app alias is signed evidence even when the app is now absent.
+                    if target != Path::new("hex") && target != self.cli {
+                        return Ok(true);
+                    }
                 }
+                Ok(metadata) if metadata.is_file() => {}
+                Ok(_) => return Err(io::Error::other("unexpected Hex agent alias file type")),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
             }
-            Ok(metadata) if metadata.is_file() => {}
-            Ok(_) => return Err(io::Error::other("unexpected Hex agent alias file type")),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
         }
         match fs::symlink_metadata(&self.cli) {
             Ok(metadata) if metadata.file_type().is_symlink() => Ok(true),
@@ -307,10 +407,10 @@ fn run_python(
 }
 
 const BOOTSTRAP: &str = r#"import hashlib, os, stat, sys
-root, signing_hash, install_hash = sys.argv[1:4]
+root, helper_dir, signing_hash, install_hash = sys.argv[1:5]
 contents = {}
 for name, expected in [('macos-signing.py', signing_hash), ('macos-app-install.py', install_hash)]:
-    path = os.path.join(root, 'libexec', name)
+    path = os.path.join(helper_dir, name)
     fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     with os.fdopen(fd, 'rb') as stream:
         mode = os.fstat(stream.fileno()).st_mode
@@ -320,8 +420,8 @@ for name, expected in [('macos-signing.py', signing_hash), ('macos-app-install.p
     if len(source) > 1048576 or hashlib.sha256(source).hexdigest() != expected:
         raise ValueError('installed helper provenance mismatch: ' + name)
     contents[name] = source
-path = os.path.join(root, 'libexec', 'macos-app-install.py')
-sys.argv = [path] + sys.argv[4:]
+path = os.path.join(helper_dir, 'macos-app-install.py')
+sys.argv = [path] + sys.argv[5:]
 sys.path.insert(0, os.path.dirname(path))
 globals()['__file__'] = path
 exec(compile(contents['macos-app-install.py'], path, 'exec'), globals())
@@ -441,11 +541,7 @@ fn verified_owner_at(paths: AppPaths) -> io::Result<VerifiedOwner> {
         });
     }
     // Service operations do not create installation directories or repair state.
-    for dir in [
-        &paths.root,
-        &paths.root.join("bin"),
-        &paths.root.join("libexec"),
-    ] {
+    for dir in [&paths.root, &paths.root.join("bin"), &paths.helper_dir] {
         if !fs::symlink_metadata(dir)?.is_dir() {
             return Err(io::Error::other(
                 "signed app parent is not a real directory",
@@ -474,10 +570,10 @@ fn verified_owner_at(paths: AppPaths) -> io::Result<VerifiedOwner> {
     }
     let provenance: HelperState = serde_json::from_slice(&read_regular(&paths.state, 128 * 1024)?)
         .map_err(io::Error::other)?;
-    let helper = paths.root.join("libexec/macos-app-install.py");
+    let helper = paths.helper_dir.join("macos-app-install.py");
     check_helper(&helper, &provenance.helpers.install)?;
     check_helper(
-        &paths.root.join("libexec/macos-signing.py"),
+        &paths.helper_dir.join("macos-signing.py"),
         &provenance.helpers.signing,
     )?;
     let args = vec![
@@ -486,10 +582,11 @@ fn verified_owner_at(paths: AppPaths) -> io::Result<VerifiedOwner> {
         "-c".into(),
         BOOTSTRAP.into(),
         paths.root.clone().into_os_string(),
+        paths.helper_dir.clone().into_os_string(),
         provenance.helpers.signing.sha256.into(),
         provenance.helpers.install.sha256.into(),
         "service-owner".into(),
-        "hex".into(),
+        paths.product.installer_product().into(),
         "--root".into(),
         paths.root.clone().into_os_string(),
         "--lock-fd".into(),
@@ -503,10 +600,10 @@ fn verified_owner_at(paths: AppPaths) -> io::Result<VerifiedOwner> {
     )?;
     let owner: OwnerResult = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     if owner.schema_version != 1
-        || owner.product != "hex"
+        || owner.product != paths.product.installer_product()
         || owner.mode != "signed-current"
         || owner.executable_path != paths.executable
-        || owner.bundle_identifier != HEX_APP_ID
+        || owner.bundle_identifier != paths.bundle_identifier
         || owner.generation.is_empty()
     {
         return Err(io::Error::other(
@@ -532,6 +629,26 @@ pub fn verified_owner(hex_dir: &Path) -> io::Result<VerifiedOwner> {
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::other("HOME is required for the shared signing policy"))?;
     verified_owner_at(AppPaths::new(&home, hex_dir)?)
+}
+
+pub fn verified_codeintel_owner(
+    product: CodeIntelProduct,
+    codeintel_dir: &Path,
+) -> io::Result<VerifiedOwner> {
+    if !cfg!(target_os = "macos") {
+        return Ok(VerifiedOwner {
+            executable: codeintel_dir.join(match product {
+                CodeIntelProduct::Cli => "bin/cq",
+                CodeIntelProduct::Daemon => "bin/scipd",
+            }),
+            signed: false,
+            _lock: None,
+        });
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::other("HOME is required for the shared signing policy"))?;
+    verified_owner_at(AppPaths::for_product(&home, codeintel_dir, product.into())?)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -577,14 +694,14 @@ fn source_command(
         "-B".into(),
         helper.into_os_string(),
         command.into(),
-        "hex".into(),
+        paths.product.installer_product().into(),
         "--root".into(),
         paths.root.clone().into_os_string(),
     ];
     args.extend_from_slice(extra);
     let output = run_python(&args, &paths.home, None, Duration::from_secs(300))?;
     let result: ModeResult = serde_json::from_slice(&output).map_err(io::Error::other)?;
-    if result.schema_version != 1 || result.product != "hex" {
+    if result.schema_version != 1 || result.product != paths.product.installer_product() {
         return Err(io::Error::other("unexpected app-installer result"));
     }
     Ok(result)
@@ -640,6 +757,52 @@ pub fn install_build(
     revision: &str,
 ) -> io::Result<()> {
     let paths = current_paths(hex_dir)?;
+    let extra = vec![
+        "--source".into(),
+        executable.as_os_str().to_owned(),
+        "--version".into(),
+        version.into(),
+        "--source-revision".into(),
+        revision.into(),
+        "--helper-source-revision".into(),
+        revision.into(),
+    ];
+    let result = source_command(&paths, source_dir, "install", &extra)?;
+    if result.mode != "signed-current" || result.source_revision.as_deref() != Some(revision) {
+        return Err(io::Error::other(
+            "app installer did not commit the requested signed source",
+        ));
+    }
+    Ok(())
+}
+
+pub fn prepare_codeintel_upgrade(
+    product: CodeIntelProduct,
+    codeintel_dir: &Path,
+    source_dir: &Path,
+) -> io::Result<UpgradeMode> {
+    if !cfg!(target_os = "macos") {
+        return Ok(UpgradeMode::Legacy);
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::other("HOME is required for the shared signing policy"))?;
+    let paths = AppPaths::for_product(&home, codeintel_dir, product.into())?;
+    prepare_upgrade_at(&paths, source_dir)
+}
+
+pub fn install_codeintel_build(
+    product: CodeIntelProduct,
+    codeintel_dir: &Path,
+    source_dir: &Path,
+    executable: &Path,
+    version: &str,
+    revision: &str,
+) -> io::Result<()> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::other("HOME is required for the shared signing policy"))?;
+    let paths = AppPaths::for_product(&home, codeintel_dir, product.into())?;
     let extra = vec![
         "--source".into(),
         executable.as_os_str().to_owned(),
@@ -731,8 +894,12 @@ mod tests {
     }
 
     fn fixture(paths: &AppPaths, behavior: &str) {
+        fixture_for(paths, paths.product.installer_product(), behavior)
+    }
+
+    fn fixture_for(paths: &AppPaths, product: &str, behavior: &str) {
         use sha2::{Digest, Sha256};
-        fs::create_dir_all(paths.root.join("libexec")).unwrap();
+        fs::create_dir_all(&paths.helper_dir).unwrap();
         fs::create_dir_all(paths.cli.parent().unwrap()).unwrap();
         fs::create_dir_all(paths.policy.parent().unwrap()).unwrap();
         fs::write(&paths.policy, b"fixture public policy").unwrap();
@@ -742,23 +909,29 @@ mod tests {
 from pathlib import Path
 root=Path(sys.argv[sys.argv.index('--root')+1])
 fd=int(sys.argv[sys.argv.index('--lock-fd')+1])
-assert sys.argv[1:3] == ['service-owner','hex']
-assert os.fstat(fd).st_ino == os.stat(root/'.hex.app-install.lock').st_ino
-with open(root/'.hex.app-install.lock','rb') as other:
+assert sys.argv[1:3] == ['service-owner','{product}']
+assert os.fstat(fd).st_ino == os.stat(root/'{lock}').st_ino
+assert Path(__file__).parent == Path('{helper_dir}')
+with open(root/'{lock}','rb') as other:
     try: fcntl.flock(other.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError: pass
     else: raise AssertionError('parent lock not held')
 (root/'called').write_text('yes')
-result={{'schema_version':1,'product':'hex','mode':'signed-current','executable_path':str(root/'Hex.app/Contents/MacOS/hex'),'bundle_identifier':'com.mrap.hex','generation':'generation-a'}}
+result={{'schema_version':1,'product':'{product}','mode':'signed-current','executable_path':str(Path('{executable}')),'bundle_identifier':'{bundle_identifier}','generation':'generation-a'}}
 {behavior}
-"#
+"#,
+            product = product,
+            lock = paths.lock.file_name().unwrap().to_str().unwrap(),
+            helper_dir = paths.helper_dir.display(),
+            executable = paths.executable.display(),
+            bundle_identifier = paths.bundle_identifier,
         );
         let mut helpers = serde_json::Map::new();
         for (name, content) in [
             ("macos-app-install.py", script.as_bytes()),
             ("macos-signing.py", b"# fixture only\n".as_slice()),
         ] {
-            fs::write(paths.root.join("libexec").join(name), content).unwrap();
+            fs::write(paths.helper_dir.join(name), content).unwrap();
             helpers.insert(name.into(), serde_json::json!({"sha256":format!("{:x}",Sha256::digest(content)),"source_revision":"a".repeat(40)}));
         }
         fs::write(
@@ -781,6 +954,61 @@ result={{'schema_version':1,'product':'hex','mode':'signed-current','executable_
         assert!(another.try_lock_exclusive().is_err());
         drop(owner);
         another.try_lock_exclusive().unwrap();
+    }
+
+    #[test]
+    fn codeintel_products_have_distinct_fixed_paths_and_admit_real_helper_shape() {
+        for product in [CodeIntelProduct::Cli, CodeIntelProduct::Daemon] {
+            let temp = tempfile::tempdir().unwrap();
+            let paths = AppPaths::code_intel(temp.path(), product).unwrap();
+            fixture_for(
+                &paths,
+                paths.product.installer_product(),
+                "print(json.dumps(result))",
+            );
+            let owner = verified_owner_at(paths.clone()).unwrap();
+            assert!(owner.is_signed());
+            assert_eq!(owner.executable(), paths.executable);
+            assert!(paths.helper_dir.ends_with(match product {
+                CodeIntelProduct::Cli => "libexec/cq",
+                CodeIntelProduct::Daemon => "libexec/scipd",
+            }));
+            assert_eq!(
+                paths.bundle_identifier,
+                match product {
+                    CodeIntelProduct::Cli => "com.mrap.hex.cq",
+                    CodeIntelProduct::Daemon => "com.mrap.hex.scipd",
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn codeintel_admission_rejects_wrong_identity_product_helper_dir_and_changed_helper() {
+        for defect in ["identity", "product", "helper-dir", "changed-helper"] {
+            let temp = tempfile::tempdir().unwrap();
+            let paths = AppPaths::code_intel(temp.path(), CodeIntelProduct::Cli).unwrap();
+            let behavior = if defect == "identity" {
+                "result['bundle_identifier']='com.mrap.hex';print(json.dumps(result))"
+            } else {
+                "print(json.dumps(result))"
+            };
+            fixture_for(
+                &paths,
+                if defect == "product" {
+                    "hex"
+                } else {
+                    paths.product.installer_product()
+                },
+                behavior,
+            );
+            if defect == "helper-dir" {
+                fs::rename(&paths.helper_dir, paths.root.join("libexec/wrong")).unwrap();
+            } else if defect == "changed-helper" {
+                fs::write(paths.helper_dir.join("macos-signing.py"), b"changed").unwrap();
+            }
+            assert!(verified_owner_at(paths).is_err(), "{defect}");
+        }
     }
 
     #[test]
