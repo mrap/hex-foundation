@@ -283,6 +283,14 @@ Spec IDs are `S`-prefixed (e.g. `S0a3f1c2b`); task IDs are `T`-prefixed.
 `dispatch` requires `boi daemon` to be running — it exits non-zero with
 `DispatchError::NoDaemon` otherwise (`src/cli/dispatch.rs:103,167`).
 
+### Continue an owning Codex thread
+
+When a Codex thread owns an operator follow-up that must run after its active
+turn, queue it through `.hex/scripts/codex_continuation.py` with a stable action
+ID, explicit owner, thread ID, and message file. Treat an `uncertain` result as
+loud and never submit a replacement action. This guards delivery only. Keep
+task dependencies and retry-safe work in the BOI DAG.
+
 ### Dropped v1 Commands
 
 Removed intentionally per the v1.0 parity audit. Do not invoke:
