@@ -862,16 +862,21 @@ class FinalBoundaryTests(unittest.TestCase):
 
     def test_cancellation_cleans_actual_pipe_holding_child(self):
         import fcntl
+        import signal
         with tempfile.TemporaryDirectory() as td:
             lock = Path(td) / "cancel-child.lock"
             helper = Path(td) / "cancel.py"
             # The fake helper signals this exact live test process only after its
             # real child holds the lock. READY cannot trigger this cancellation.
             helper.write_text("import os,fcntl,time,signal\nr,w=os.pipe()\npid=os.fork()\nif pid == 0:\n os.close(r)\n f=open(" + repr(str(lock)) + ", 'w')\n fcntl.flock(f,fcntl.LOCK_EX)\n os.write(w,b'1');os.close(w)\n time.sleep(10)\n os._exit(0)\nos.close(w);os.read(r,1);os.close(r)\nos.kill(" + str(os.getpid()) + ",signal.SIGINT)\ntime.sleep(10)\n")
-            with self.assertRaises(KeyboardInterrupt):
-                run_owned(helper, timeout=4)
-            with lock.open('r') as stream:
-                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+            try:
+                with self.assertRaises(KeyboardInterrupt):
+                    run_owned(helper, timeout=4)
+                with lock.open('r') as stream:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                signal.signal(signal.SIGINT, previous)
 
     def test_stderr_bound_and_secret_environment_removal(self):
         from unittest.mock import patch
