@@ -76,7 +76,7 @@ mod test_env {
 }
 // Personal overlay (discovered, never named here). build.rs globs
 // $HEX_DIR/.hex/harness-personal/integration_*.rs → OUT_DIR/personal_mods.rs,
-// exposing `probe_registry() -> Vec<(&'static str, fn() -> i32)>`.
+// exposing `probe_registry() -> Vec<(&'static str, ProbeFn)>`.
 #[cfg(feature = "personal")]
 mod personal_mods {
     include!(concat!(env!("OUT_DIR"), "/personal_mods.rs"));
