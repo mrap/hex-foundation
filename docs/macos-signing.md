@@ -28,7 +28,7 @@ The optional keychain path must be absolute. It is passed to both identity looku
 python3 system/scripts/macos-signing.py SOURCE hex POLICY.json OUTPUT.app --version 1.2.3 --receipt RECEIPT.json
 ```
 
-Supported products are `hex` and `boi`. Each has a fixed bundle identifier, real executable name, and product-specific usage descriptions. The version must have three numeric components: major from 1 through 9999, minor and patch from 0 through 99. Prerelease/build suffixes and leading zeroes are rejected. This component does not map arbitrary semantic versions into Apple build versions.
+Supported products are `hex` and `boi`. Each has a fixed bundle identifier, real executable name, and product-specific usage descriptions. The version must have three numeric components: major from 0 through 9999, minor and patch from 0 through 99. A zero major is valid for current Cargo versions such as Hex `0.52.2` and scipd `0.1.0`. Prerelease/build suffixes and leading zeroes are rejected. This component supports this bounded numeric subset and does not map arbitrary semantic versions into Apple build versions.
 
 The source must be regular and have no setuid, setgid, or sticky bits. The helper copies a pinned source inode into private staging and sets the staged executable to `0755`. It records the source mode and hash and rejects detected source changes before publication. It never signs or changes the source file.
 

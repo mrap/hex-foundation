@@ -32,8 +32,9 @@ PRODUCTS = {
 POLICY_KEYS = {"schema_version", "certificate_sha1", "team_id", "keychain"}
 FINGERPRINT_RE = re.compile(r"^[0-9A-Fa-f]{40}$")
 TEAM_RE = re.compile(r"^[A-Za-z0-9]{10}$")
-# A deliberately narrow, valid CFBundleVersion and short-version form.
-VERSION_RE = re.compile(r"^[1-9][0-9]{0,3}\.(?:0|[1-9][0-9]?)\.(?:0|[1-9][0-9]?)$")
+# A deliberately narrow, valid CFBundleVersion and short-version form. Zero is
+# valid as the complete major component, but leading zeroes remain rejected.
+VERSION_RE = re.compile(r"^(?:0|[1-9][0-9]{0,3})\.(?:0|[1-9][0-9]?)\.(?:0|[1-9][0-9]?)$")
 Run = Callable[[Sequence[str], float], "CommandResult"]
 
 
@@ -248,7 +249,7 @@ def stage(source: Path, product_name: str, policy_path: Path, output: Path, vers
         if product is None:
             raise SigningError(f"unknown product: {product_name}")
         if not VERSION_RE.fullmatch(version):
-            raise SigningError("version must be numeric major.minor.patch (major 1..9999, minor/patch 0..99), without prerelease suffix")
+            raise SigningError("version must be numeric major.minor.patch (major 0..9999, minor/patch 0..99), without prerelease suffix")
         if not 0 < timeout <= COMMAND_TIMEOUT:
             raise SigningError("command timeout must be positive and bounded")
         source = source.resolve(strict=True)

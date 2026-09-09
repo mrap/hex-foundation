@@ -157,12 +157,19 @@ class StageTests(unittest.TestCase):
         self.assertNotEqual(first["source_sha256"], second["source_sha256"])
 
     def test_invalid_version_is_rejected_before_any_command(self):
-        for version in ["1.2.3-preview", "1.2.3+build", "0.1.0", "1.100.1"]:
+        for version in ["1.2.3-preview", "1.2.3+build", "00.1.0", "1.100.1"]:
             runner = Runner()
             with self.subTest(version=version), self.assertRaisesRegex(SIGN.SigningError, "version"):
                 self.stage(runner, version=version)
             self.assertEqual(runner.calls, [])
             self.assertFalse(self.output.exists())
+
+    def test_hex_cargo_version_with_zero_major_is_supported(self):
+        result = self.stage(version="0.52.2")
+        self.assertEqual(result["version"], "0.52.2")
+        info = plistlib.loads((self.output / "Contents/Info.plist").read_bytes())
+        self.assertEqual(info["CFBundleVersion"], "0.52.2")
+        self.assertEqual(info["CFBundleShortVersionString"], "0.52.2")
 
     def test_invalid_later_architecture_uuid_prevents_signing(self):
         runner = Runner()
@@ -521,9 +528,11 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(SIGN.SigningError): SIGN._uuids(text)
 
     def test_version_rejects_prerelease_and_invalid_bundle_fields(self):
-        for version in ["1.2.3-preview", "1.2.3+build", "1.2", "0.1.0", "12345.1.1", "1.100.1", "1.2.03"]:
+        for version in ["1.2.3-preview", "1.2.3+build", "1.2", "00.1.0", "12345.1.1", "1.100.1", "1.2.03"]:
             self.assertIsNone(SIGN.VERSION_RE.fullmatch(version), version)
         self.assertIsNotNone(SIGN.VERSION_RE.fullmatch("12.34.56"))
+        self.assertIsNotNone(SIGN.VERSION_RE.fullmatch("0.52.2"))
+        self.assertIsNotNone(SIGN.VERSION_RE.fullmatch("0.1.0"))
 
     def test_real_child_timeout_and_nonzero_are_loud(self):
         with self.assertRaisesRegex(SIGN.SigningError, "timed out"):
