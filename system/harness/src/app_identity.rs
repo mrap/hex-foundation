@@ -1071,6 +1071,31 @@ result={{'schema_version':1,'product':'{product}','mode':'signed-current','execu
 
     #[test]
     fn actual_helper_admission_holds_lock_through_owner_lifetime() {
+        const CHILD: &str = "HEX_APP_OWNER_LOCK_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Another parallel test can fork while the owner holds its flock.
+            // CLOEXEC closes the inherited descriptor at exec, not at fork.
+            // Isolate this immediate-release assertion from unrelated forks;
+            // the real helper and both lock assertions still run below.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "app_identity::tests::actual_helper_admission_holds_lock_through_owner_lifetime",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated lock test failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+            return;
+        }
         use fs2::FileExt;
         let temp = tempfile::tempdir().unwrap();
         let paths = AppPaths::new(temp.path(), &temp.path().join("hex")).unwrap();
