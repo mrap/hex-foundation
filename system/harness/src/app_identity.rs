@@ -32,14 +32,6 @@ impl AppProduct {
         }
     }
 
-    fn installer_product(self) -> &'static str {
-        match self {
-            Self::Hex => "hex",
-            Self::CodeIntelCli => "code-intel-cli",
-            Self::CodeIntelDaemon => "code-intel-daemon",
-        }
-    }
-
     fn bundle_name(self) -> &'static str {
         match self {
             Self::Hex => "Hex.app",
@@ -71,13 +63,6 @@ impl AppProduct {
             Self::CodeIntelDaemon => "libexec/scipd",
         }
     }
-
-    fn root_name(self) -> &'static str {
-        match self {
-            Self::Hex => ".hex",
-            Self::CodeIntelCli | Self::CodeIntelDaemon => ".codeintel",
-        }
-    }
 }
 
 impl From<CodeIntelProduct> for AppProduct {
@@ -107,22 +92,17 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn new(home: &Path, hex_dir: &Path) -> io::Result<Self> {
-        Self::for_product(home, hex_dir, AppProduct::Hex)
+        Self::for_product(home, &hex_dir.join(".hex"), AppProduct::Hex)
     }
 
-    fn for_product(home: &Path, root_base: &Path, product: AppProduct) -> io::Result<Self> {
-        if !home.is_absolute() || !root_base.is_absolute() {
+    fn for_product(home: &Path, root_path: &Path, product: AppProduct) -> io::Result<Self> {
+        if !home.is_absolute() || !root_path.is_absolute() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "app paths must be absolute",
             ));
         }
-        let root =
-            if root_base.file_name().and_then(|name| name.to_str()) == Some(product.root_name()) {
-                root_base.to_owned()
-            } else {
-                root_base.join(product.root_name())
-            };
+        let root = root_path.to_owned();
         let app = root.join(product.bundle_name());
         Ok(Self {
             product,
@@ -541,7 +521,18 @@ fn verified_owner_at(paths: AppPaths) -> io::Result<VerifiedOwner> {
         });
     }
     // Service operations do not create installation directories or repair state.
-    for dir in [&paths.root, &paths.root.join("bin"), &paths.helper_dir] {
+    let mut directories = vec![paths.root.clone(), paths.root.join("bin")];
+    let mut helper_parent = paths.root.clone();
+    for component in paths
+        .helper_dir
+        .strip_prefix(&paths.root)
+        .map_err(io::Error::other)?
+        .components()
+    {
+        helper_parent.push(component);
+        directories.push(helper_parent.clone());
+    }
+    for dir in directories {
         if !fs::symlink_metadata(dir)?.is_dir() {
             return Err(io::Error::other(
                 "signed app parent is not a real directory",
@@ -586,7 +577,7 @@ fn verified_owner_at(paths: AppPaths) -> io::Result<VerifiedOwner> {
         provenance.helpers.signing.sha256.into(),
         provenance.helpers.install.sha256.into(),
         "service-owner".into(),
-        paths.product.installer_product().into(),
+        paths.product.name().into(),
         "--root".into(),
         paths.root.clone().into_os_string(),
         "--lock-fd".into(),
@@ -600,7 +591,7 @@ fn verified_owner_at(paths: AppPaths) -> io::Result<VerifiedOwner> {
     )?;
     let owner: OwnerResult = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     if owner.schema_version != 1
-        || owner.product != paths.product.installer_product()
+        || owner.product != paths.product.name()
         || owner.mode != "signed-current"
         || owner.executable_path != paths.executable
         || owner.bundle_identifier != paths.bundle_identifier
@@ -694,14 +685,14 @@ fn source_command(
         "-B".into(),
         helper.into_os_string(),
         command.into(),
-        paths.product.installer_product().into(),
+        paths.product.name().into(),
         "--root".into(),
         paths.root.clone().into_os_string(),
     ];
     args.extend_from_slice(extra);
     let output = run_python(&args, &paths.home, None, Duration::from_secs(300))?;
     let result: ModeResult = serde_json::from_slice(&output).map_err(io::Error::other)?;
-    if result.schema_version != 1 || result.product != paths.product.installer_product() {
+    if result.schema_version != 1 || result.product != paths.product.name() {
         return Err(io::Error::other("unexpected app-installer result"));
     }
     Ok(result)
@@ -828,6 +819,27 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
+    fn hex_workspace_name_does_not_change_its_runtime_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join(".hex");
+        assert_eq!(
+            AppPaths::new(temp.path(), &workspace).unwrap().root,
+            workspace.join(".hex")
+        );
+    }
+
+    #[test]
+    fn codeintel_helper_parent_alias_is_rejected_before_execution() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::code_intel(temp.path(), CodeIntelProduct::Cli).unwrap();
+        fixture(&paths, "print(json.dumps(result))");
+        fs::rename(paths.root.join("libexec"), paths.root.join("helper-store")).unwrap();
+        symlink("helper-store", paths.root.join("libexec")).unwrap();
+        assert!(verified_owner_at(paths.clone()).is_err());
+        assert!(!paths.root.join("called").exists());
+    }
+
+    #[test]
     fn raw_legacy_is_distinct_from_every_signed_evidence_path() {
         let temp = tempfile::tempdir().unwrap();
         let paths = AppPaths::new(temp.path(), &temp.path().join("hex")).unwrap();
@@ -894,7 +906,7 @@ mod tests {
     }
 
     fn fixture(paths: &AppPaths, behavior: &str) {
-        fixture_for(paths, paths.product.installer_product(), behavior)
+        fixture_for(paths, paths.product.name(), behavior)
     }
 
     fn fixture_for(paths: &AppPaths, product: &str, behavior: &str) {
@@ -961,11 +973,7 @@ result={{'schema_version':1,'product':'{product}','mode':'signed-current','execu
         for product in [CodeIntelProduct::Cli, CodeIntelProduct::Daemon] {
             let temp = tempfile::tempdir().unwrap();
             let paths = AppPaths::code_intel(temp.path(), product).unwrap();
-            fixture_for(
-                &paths,
-                paths.product.installer_product(),
-                "print(json.dumps(result))",
-            );
+            fixture_for(&paths, paths.product.name(), "print(json.dumps(result))");
             let owner = verified_owner_at(paths.clone()).unwrap();
             assert!(owner.is_signed());
             assert_eq!(owner.executable(), paths.executable);
@@ -998,7 +1006,7 @@ result={{'schema_version':1,'product':'{product}','mode':'signed-current','execu
                 if defect == "product" {
                     "hex"
                 } else {
-                    paths.product.installer_product()
+                    paths.product.name()
                 },
                 behavior,
             );

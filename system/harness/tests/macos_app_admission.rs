@@ -38,11 +38,13 @@ fn install_signed_fixture(root: &Path) {
     )
     .unwrap();
     let reader_start = accepted_signer.find("def _unique_json_pairs").unwrap();
-    let reader_end = accepted_signer[reader_start..]
+    let reader_end = accepted_signer
+        .get(reader_start..)
+        .unwrap()
         .find("\ndef _sha256")
         .unwrap()
         + reader_start;
-    let policy_reader = &accepted_signer[reader_start..reader_end];
+    let policy_reader = accepted_signer.get(reader_start..reader_end).unwrap();
     let signer_source = format!(
         r#"import json, pathlib, shutil, sys, re
 from pathlib import Path
