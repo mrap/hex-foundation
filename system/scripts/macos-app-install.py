@@ -843,14 +843,14 @@ def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: 
             action = "would-restart" if dry_run and needs_change and (loaded or recovery_pending) else "would-update-stopped" if dry_run and needs_change else "loaded" if loaded else "stopped"
             return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": action, "service_needs_change": needs_change, "service_recovery_pending": recovery_pending, "published": False, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
         published = _atomic_service_plist(plist, desired, previous)
-        if not loaded and not recovery_pending:
-            return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "updated-stopped", "service_needs_change": True, "service_recovery_pending": recovery_pending, "published": published, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
-        planned_sha256 = hashlib.sha256(plistlib.dumps(dict(desired), fmt=plistlib.FMT_XML, sort_keys=False)).hexdigest()
-        if _service_plist_sha256(plist) != planned_sha256:
-            raise InstallError("published service plist differs from planned bytes", published=published)
-        pending_value = {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": planned_sha256, "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"], "phase": "reload-pending", "original_loaded": True}
-        _write_service_pending(paths, pending_value)
         try:
+            if not loaded and not recovery_pending:
+                return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "updated-stopped", "service_needs_change": True, "service_recovery_pending": recovery_pending, "published": published, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
+            planned_sha256 = hashlib.sha256(plistlib.dumps(dict(desired), fmt=plistlib.FMT_XML, sort_keys=False)).hexdigest()
+            if _service_plist_sha256(plist) != planned_sha256:
+                raise InstallError("published service plist differs from planned bytes", published=published)
+            pending_value = {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": planned_sha256, "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"], "phase": "reload-pending", "original_loaded": True}
+            _write_service_pending(paths, pending_value)
             if loaded:
                 returncode, _, stderr = launchctl(["bootout", domain])
                 if returncode:
@@ -868,6 +868,8 @@ def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: 
             if exc.published is None:
                 exc.published = True
             raise
+        except OSError as exc:
+            raise InstallError(f"service reconciliation failed after plist publication: {exc}", published=True) from exc
         return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "restarted" if loaded else "recovered", "service_needs_change": True, "service_recovery_pending": recovery_pending, "published": True, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
 
 

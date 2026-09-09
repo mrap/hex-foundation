@@ -1,4 +1,5 @@
 import fcntl
+import errno
 import io
 import importlib.util
 import json
@@ -256,6 +257,91 @@ class MacAppServiceTests(unittest.TestCase):
         self.plist.symlink_to(outside)
         with self.assertRaisesRegex(INSTALL.InstallError, "symlink"):
             INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=FakeLaunchctl(self.paths, False, ""), plist_path=self.plist)
+
+    def check_private_write_failure(self, prefix):
+        self.seed()
+        self.write_plist([str(self.paths.cli.absolute())], ["wrong.id"])
+        previous = self.plist.read_bytes()
+        launchctl = FakeLaunchctl(self.paths, True, str(self.paths.cli.absolute()))
+        write_private = INSTALL._write_private
+
+        def disk_full(path, data):
+            if path.name.startswith(prefix):
+                raise OSError(errno.ENOSPC, "fixture private write disk full")
+            return write_private(path, data)
+
+        with patch.object(INSTALL, "_write_private", side_effect=disk_full):
+            with self.assertRaisesRegex(INSTALL.InstallError, "fixture private write disk full") as error:
+                INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=launchctl, plist_path=self.plist)
+        self.assertIs(error.exception.published, True)
+        self.assertNotEqual(self.plist.read_bytes(), previous)
+        self.assertEqual(plistlib.loads(self.plist.read_bytes())["ProgramArguments"], [str(self.paths.executable.absolute())])
+        marker = INSTALL._service_pending_path(self.paths)
+        if "pending" in prefix:
+            self.assertFalse(marker.exists())
+            self.assertEqual([call[0] for call in launchctl.calls], ["print"])
+        else:
+            self.assertTrue(marker.exists())
+            self.assertEqual(json.loads(marker.read_text())["generation"], json.loads(self.paths.state.read_text())["generation"])
+            self.assertEqual([call[0] for call in launchctl.calls], ["print", "bootout", "bootstrap", "print"])
+            self.assertFalse(INSTALL._service_receipt_path(self.paths).exists())
+
+    def test_pending_private_write_oserror_reports_publication(self):
+        self.check_private_write_failure("SCIPD.service-reconcile-pending.json.tmp-")
+
+    def test_receipt_private_write_oserror_reports_publication(self):
+        self.check_private_write_failure("SCIPD.service-state.json.tmp-")
+
+    def test_postpublication_plist_read_oserror_reports_publication(self):
+        self.seed()
+        self.write_plist([str(self.paths.cli.absolute())], ["wrong.id"])
+        launchctl = FakeLaunchctl(self.paths, True, str(self.paths.cli.absolute()))
+        with patch.object(INSTALL, "_service_plist_sha256", side_effect=OSError(errno.EACCES, "fixture published plist read denied")):
+            with self.assertRaisesRegex(INSTALL.InstallError, "fixture published plist read denied") as error:
+                INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=launchctl, plist_path=self.plist)
+        self.assertIs(error.exception.published, True)
+        self.assertEqual(plistlib.loads(self.plist.read_bytes())["ProgramArguments"], [str(self.paths.executable.absolute())])
+        self.assertEqual([call[0] for call in launchctl.calls], ["print"])
+
+    def check_cli_private_write_failure(self, prefix):
+        self.seed()
+        self.write_plist([str(self.paths.cli.absolute())], ["wrong.id"])
+        central = self.base / "Library/Application Support/Hex/build-signing/policy.json"
+        central.parent.mkdir(parents=True)
+        shutil.copy2(self.policy, central)
+        # Actual CLI parser, service implementation and error serializer in a
+        # fresh process. Only crypto, launchctl and the failed write are fixtures.
+        bootstrap = """import importlib.util,sys,errno
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('service_cli_fixture',sys.argv[1])
+m=importlib.util.module_from_spec(spec);sys.modules[spec.name]=m;spec.loader.exec_module(m)
+a=m.INSTALL;root=Path(sys.argv[2]);prefix=sys.argv[3]
+paths=a.product_paths('code-intel-daemon',root)
+a.ProcessSigner=m.FakeSigner
+launchctl=m.FakeLaunchctl(paths,True,str(paths.cli.absolute()))
+a._launchctl_default=lambda argv,lock_fd=None:launchctl(argv)
+original=a._write_private
+def disk_full(path,data):
+    if path.name.startswith(prefix):raise OSError(errno.ENOSPC,'fixture private write disk full')
+    return original(path,data)
+a._write_private=disk_full
+raise SystemExit(a.main(['service-reconcile','code-intel-daemon','--root',str(root)]))
+"""
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", bootstrap, str(Path(__file__).resolve()), str(self.root), prefix], capture_output=True, text=True, timeout=10, env={"HOME": str(self.base), "PATH": "/usr/bin:/bin"})
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, "")
+        payload = json.loads(result.stderr)
+        self.assertIs(payload["published"], True)
+        self.assertIn("fixture private write disk full", payload["error"])
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(plistlib.loads(self.plist.read_bytes())["ProgramArguments"], [str(self.paths.executable.absolute())])
+        self.assertEqual(INSTALL._service_pending_path(self.paths).exists(), "pending" not in prefix)
+
+    def test_actual_cli_pending_write_oserror_has_partial_json(self):
+        self.check_cli_private_write_failure("SCIPD.service-reconcile-pending.json.tmp-")
+
+    def test_actual_cli_receipt_write_oserror_has_partial_json(self):
+        self.check_cli_private_write_failure("SCIPD.service-state.json.tmp-")
 
     def test_receipt_failure_reports_published(self):
         self.seed()
