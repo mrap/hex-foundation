@@ -13,6 +13,7 @@ preflight PRODUCT --root ROOT
 verify-current PRODUCT --root ROOT
 install PRODUCT --root ROOT --source PATH --version VERSION --source-revision REVISION --helper-source-revision FOUNDATION_REVISION
 service-reconcile PRODUCT --root ROOT
+compatibility-alias PRODUCT --root ROOT --hex-workspace WORKSPACE
 ```
 
 Configured and previously signed products stay on the common transaction path.
@@ -41,3 +42,10 @@ After both managed products publish, the caller invokes
 schema 1, the exact product, `signed-current`, a string `service_action`, and a
 boolean `service_needs_change`. The common operation keeps absent or stopped
 services stopped. Any reconciliation error fails the install.
+
+The caller also invokes the shared `compatibility-alias` operation for each
+managed product. It guards `.hex/bin/cq` and `.hex/bin/scipd` against stale raw
+executables shadowing the signed products. A correct alias is a no-op. A fixed
+raw entry is migrated through the common guarded operation. Foreign links and
+unexpected file types fail without overwrite. A current signed product and its
+alias do not trigger a rebuild or republish.

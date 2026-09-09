@@ -90,6 +90,21 @@ if not isinstance(value, dict) or value.get("schema_version") != 1 or value.get(
 ' "$product" <<< "$payload"
 }
 
+_macos_app_compatibility_alias() {
+    local product=$1 root=$2 workspace=$3 payload expected_name expected_alias expected_target
+    payload=$(/usr/bin/python3 -I -B "$MACOS_APP_INSTALLER" compatibility-alias "$product" --root "$root" --hex-workspace "$workspace") || return 1
+    expected_name=cq
+    [ "$product" = code-intel-daemon ] && expected_name=scipd
+    expected_alias="$workspace/.hex/bin/$expected_name"
+    expected_target="$root/bin/$expected_name"
+    /usr/bin/python3 -I -B -c '
+import json,sys
+value=json.loads(sys.stdin.read())
+if not isinstance(value, dict) or value.get("schema_version") != 1 or value.get("product") != sys.argv[1] or value.get("source_revision") in (None, "") or value.get("generation") in (None, "") or value.get("alias_path") != sys.argv[2] or value.get("target_path") != sys.argv[3] or value.get("action") not in {"current", "would-create", "would-migrate", "created", "migrated"} or type(value.get("changed")) is not bool or type(value.get("published")) is not bool:
+    raise SystemExit("invalid compatibility-alias response")
+' "$product" "$expected_alias" "$expected_target" <<< "$payload"
+}
+
 _macos_app_recheck() {
     local product=$1 root=$2 managed_at_start=$3
     if ! _macos_app_prepare "$product" "$root"; then
@@ -766,7 +781,7 @@ _harness_build_from_source() {
         # `hex upgrade` can verify binary freshness. Never fails the install (S6).
         write_hex_sha_sidecar
     fi
-    _code_intel_build_and_deploy "$hex_target_dir" "$codeintel_cli_managed_at_start" "$codeintel_daemon_managed_at_start" "$source_revision" || {
+    _code_intel_build_and_deploy "$hex_target_dir" "$codeintel_cli_managed_at_start" "$codeintel_daemon_managed_at_start" "$source_revision" "$codeintel_cli_mode_at_start" "$codeintel_daemon_mode_at_start" || {
         if [ "$MACOS_APP_MANAGED" = true ]; then
             echo "ERROR: code-intel companion transaction failed after Hex was installed; Hex is already installed" >&2
         fi
@@ -788,6 +803,7 @@ _code_intel_build_and_deploy() {
     fi
     local target_dir="${1:-${CARGO_TARGET_DIR:-$TARGET_DIR/.hex/cargo-target}}"
     local cli_managed="${2:-false}" daemon_managed="${3:-false}" source_revision="${4:-}"
+    local cli_mode="${5:-}" daemon_mode="${6:-}"
     local version
     version=$(/usr/bin/python3 -I -B -c 'import re,sys; text=open(sys.argv[1]).read(); match=re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.M); raise SystemExit("missing code-intel version") if not match else print(match.group(1))' "$SCRIPT_DIR/system/code-intel/Cargo.toml") || return 1
     if [ "$cli_managed" = true ] || [ "$daemon_managed" = true ]; then
@@ -795,6 +811,16 @@ _code_intel_build_and_deploy() {
             echo "ERROR: code-intel products have inconsistent managed state; refusing partial publication" >&2
             return 1
         }
+        if [ "$cli_mode" = signed-current ]; then
+            _macos_app_compatibility_alias code-intel-cli "$HOME/.codeintel" "$TARGET_DIR" || return 1
+        fi
+        if [ "$daemon_mode" = signed-current ]; then
+            _macos_app_compatibility_alias code-intel-daemon "$HOME/.codeintel" "$TARGET_DIR" || return 1
+        fi
+        if [ "$cli_mode" = signed-current ] && [ "$daemon_mode" = signed-current ]; then
+            _macos_app_service_reconcile code-intel-daemon "$HOME/.codeintel" || return 1
+            return 0
+        fi
     fi
     echo "  Building code-intel binaries (cq, scipd)..."
     if ! ( cd "$SCRIPT_DIR/system/code-intel" && CARGO_TARGET_DIR="$target_dir" cargo build --release 2>&1 ); then
@@ -815,7 +841,10 @@ _code_intel_build_and_deploy() {
         local product=code-intel-cli root="$HOME/.codeintel"
         [ "$name" = scipd ] && product=code-intel-daemon
         if [ "$cli_managed" = true ]; then
-            _macos_app_install "$product" "$root" "$ci_bin" "$version" "$source_revision" "$source_revision" || return 1
+            if { [ "$name" = cq ] && [ "$cli_mode" != signed-current ]; } || { [ "$name" = scipd ] && [ "$daemon_mode" != signed-current ]; }; then
+                _macos_app_install "$product" "$root" "$ci_bin" "$version" "$source_revision" "$source_revision" || return 1
+                _macos_app_compatibility_alias "$product" "$root" "$TARGET_DIR" || return 1
+            fi
         else
             mkdir -p "$TARGET_DIR/.hex/bin"
             cp "$ci_bin" "$TARGET_DIR/.hex/bin/$name"

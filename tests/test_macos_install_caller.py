@@ -387,6 +387,7 @@ def test_codeintel_managed_build_uses_exact_artifacts_and_reconcile() -> None:
             "args=sys.argv[1:]\n"
             "with open(os.environ['CALL_LOG'], 'a') as stream: stream.write(json.dumps(args)+'\\n')\n"
             "if args[0] == 'install' and os.environ.get('INSTALL_FAIL') == args[1]: raise SystemExit(17)\n"
+            "if args[0] == 'compatibility-alias': print(json.dumps({'schema_version':1,'product':args[1],'source_revision':'a'*40,'generation':'g','alias_path':os.environ['HEX_WORKSPACE']+'/.hex/bin/'+('scipd' if args[1]=='code-intel-daemon' else 'cq'),'target_path':args[3]+'/bin/'+('scipd' if args[1]=='code-intel-daemon' else 'cq'),'action':'current','changed':False,'published':False}))\n"
             "if args[0] == 'service-reconcile' and os.environ.get('RECONCILE_BAD') == '1': print('{}'); raise SystemExit(0)\n"
             "if args[0] == 'service-reconcile': print(json.dumps({'schema_version':1,'product':args[1],'mode':'signed-current','service_action':'unchanged','service_needs_change':False}))\n"
             "else: print(json.dumps({'schema_version':1,'product':args[1],'mode':'signed-current'}))\n",
@@ -417,6 +418,7 @@ test ! -e "$TEST_HEX/.hex/bin/scipd"
             "TEST_TARGET_DIR": str(target),
             "TEST_HELPER": str(helper),
             "TEST_HEX": str(temp / "hex"),
+            "HEX_WORKSPACE": str(temp / "hex"),
             "CALL_LOG": str(log),
             "TEST_REVISION": source_revision,
         }
@@ -425,7 +427,9 @@ test ! -e "$TEST_HEX/.hex/bin/scipd"
         calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
         assert [call[0:2] for call in calls] == [
             ["install", "code-intel-cli"],
+            ["compatibility-alias", "code-intel-cli"],
             ["install", "code-intel-daemon"],
+            ["compatibility-alias", "code-intel-daemon"],
             ["service-reconcile", "code-intel-daemon"],
         ]
         assert calls[0][calls[0].index("--version") + 1] == "2.3.4"
