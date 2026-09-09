@@ -1,4 +1,5 @@
 import fcntl
+import io
 import importlib.util
 import json
 import os
@@ -7,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -18,6 +20,9 @@ spec.loader.exec_module(INSTALL)
 
 
 class FakeSigner:
+    def bind_owner(self, paths, lock_fd):
+        return None
+
     def _result(self):
         return {"identifier": "com.mrap.hex.scipd", "version": "0.1.0", "team_id": "TEAM123456", "certificate_sha1": "A" * 40, "designated_requirements": {"arm64": "anchor apple generic"}, "mach_o_uuids": {"arm64": "11111111-1111-1111-1111-111111111111"}}
 
@@ -36,11 +41,12 @@ class FakeSigner:
 
 
 class FakeLaunchctl:
-    def __init__(self, paths, loaded, program, fail_restart=False):
+    def __init__(self, paths, loaded, program, fail_restart=False, fail_bootstrap=False):
         self.paths = paths
         self.loaded = loaded
         self.program = program
         self.fail_restart = fail_restart
+        self.fail_bootstrap = fail_bootstrap
         self.calls = []
         self.lock_held = []
 
@@ -60,11 +66,16 @@ class FakeLaunchctl:
             if not self.loaded:
                 return 1, "", "Could not find service"
             return 0, f"program = {self.program}\n", ""
-        if argv[0] == "kickstart":
+        if argv[0] == "bootout":
             if self.fail_restart:
-                return 1, "", "kickstart failed"
+                return 1, "", "bootout failed"
+            self.loaded = False
+            return 0, "", ""
+        if argv[0] == "bootstrap":
+            if self.fail_restart or self.fail_bootstrap:
+                return 1, "", "bootstrap failed"
             self.loaded = True
-            self.program = str(self.paths.cli.absolute())
+            self.program = str(self.paths.executable.absolute())
             return 0, "", ""
         raise AssertionError(argv)
 
@@ -109,9 +120,10 @@ class MacAppServiceTests(unittest.TestCase):
         result = INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=launchctl, plist_path=self.plist)
         self.assertEqual(result["service_action"], "restarted")
         self.assertTrue(all(launchctl.lock_held))
-        self.assertIn(["kickstart", "-k", f"gui/{os.getuid()}/{INSTALL.SCIPD_LAUNCHD_LABEL}"], launchctl.calls)
+        self.assertIn(["bootout", f"gui/{os.getuid()}/{INSTALL.SCIPD_LAUNCHD_LABEL}"], launchctl.calls)
+        self.assertIn(["bootstrap", f"gui/{os.getuid()}", str(self.plist.absolute())], launchctl.calls)
         value = plistlib.loads(self.plist.read_bytes())
-        self.assertEqual(value["ProgramArguments"], [str(self.paths.cli.absolute())])
+        self.assertEqual(value["ProgramArguments"], [str(self.paths.executable.absolute())])
         self.assertEqual(value["AssociatedBundleIdentifiers"], ["com.mrap.hex.scipd"])
         self.assertEqual(value["EnvironmentVariables"], {"PATH": "/usr/bin"})
 
@@ -156,9 +168,99 @@ class MacAppServiceTests(unittest.TestCase):
         self.seed()
         self.write_plist([str(self.paths.executable.absolute())])
         launchctl = FakeLaunchctl(self.paths, True, str(self.paths.executable.absolute()), fail_restart=True)
-        with self.assertRaisesRegex(INSTALL.InstallError, "restart failed") as context:
+        with self.assertRaisesRegex(INSTALL.InstallError, "bootout failed") as context:
             INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=launchctl, plist_path=self.plist)
         self.assertTrue(context.exception.published)
+        self.assertTrue((self.paths.root / "SCIPD.service-reconcile-pending.json").exists())
+
+    def test_bootstrap_failure_leaves_pending_marker(self):
+        self.seed()
+        self.write_plist([str(self.paths.executable.absolute())], ["wrong.id"])
+        launchctl = FakeLaunchctl(self.paths, True, str(self.paths.executable.absolute()), fail_bootstrap=True)
+        with self.assertRaisesRegex(INSTALL.InstallError, "bootstrap failed") as context:
+            INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=launchctl, plist_path=self.plist)
+        self.assertTrue(context.exception.published)
+        marker = json.loads((self.paths.root / "SCIPD.service-reconcile-pending.json").read_text(encoding="utf-8"))
+        self.assertEqual(marker["phase"], "reload-pending")
+
+    def test_generation_change_forces_reload(self):
+        self.seed()
+        self.write_plist([str(self.paths.executable.absolute())], ["com.mrap.hex.scipd"])
+        first = FakeLaunchctl(self.paths, True, str(self.paths.executable.absolute()))
+        INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=first, plist_path=self.plist)
+        second = FakeLaunchctl(self.paths, True, str(self.paths.executable.absolute()))
+        unchanged = INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=second, plist_path=self.plist)
+        self.assertEqual(unchanged["service_action"], "loaded")
+        state = json.loads(self.paths.state.read_text(encoding="utf-8"))
+        state["generation"] = "new-generation"
+        self.paths.state.write_text(json.dumps(state), encoding="utf-8")
+        third = FakeLaunchctl(self.paths, True, str(self.paths.executable.absolute()))
+        changed = INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=third, plist_path=self.plist)
+        self.assertEqual(changed["service_action"], "restarted")
+        self.assertIn(["bootout", f"gui/{os.getuid()}/{INSTALL.SCIPD_LAUNCHD_LABEL}"], third.calls)
+
+    def test_oversized_and_symlink_plists_fail_closed(self):
+        self.seed()
+        self.plist.write_bytes(b"x" * (INSTALL.MAX_PLIST_BYTES + 1))
+        with self.assertRaisesRegex(INSTALL.InstallError, "too large"):
+            INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=FakeLaunchctl(self.paths, False, ""), plist_path=self.plist)
+        self.plist.unlink()
+        outside = self.base / "outside.plist"
+        outside.write_bytes(b"not owned")
+        self.plist.symlink_to(outside)
+        with self.assertRaisesRegex(INSTALL.InstallError, "symlink"):
+            INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=FakeLaunchctl(self.paths, False, ""), plist_path=self.plist)
+
+    def test_receipt_failure_reports_published(self):
+        self.seed()
+        self.write_plist([str(self.paths.executable.absolute())], ["wrong.id"])
+        launchctl = FakeLaunchctl(self.paths, True, str(self.paths.executable.absolute()))
+        with patch.object(INSTALL, "_write_service_receipt", side_effect=INSTALL.InstallError("receipt disk full", published=True)):
+            with self.assertRaisesRegex(INSTALL.InstallError, "receipt disk full") as context:
+                INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=launchctl, plist_path=self.plist)
+        self.assertTrue(context.exception.published)
+        self.assertEqual(plistlib.loads(self.plist.read_bytes())["ProgramArguments"], [str(self.paths.executable.absolute())])
+
+    def test_actual_copied_cli_uses_injected_boundaries(self):
+        fixture = self.base / "fixture"
+        fixture.mkdir()
+        copied_app = fixture / "macos-app-install.py"
+        copied_signer = fixture / "macos-signing.py"
+        shutil.copy2(SOURCE, copied_app)
+        shutil.copy2(Path(__file__).parents[1] / "system/scripts/macos-signing.py", copied_signer)
+        copied_spec = importlib.util.spec_from_file_location("copied_app_install_cli", copied_app)
+        copied = importlib.util.module_from_spec(copied_spec)
+        sys.modules[copied_spec.name] = copied
+        copied_spec.loader.exec_module(copied)
+        home = self.base / "home"
+        policy = home / "Library/Application Support/Hex/build-signing/policy.json"
+        policy.parent.mkdir(parents=True)
+        policy.write_text(json.dumps({"schema_version": 1, "certificate_sha1": "A" * 40, "team_id": "TEAM123456"}), encoding="utf-8")
+        root = home / ".codeintel"
+        helper_sources = {}
+        helper_provenance = {}
+        for name in ("macos-signing.py", "macos-app-install.py"):
+            path = fixture / name
+            helper_sources[name] = path
+            helper_provenance[name] = {"sha256": copied._sha256(path), "source_revision": "f" * 40}
+        source = fixture / "scipd"
+        source.write_bytes(b"scipd")
+        copied.install("code-intel-daemon", root, source, self.signer, policy_path=policy, helper_provenance=helper_provenance, helper_sources=helper_sources, source_revision="e" * 40, version="0.1.0")
+        paths = copied.product_paths("code-intel-daemon", root)
+        plist = home / "Library/LaunchAgents/com.hex.scipd.plist"
+        plist.parent.mkdir(parents=True)
+        plist.write_bytes(plistlib.dumps({"Label": copied.SCIPD_LAUNCHD_LABEL, "ProgramArguments": [str(paths.executable.absolute())]}, sort_keys=False))
+        launchctl = FakeLaunchctl(paths, False, "")
+        class InjectedSigner(FakeSigner):
+            pass
+        copied.ProcessSigner = InjectedSigner
+        copied._launchctl_default = launchctl
+        output = io.StringIO()
+        with patch.dict(os.environ, {"HOME": str(home)}), patch("sys.stdout", output):
+            self.assertEqual(copied.main(["service-reconcile", "code-intel-daemon", "--root", str(root)]), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["product"], "code-intel-daemon")
+        self.assertEqual(result["service_action"], "updated-stopped")
 
     def test_cli_product_is_rejected(self):
         with self.assertRaisesRegex(INSTALL.InstallError, "only code-intel-daemon"):

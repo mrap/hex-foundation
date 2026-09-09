@@ -44,6 +44,7 @@ POLICY_RELATIVE = Path("Library/Application Support/Hex/build-signing/policy.jso
 MAX_JSON_BYTES = 64 * 1024
 MAX_HELPER_BYTES = 1024 * 1024
 MAX_PLIST_BYTES = 64 * 1024
+MAX_LAUNCHCTL_BYTES = 64 * 1024
 SCIPD_LAUNCHD_LABEL = "com.hex.scipd"
 
 
@@ -589,11 +590,49 @@ def _read_service_plist(path: Path) -> tuple[Optional[dict[str, Any]], dict[str,
 
 
 def _launchctl_default(argv: list[str], timeout: float = 5.0) -> tuple[int, str, str]:
+    command = ["/bin/launchctl", *argv]
     try:
-        result = subprocess.run(["/bin/launchctl", *argv], capture_output=True, text=True, timeout=timeout, check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise InstallError(f"launchctl unavailable or timed out: {exc}") from exc
-    return result.returncode, result.stdout, result.stderr
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as exc:
+        raise InstallError(f"launchctl unavailable: {exc}") from exc
+    streams = (process.stdout, process.stderr)
+    buffers = [bytearray(), bytearray()]
+    deadline = time.monotonic() + timeout
+    try:
+        with selectors.DefaultSelector() as selector:
+            for index, stream in enumerate(streams):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, index)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise InstallError("launchctl timed out")
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fd, min(65536, MAX_LAUNCHCTL_BYTES + 1 - len(buffers[key.data])))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                    else:
+                        buffers[key.data].extend(chunk)
+                        if len(buffers[key.data]) > MAX_LAUNCHCTL_BYTES:
+                            raise InstallError("launchctl output is too large")
+        process.wait(timeout=max(0.001, deadline - time.monotonic()))
+    except BaseException as exc:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if isinstance(exc, InstallError):
+            raise
+        raise InstallError(f"launchctl failed: {exc}") from exc
+    finally:
+        for stream in streams:
+            stream.close()
+    return process.returncode, buffers[0].decode("utf-8", "replace"), buffers[1].decode("utf-8", "replace")
 
 
 def _launchctl_loaded(launchctl: Callable[[list[str]], tuple[int, str, str]], domain: str) -> tuple[bool, str]:
@@ -606,7 +645,14 @@ def _launchctl_loaded(launchctl: Callable[[list[str]], tuple[int, str, str]], do
     raise InstallError(f"launchctl print failed ({returncode}): {stderr.strip()[-500:]}")
 
 
-def _atomic_service_plist(path: Path, value: Mapping[str, Any], previous: Mapping[str, Any]) -> None:
+def _launchctl_program(output: str) -> Optional[str]:
+    values = [line.removeprefix("program = ") for line in output.splitlines() if line.startswith("program = ")]
+    if len(values) != 1 or not values[0]:
+        raise InstallError("launchctl print lacks one exact program field")
+    return values[0]
+
+
+def _atomic_service_plist(path: Path, value: Mapping[str, Any], previous: Mapping[str, Any]) -> bool:
     if _entry_identity(path) != dict(previous):
         raise InstallError("service plist changed before publication")
     parent = path.parent
@@ -614,19 +660,101 @@ def _atomic_service_plist(path: Path, value: Mapping[str, Any], previous: Mappin
         raise InstallError(f"service plist parent is missing or aliased: {parent}")
     temporary = parent / f".{path.name}.candidate-{secrets.token_hex(8)}"
     _write_private(temporary, plistlib.dumps(dict(value), fmt=plistlib.FMT_XML, sort_keys=False))
+    published = False
     try:
         if _entry_identity(path) != dict(previous):
             raise InstallError("service plist changed before publication")
         os.replace(temporary, path)
+        published = True
         fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
         try:
             os.fsync(fd)
         finally:
             os.close(fd)
-    except BaseException:
+    except BaseException as exc:
         if temporary.exists():
             temporary.unlink()
-        raise
+        if isinstance(exc, InstallError):
+            raise InstallError(str(exc), published=published) from exc
+        raise InstallError(f"service plist publication failed: {exc}", published=published) from exc
+    return published
+
+
+def _service_receipt_path(paths: Paths) -> Path:
+    return paths.root / "SCIPD.service-state.json"
+
+
+def _service_pending_path(paths: Paths) -> Path:
+    return paths.root / "SCIPD.service-reconcile-pending.json"
+
+
+def _read_service_receipt(paths: Paths) -> Optional[dict[str, Any]]:
+    path = _service_receipt_path(paths)
+    if not os.path.lexists(path):
+        return None
+    return _read_json(path, "service state receipt")
+
+
+def _read_service_pending(paths: Paths) -> Optional[dict[str, Any]]:
+    path = _service_pending_path(paths)
+    if not os.path.lexists(path):
+        return None
+    return _read_json(path, "service reconcile pending marker")
+
+
+def _write_service_pending(paths: Paths, value: Mapping[str, Any]) -> None:
+    path = _service_pending_path(paths)
+    if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
+        raise InstallError(f"service pending marker is not a regular file: {path}", published=True)
+    temporary = path.with_name(path.name + f".tmp-{secrets.token_hex(8)}")
+    _write_private(temporary, (json.dumps(dict(value), sort_keys=True) + "\n").encode())
+    try:
+        os.replace(temporary, path)
+        fd = os.open(paths.root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException as exc:
+        if temporary.exists():
+            temporary.unlink()
+        raise InstallError(f"service pending marker publication failed: {exc}", published=True) from exc
+
+
+def _clear_service_pending(paths: Paths) -> None:
+    path = _service_pending_path(paths)
+    if not os.path.lexists(path):
+        return
+    if path.is_symlink() or not path.is_file():
+        raise InstallError(f"service pending marker is not a regular file: {path}", published=True)
+    try:
+        path.unlink()
+        fd = os.open(paths.root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException as exc:
+        raise InstallError(f"service pending marker removal failed: {exc}", published=True) from exc
+
+
+def _write_service_receipt(paths: Paths, value: Mapping[str, Any]) -> None:
+    path = _service_receipt_path(paths)
+    if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
+        raise InstallError(f"service state receipt is not a regular file: {path}", published=True)
+    temporary = path.with_name(path.name + f".tmp-{secrets.token_hex(8)}")
+    _write_private(temporary, (json.dumps(dict(value), sort_keys=True) + "\n").encode())
+    try:
+        os.replace(temporary, path)
+        fd = os.open(paths.root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException as exc:
+        if temporary.exists():
+            temporary.unlink()
+        raise InstallError(f"service state receipt publication failed: {exc}", published=True) from exc
 
 
 def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: Optional[Path] = None, dry_run: bool = False, launchctl: Optional[Callable[[list[str]], tuple[int, str, str]]] = None, plist_path: Optional[Path] = None) -> dict[str, Any]:
@@ -642,6 +770,7 @@ def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: 
             signer.bind_owner(paths, lock_fd)
         owner = service_owner(product, root, signer, policy_path=policy_path, lock_held=True)
         loaded, launch_output = _launchctl_loaded(launchctl, domain)
+        live_program = _launchctl_program(launch_output) if loaded else None
         current, previous = _read_service_plist(plist)
         if current is None:
             if loaded:
@@ -657,21 +786,32 @@ def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: 
         if not isinstance(associated, list) or any(not isinstance(item, str) for item in associated):
             raise InstallError("service plist has invalid AssociatedBundleIdentifiers")
         desired = dict(current)
-        desired["ProgramArguments"] = [str(paths.cli.absolute())]
+        desired["ProgramArguments"] = [owner["executable_path"]]
         desired["AssociatedBundleIdentifiers"] = [owner["bundle_identifier"]]
-        needs_change = desired != current or (loaded and str(paths.cli.absolute()) not in launch_output)
+        receipt = _read_service_receipt(paths)
+        pending = _read_service_pending(paths)
+        receipt_matches = receipt == {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": hashlib.sha256(plist.read_bytes()).hexdigest(), "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"]}
+        needs_change = desired != current or (loaded and live_program != owner["executable_path"]) or (loaded and not receipt_matches) or (loaded and pending is not None)
         if dry_run or not needs_change:
             action = "would-restart" if dry_run and loaded and needs_change else "would-update-stopped" if dry_run and needs_change else "loaded" if loaded else "stopped"
             return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": action, "service_needs_change": needs_change, "published": False, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
-        _atomic_service_plist(plist, desired, previous)
+        published = _atomic_service_plist(plist, desired, previous)
         if not loaded:
-            return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "updated-stopped", "service_needs_change": True, "published": True, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
-        returncode, _, stderr = launchctl(["kickstart", "-k", domain])
+            return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "updated-stopped", "service_needs_change": True, "published": published, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
+        pending_value = {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": hashlib.sha256(plist.read_bytes()).hexdigest(), "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"], "phase": "reload-pending"}
+        _write_service_pending(paths, pending_value)
+        returncode, _, stderr = launchctl(["bootout", domain])
         if returncode:
-            raise InstallError(f"service restart failed after plist publication: {stderr.strip()[-500:]}", published=True)
+            raise InstallError(f"service bootout failed after plist publication: {stderr.strip()[-500:]}", published=True)
+        returncode, _, stderr = launchctl(["bootstrap", f"gui/{os.getuid()}", str(plist.absolute())])
+        if returncode:
+            raise InstallError(f"service bootstrap failed after plist publication: {stderr.strip()[-500:]}", published=True)
         verified_loaded, verified_output = _launchctl_loaded(launchctl, domain)
-        if not verified_loaded or str(paths.cli.absolute()) not in verified_output:
-            raise InstallError("service restart did not load the verified scipd executable", published=True)
+        if not verified_loaded or _launchctl_program(verified_output) != owner["executable_path"]:
+            raise InstallError("service reload did not load the verified scipd executable", published=True)
+        receipt_value = {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": hashlib.sha256(plist.read_bytes()).hexdigest(), "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"]}
+        _write_service_receipt(paths, receipt_value)
+        _clear_service_pending(paths)
         return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "restarted", "service_needs_change": True, "published": True, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
 
 
