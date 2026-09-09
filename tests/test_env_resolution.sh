@@ -128,8 +128,8 @@ if [ -n "$HEX_BIN" ]; then
   else
     assert_fail "env.sh did not apply the GWS default or private-secret rule: $GWS_OUT"
   fi
-  if echo "$GWS_OUT" | grep -q 'ERROR: refusing to load secret file shared.env: group or other permissions are set'; then
-    assert_pass "env.sh rejects group-readable secrets without exposing their path"
+  if echo "$GWS_OUT" | grep -q 'ERROR: refusing to load secret file: group or other permissions are set'; then
+    assert_pass "env.sh rejects group-readable secrets without exposing their identity"
   else
     assert_fail "env.sh did not report the rejected secret file: $GWS_OUT"
   fi
@@ -141,6 +141,15 @@ if [ -n "$HEX_BIN" ]; then
     assert_pass "env.sh preserves an explicit GWS backend"
   else
     assert_fail "env.sh overwrote an explicit GWS backend: $GWS_OVERRIDE"
+  fi
+
+  GWS_EMPTY=$(GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND= \
+    HEX_DIR="$INSTALL_DIR" PATH="$(dirname "$HEX_BIN"):$PATH" \
+    bash -c "source '$INSTALL_DIR/.hex/scripts/env.sh'; printf '<%s>' \"\$GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND\"" 2>/dev/null)
+  if [ "$GWS_EMPTY" = "<>" ]; then
+    assert_pass "env.sh preserves an explicitly empty GWS backend"
+  else
+    assert_fail "env.sh overwrote an explicitly empty GWS backend: $GWS_EMPTY"
   fi
 else
   assert_fail "hex binary not available — cannot test GWS and secret loading"

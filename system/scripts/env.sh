@@ -26,13 +26,13 @@ if [[ -z "${GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND+x}" ]]; then
 fi
 
 # Load only private *.env secret files. Do not disclose paths or values when rejecting
-# a file: the basename is enough to repair its permissions without exposing secrets.
+# a file so logs cannot reveal secret-file identity.
 if [[ -d "$HEX_DIR/.hex/secrets" ]]; then
   for _sf in "$HEX_DIR"/.hex/secrets/*.env; do
     [[ -e "$_sf" ]] || continue
     _mode="$(stat -f '%Lp' "$_sf" 2>/dev/null || stat -c '%a' "$_sf" 2>/dev/null)"
     if [[ -z "$_mode" ]] || (( (8#$_mode & 0077) != 0 )); then
-      echo "ERROR: refusing to load secret file $(basename "$_sf"): group or other permissions are set" >&2
+      echo "ERROR: refusing to load secret file: group or other permissions are set" >&2
       continue
     fi
     [[ -r "$_sf" ]] && source "$_sf"
