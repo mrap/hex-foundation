@@ -28,6 +28,8 @@ DWARFDUMP = "/usr/bin/dwarfdump"
 PRODUCTS = {
     "hex": {"identifier": "com.mrap.hex", "executable": "hex", "bundle": "Hex.app", "name": "Hex"},
     "boi": {"identifier": "com.mrap.boi", "executable": "boi", "bundle": "BOI.app", "name": "BOI"},
+    "hex.scipd": {"identifier": "com.mrap.hex.scipd", "executable": "scipd", "bundle": "SCIPD.app", "name": "SCIPD"},
+    "hex.cq": {"identifier": "com.mrap.hex.cq", "executable": "cq", "bundle": "CQ.app", "name": "CQ"},
 }
 POLICY_KEYS = {"schema_version", "certificate_sha1", "team_id", "keychain"}
 FINGERPRINT_RE = re.compile(r"^[0-9A-Fa-f]{40}$")

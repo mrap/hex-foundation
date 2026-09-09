@@ -1,7 +1,8 @@
 # macOS app install transaction
 
-`system/scripts/macos-app-install.py` owns filesystem publication for the Hex
-and BOI app bundles. It does not sign, verify signatures, or invoke services.
+`system/scripts/macos-app-install.py` owns filesystem publication for the Hex,
+BOI, `scipd`, and `cq` app bundles. It does not sign, verify signatures, or
+invoke services.
 Callers inject the accepted signer boundary.
 
 ## Public API
@@ -37,6 +38,14 @@ Product state is separate:
 
 - BOI: `~/.boi/BOI.app.install-state.json`
 - Hex: `$HEX_DIR/.hex/Hex.app.install-state.json`
+- scipd: `~/.codeintel/SCIPD.app.install-state.json`
+- cq: `~/.codeintel/CQ.app.install-state.json`
+
+The code-intel products share the `~/.codeintel` root but use independent
+compatibility paths and helper directories:
+
+- scipd: `bin/scipd`, `libexec/scipd`, bundle ID `com.mrap.hex.scipd`
+- cq: `bin/cq`, `libexec/cq`, bundle ID `com.mrap.hex.cq`
 
 Per-product transaction names are fixed under the product root:
 
@@ -56,8 +65,8 @@ and executable paths, compatibility path, Team ID, certificate fingerprint,
 designated requirements, Mach-O UUIDs, app and executable hashes, generation,
 source revision (the caller's Git SHA), signer helper hash, a `helpers` map containing both
 `macos-signing.py` and `macos-app-install.py` hashes and source
-revisions (their paths are fixed under `libexec`), previous compatibility identity, and transaction ID. It contains no
-secrets.
+revisions (their paths are fixed under the product's `libexec` directory),
+previous compatibility identity, and transaction ID. It contains no secrets.
 
 The supported modes are `empty`, `legacy-raw`, `configured-legacy`,
 `signed-current`, `signed-policy-missing`, and `ambiguous`. A known signed

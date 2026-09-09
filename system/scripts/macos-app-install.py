@@ -149,10 +149,12 @@ class ProcessSigner:
         return value
 
     def stage(self, source: Path, product: str, policy: Path, candidate: Path, receipt: Path, *, version: str = "1.0.0") -> Mapping[str, Any]:
-        return self._run([str(source), product, str(policy), str(candidate), "--version", version, "--receipt", str(receipt)])
+        signer_product = {"code-intel-daemon": "hex.scipd", "code-intel-cli": "hex.cq"}.get(product, product)
+        return self._run([str(source), signer_product, str(policy), str(candidate), "--version", version, "--receipt", str(receipt)])
 
     def verify_installed(self, bundle: Path, product: str, policy: Optional[Path], expected: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
-        args = ["verify-installed", str(bundle), product]
+        signer_product = {"code-intel-daemon": "hex.scipd", "code-intel-cli": "hex.cq"}.get(product, product)
+        args = ["verify-installed", str(bundle), signer_product]
         if policy is not None:
             args.append(str(policy))
         return self._run(args)
@@ -167,11 +169,14 @@ class Product:
     cli_relative: Path
     alias_relative: Optional[Path]
     state_name: str
+    helper_relative: Path
 
 
 PRODUCTS = {
-    "hex": Product("hex", "Hex.app", "hex", "com.mrap.hex", Path("bin/hex"), Path("bin/hex-agent"), "Hex.app.install-state.json"),
-    "boi": Product("boi", "BOI.app", "boi", "com.mrap.boi", Path("bin/boi"), None, "BOI.app.install-state.json"),
+    "hex": Product("hex", "Hex.app", "hex", "com.mrap.hex", Path("bin/hex"), Path("bin/hex-agent"), "Hex.app.install-state.json", Path("libexec")),
+    "boi": Product("boi", "BOI.app", "boi", "com.mrap.boi", Path("bin/boi"), None, "BOI.app.install-state.json", Path("libexec")),
+    "code-intel-daemon": Product("code-intel-daemon", "SCIPD.app", "scipd", "com.mrap.hex.scipd", Path("bin/scipd"), None, "SCIPD.app.install-state.json", Path("libexec/scipd")),
+    "code-intel-cli": Product("code-intel-cli", "CQ.app", "cq", "com.mrap.hex.cq", Path("bin/cq"), None, "CQ.app.install-state.json", Path("libexec/cq")),
 }
 
 
@@ -186,6 +191,7 @@ class Paths:
     state: Path
     lock: Path
     journal: Path
+    helper_dir: Path
 
 
 def central_policy_path(home: Optional[Path] = None) -> Path:
@@ -198,6 +204,8 @@ def product_paths(product: str, root: Path) -> Paths:
     item = PRODUCTS.get(product)
     if item is None:
         raise InstallError(f"unknown product: {product}")
+    if item.helper_relative.is_absolute() or ".." in item.helper_relative.parts:
+        raise InstallError(f"helper path escapes product root: {product}")
     root = root.absolute()
     app = root / item.app_name
     return Paths(
@@ -210,6 +218,7 @@ def product_paths(product: str, root: Path) -> Paths:
         state=root / item.state_name,
         lock=root / f".{product}.app-install.lock",
         journal=root / f".{product}.app-install.journal.json",
+        helper_dir=root / item.helper_relative,
     )
 
 
@@ -514,9 +523,18 @@ def _validate_state(paths: Paths, product: Product, state: Mapping[str, Any]) ->
 
 def _validate_current_helpers(paths: Paths, helpers: Mapping[str, Any]) -> None:
     for name, helper in helpers.items():
-        path = paths.root / "libexec" / name
+        path = paths.helper_dir / name
         if not path.is_file() or path.is_symlink() or _sha256(path) != helper["sha256"]:
             raise InstallError(f"installed helper does not match state: {name}")
+
+
+def _validate_helper_dir(paths: Paths) -> None:
+    relative = paths.helper_dir.relative_to(paths.root)
+    current = paths.root
+    for component in relative.parts:
+        current /= component
+        if os.path.lexists(current) and (current.is_symlink() or not current.is_dir()):
+            raise InstallError(f"helper directory is missing or aliased: {current}")
 
 
 def _verify_matches_state(state: Mapping[str, Any], verified: Mapping[str, Any], product: Product) -> None:
@@ -586,6 +604,7 @@ def service_owner(product: str, root: Path, signer: Signer, *, policy_path: Opti
         raise InstallError("agent compatibility path does not point to the installed executable")
     state = _read_json(paths.state, "state record")
     _validate_state(paths, item, state)
+    _validate_helper_dir(paths)
     _validate_current_helpers(paths, state["helpers"])
     policy = policy_path or central_policy_path()
     if _policy_mode(policy) != "configured":
@@ -596,7 +615,7 @@ def service_owner(product: str, root: Path, signer: Signer, *, policy_path: Opti
         raise InstallError("installed verifier result does not match state: version")
     if _tree_sha256(paths.app) != state["bundle_sha256"] or _sha256(paths.executable) != state["executable_sha256"]:
         raise InstallError("installed app hashes differ from state")
-    return {"schema_version": STATE_SCHEMA_VERSION, "product": product, "mode": "signed-current", "policy_available": True, "bundle_path": str(paths.app.absolute()), "executable_path": str(paths.executable.absolute()), "compatibility_path": str(paths.cli.absolute()), "bundle_identifier": item.bundle_identifier, "generation": state["generation"], "version": state["version"], "team_id": state["team_id"], "certificate_sha1": state["certificate_sha1"], "designated_requirements": state["designated_requirements"], "mach_o_uuids": state["mach_o_uuids"], "bundle_sha256": state["bundle_sha256"], "executable_sha256": state["executable_sha256"], "helpers": state["helpers"], "source_revision": state["source_revision"]}
+    return {"schema_version": STATE_SCHEMA_VERSION, "product": product, "mode": "signed-current", "policy_available": True, "bundle_path": str(paths.app.absolute()), "executable_path": str(paths.executable.absolute()), "compatibility_path": str(paths.cli.absolute()), "helper_path": str(paths.helper_dir.absolute()), "bundle_identifier": item.bundle_identifier, "generation": state["generation"], "version": state["version"], "team_id": state["team_id"], "certificate_sha1": state["certificate_sha1"], "designated_requirements": state["designated_requirements"], "mach_o_uuids": state["mach_o_uuids"], "bundle_sha256": state["bundle_sha256"], "executable_sha256": state["executable_sha256"], "helpers": state["helpers"], "source_revision": state["source_revision"]}
 
 
 def preflight(product: str, root: Path, signer: Signer, *, policy_path: Optional[Path] = None, lock_held: bool = False) -> dict[str, Any]:
@@ -700,8 +719,9 @@ def install(product: str, root: Path, source: Path, signer: Signer, *, policy_pa
         if not source_path.is_file() or source_path.is_symlink():
             raise InstallError(f"helper source is not a regular file: {source_path}")
     paths.root.mkdir(parents=True, exist_ok=True)
-    (paths.root / "libexec").mkdir(parents=True, exist_ok=True)
-    with _product_lock(paths), _open_dir(paths.root) as app_fd, _open_dir(paths.cli.parent, create=True) as cli_fd, _open_dir(paths.root / "libexec") as helper_fd:
+    _validate_helper_dir(paths)
+    paths.helper_dir.mkdir(parents=True, exist_ok=True)
+    with _product_lock(paths), _open_dir(paths.root) as app_fd, _open_dir(paths.cli.parent, create=True) as cli_fd, _open_dir(paths.helper_dir) as helper_fd:
         if os.path.lexists(paths.journal):
             raise InstallError(f"open install journal requires recovery: {paths.journal}")
         initial_mode = detect_mode(product, root, policy, signer)
@@ -733,17 +753,17 @@ def install(product: str, root: Path, source: Path, signer: Signer, *, policy_pa
             helper_candidates = {}
             old_helpers = {}
             for name, source_path in helper_sources.items():
-                candidate_helper = paths.root / "libexec" / f".{name}.candidate-{transaction_id}"
+                candidate_helper = paths.helper_dir / f".{name}.candidate-{transaction_id}"
                 _write_private(candidate_helper, _read_helper_source(source_path, str(helper_provenance[name]["sha256"])))
                 helper_candidates[name] = candidate_helper
-                old_helpers[name] = _entry_identity(paths.root / "libexec" / name)
+                old_helpers[name] = _entry_identity(paths.helper_dir / name)
             if _entry_identity(paths.app) != old_app or _entry_identity(paths.cli) != old_cli:
                 raise InstallError("destination changed before helper publication")
             journal.update({"phase": "helper-swap", "old_helpers": old_helpers})
             _write_journal(paths, journal)
             for name, candidate_helper in helper_candidates.items():
-                target = paths.root / "libexec" / name
-                _revalidate_parent(helper_fd, paths.root / "libexec")
+                target = paths.helper_dir / name
+                _revalidate_parent(helper_fd, paths.helper_dir)
                 if old_helpers[name]["present"]:
                     _atomic_swap(helper_fd, candidate_helper, target)
                     published.append((helper_fd, target, f"previous-{name}", True, _entry_identity(target), candidate_helper))
@@ -935,7 +955,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     mode = detect_mode(args.product, args.root, policy, signer)
             else:
                 mode = "empty"
-            return _emit({"schema_version": STATE_SCHEMA_VERSION, "product": args.product, "mode": mode, "policy_available": _policy_mode(policy) == "configured", "managed": _policy_mode(policy) == "configured" or paths.state.exists(), "bundle_path": str(paths.app.absolute()), "executable_path": str(paths.executable.absolute()), "compatibility_path": str(paths.cli.absolute()), "state_path": str(paths.state.absolute()), "lock_path": str(paths.lock.absolute()), "journal_path": str(paths.journal.absolute())})
+            return _emit({"schema_version": STATE_SCHEMA_VERSION, "product": args.product, "mode": mode, "policy_available": _policy_mode(policy) == "configured", "managed": _policy_mode(policy) == "configured" or paths.state.exists(), "bundle_path": str(paths.app.absolute()), "executable_path": str(paths.executable.absolute()), "compatibility_path": str(paths.cli.absolute()), "helper_path": str(paths.helper_dir.absolute()), "state_path": str(paths.state.absolute()), "lock_path": str(paths.lock.absolute()), "journal_path": str(paths.journal.absolute())})
         if args.command == "preflight":
             paths = product_paths(args.product, args.root)
             if args.lock_fd is not None:
