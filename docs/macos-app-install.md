@@ -150,11 +150,74 @@ Hex publishes both `bin/hex` and `bin/hex-agent` in the same guarded transaction
 The child adapter clears inherited environment variables except HOME, a fixed
 system PATH and locale. It drains stdout and stderr concurrently through pipes,
 with a separate 64 KiB limit for each stream and one total deadline. No output
-spools to disk. Timeout, output failure and synchronous cancellation signal the
-owned process group while its leader remains unreaped, drain the pipes and reap
-within a bounded cleanup interval. Normal leader exit with a descendant holding
-a pipe cannot return success. This is cooperative child cleanup, not containment
-of hostile processes that escape the group or close inherited pipes.
+spools to disk. The adapter requires the validated product lock.
+
+## Signing child ownership
+
+A transient guardian starts in a separate process group. It receives the
+validated lock descriptor and only the read end of a private liveness pipe.
+Only the installer owns the writer. READY precedes GO, so signing cannot start
+before ownership is established. Installer exit, including an outer caller's
+SIGKILL, closes liveness without killing the guardian.
+
+The guardian starts a separate signer work group. Its bootstrap executes the
+existing signer CLI, flushes its output, sends a bounded completion frame and
+remains alive as the unreaped group anchor. The guardian signals that owned
+group before reaping the leader. It drains pipes and verifies group absence
+before releasing any result. Normal completion can clean up a pipe-holding
+child and then succeed. A missing completion frame remains an error.
+
+The parent requests cancellation by closing liveness and waits through a bounded
+cleanup interval. It never kills a guardian that may still own work. An
+exceptional surviving guardian receives one blocking reaper wait while the
+parent remains alive; the OS adopts it if the parent exits. This is not a
+persistent service or recurring polling job.
+
+Rust consumers provide both previously verified helper byte strings through
+the existing `contents` binding. Standalone source CLI entry pins both siblings
+once. Internal launches forward those exact bytes through bounded inherited
+pipes. They do not reread a path and bless a new hash. Incomplete or changed
+frames cannot execute. Both existing helper provenance records cover this code;
+there is no third helper or environment-selected implementation.
+
+Darwin can return EPERM when signaling an unreaped zombie-only group. A failed
+signal does not mean cleanup succeeded. Bounded EOF, reap and subsequent
+read-only group absence are still required. A living owner or remaining group
+keeps cleanup incomplete. No destructive signal occurs after reap.
+
+## Incomplete cleanup
+
+Incomplete cleanup retains the live guardian and its product lock. Lock
+references are closed, never explicitly unlocked through the shared inherited
+file description. Success or automatic unlock is not a cleanup-error fallback.
+
+The diagnostic receipt is `.<product>.app-cleanup-failure.json` under the product
+root. It contains bounded public failure details and a live control endpoint.
+Recorded process IDs are diagnostic only. Recovery never signals a stored PID.
+
+```text
+python3 macos-app-install.py cleanup-status boi --root ROOT
+python3 macos-app-install.py cleanup-retry boi --root ROOT
+```
+
+Before GO, the guardian reserves a private socket under the existing canonical
+`/private/tmp` directory. Its deterministic name includes the user ID and a hash
+of the product/root pair. Existing endpoints are preserved and block new work.
+Normal operations remove this transient socket and create no diagnostic receipt
+or journal. The socket contains no credential or policy data.
+
+If diagnostic storage fails, `cleanup-status` still locates the live guardian
+without a receipt and reports the storage error. The guardian waits for explicit
+status/retry requests, not a recurring scan. A retry uses its still-owned anchor
+or read-only post-reap observation. It releases its lock reference and endpoint
+only after cleanup is proven. Unresolved cleanup stays blocked. If the guardian
+itself is killed or the kernel cannot respond, the command reports unavailable
+recovery; it does not act on recorded process IDs.
+
+These guarantees cover the deliberately nested signer and cooperative children
+that stay in its work group. They do not claim containment of hostile detached
+processes, a killed guardian, or an unresponsive kernel. Ordinary verification
+changes no bundle, central policy, signed state, journal or diagnostic receipt.
 
 Before the committed journal marker, the transaction syncs the app parent,
 compatibility parent, helper parent and rollback directory. Journal removal also

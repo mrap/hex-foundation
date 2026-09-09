@@ -16,6 +16,16 @@ sys.modules[spec.name] = INSTALL
 spec.loader.exec_module(INSTALL)
 
 
+def run_owned(helper, argv=None, timeout=30):
+    root = helper.parent / "runner-owner"
+    root.mkdir(exist_ok=True)
+    paths = INSTALL.product_paths("boi", root)
+    with INSTALL._product_lock(paths) as fd:
+        runner = INSTALL.ProcessSigner(helper, timeout=timeout)
+        runner.bind_owner(paths, fd)
+        return runner._run(argv or [])
+
+
 class FakeSigner:
     def __init__(self):
         self.stage_calls = []
@@ -386,9 +396,8 @@ class MacAppInstallCLITests(unittest.TestCase):
     def test_signer_runner_kills_timed_out_process_group(self):
         helper = Path(self.temp.name) / "slow-signing.py"
         helper.write_text("import time; time.sleep(2)", encoding="utf-8")
-        runner = INSTALL.ProcessSigner(helper, timeout=0.05)
         with self.assertRaisesRegex(INSTALL.InstallError, "timed out"):
-            runner._run(["verify-installed", "bundle", "boi"])
+            run_owned(helper, ["verify-installed", "bundle", "boi"], timeout=0.05)
 
     def test_cli_rejects_noncentral_policy_before_mutation(self):
         other = self.home / "other-policy.json"
@@ -418,18 +427,132 @@ class MacAppInstallCLITests(unittest.TestCase):
         self.assertEqual(preflight["service_owner"]["mode"], "signed-current")
 
 
+    def _install_guardian_fixture(self):
+        result = self.run_cli('install', 'boi', '--root', str(self.root), '--source', str(self.source),
+                              '--version', '1.0.0', '--source-revision', 'e' * 40,
+                              '--helper-source-revision', 'f' * 40)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def _refresh_fixture_provenance(self):
+        # These are explicit fake-crypto fixtures, not a claim about real trust.
+        state_path = self.root / 'BOI.app.install-state.json'
+        state = json.loads(state_path.read_text())
+        for name in state['helpers']:
+            state['helpers'][name]['sha256'] = INSTALL._sha256(self.root / 'libexec' / name)
+        state_path.write_text(json.dumps(state))
+
+    def test_actual_cli_parent_sigkill_keeps_lock_until_work_is_gone(self):
+        import fcntl, signal, socket, time
+        self._install_guardian_fixture()
+        listener_path = Path('/private/tmp') / ('app-kill-' + INSTALL.secrets.token_hex(10))
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(listener_path)); listener.listen(1); listener.settimeout(5)
+        helper = self.root / 'libexec/macos-signing.py'
+        shared = helper.read_text().split("if __name__ == '__main__':")[0]
+        helper.write_text(shared + "\nif __name__ == '__main__':\n" +
+            " import socket,os,json\n c=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);c.settimeout(8)\n" +
+            " c.connect(" + repr(str(listener_path)) + ")\n" +
+            " c.sendall((json.dumps({'pid':os.getpid(),'pgid':os.getpgrp()})+'\\n').encode())\n" +
+            " if c.recv(32)==b'after-parent-death': c.sendall(b'still-executing')\n")
+        self._refresh_fixture_provenance()
+        outer = subprocess.Popen([sys.executable, '-I', '-B', str(self.root / 'libexec/macos-app-install.py'),
+                                  'preflight', 'boi', '--root', str(self.root)],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+                                 env={'HOME':str(self.home), 'PATH':'/usr/bin:/bin'})
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(3)
+                with connection.makefile('rb') as stream:
+                    identity = json.loads(stream.readline())
+                self.assertNotEqual(identity['pgid'], outer.pid)
+                paths = INSTALL.product_paths('boi', self.root)
+                with paths.lock.open('r+') as contender:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    os.killpg(outer.pid, signal.SIGKILL)
+                    outer.communicate(timeout=8)
+                    self.assertEqual(outer.returncode, -signal.SIGKILL)
+                    deadline = time.monotonic() + 3
+                    while True:
+                        try:
+                            fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            self.assertLess(time.monotonic(), deadline, 'guardian did not release after cleanup')
+                            time.sleep(.01)
+                    try:
+                        connection.sendall(b'after-parent-death')
+                        reply = connection.recv(128)
+                    except (BrokenPipeError, ConnectionResetError):
+                        reply = b''
+                    self.assertEqual(reply, b'', 'work executed after cleanup released the lock')
+                self.assertFalse(INSTALL._failure_path(paths).exists())
+                self.assertFalse(INSTALL._control_directory(paths).exists())
+        finally:
+            listener.close(); listener_path.unlink()
+            if outer.poll() is None:
+                os.killpg(outer.pid, signal.SIGKILL); outer.communicate(timeout=8)
+
+    def test_live_failure_recovery_preserves_lock_even_when_receipt_storage_fails(self):
+        import fcntl
+        self._install_guardian_fixture()
+        script = self.root / 'libexec/macos-app-install.py'
+        original = script.read_text()
+        injection = """
+_real_cleanup = _cleanup_work
+_cleanup_calls = 0
+def _cleanup_work(*args, **kwargs):
+    global _cleanup_calls
+    _cleanup_calls += 1
+    if _cleanup_calls == 1:
+        raise PermissionError('injected actual guardian cleanup failure')
+    return _real_cleanup(*args, **kwargs)
+"""
+        paths = INSTALL.product_paths('boi', self.root)
+        for storage_fails in (False, True):
+            with self.subTest(storage_fails=storage_fails):
+                fault = injection
+                if storage_fails:
+                    fault += "\ndef _store_failure(*args):\n    raise OSError('injected receipt storage failure')\n"
+                script.write_text(original.replace('# Rust service bootstraps', fault + '\n# Rust service bootstraps'))
+                self._refresh_fixture_provenance()
+                outer = subprocess.run([sys.executable, '-I', '-B', str(script), 'preflight', 'boi', '--root', str(self.root)],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10,
+                                       env={'HOME':str(self.home), 'PATH':'/usr/bin:/bin'})
+                try:
+                    self.assertEqual(outer.returncode, 1, outer.stdout)
+                    self.assertIn('cleanup incomplete', outer.stderr)
+                    # Parent has exited. The independently located live guardian
+                    # still owns the same flock and the retained work anchor.
+                    with self.assertRaisesRegex(INSTALL.InstallError, 'busy'):
+                        with INSTALL._product_lock(paths): pass
+                    status = INSTALL.cleanup_operation('boi', self.root, 'status')
+                    self.assertEqual(status['status'], 'blocked')
+                    self.assertFalse(status['anchor_reaped'])
+                    if storage_fails:
+                        self.assertIn('storage failure', status['receipt_error'])
+                    else:
+                        self.assertEqual(INSTALL._read_json(INSTALL._failure_path(paths), 'test')['token'], status['token'])
+                    recovered = INSTALL.cleanup_operation('boi', self.root, 'retry')
+                    self.assertEqual(recovered['status'], 'clean')
+                    self.assertTrue(recovered['anchor_reaped'])
+                    with INSTALL._product_lock(paths): pass
+                finally:
+                    if INSTALL._control_directory(paths).exists():
+                        INSTALL.cleanup_operation('boi', self.root, 'retry')
+
+
 class FinalBoundaryTests(unittest.TestCase):
     def test_no_missing_shared_reader_fallback(self):
+        from unittest.mock import patch
         with tempfile.TemporaryDirectory() as td:
             policy = Path(td) / "policy.json"
-            policy.write_text(json.dumps({"schema_version": True, "certificate_sha1": "A" * 40, "team_id": "TEAM123456"}))
-            original = INSTALL.__file__
-            INSTALL.__file__ = str(Path(td) / "macos-app-install.py")
-            try:
-                with self.assertRaises(INSTALL.InstallError):
+            policy.write_text(json.dumps({"schema_version": 1, "certificate_sha1": "A" * 40, "team_id": "TEAM123456"}))
+            retained = dict(INSTALL._RETAINED_SOURCES, **{'macos-signing.py': b'pass\n'})
+            with patch.object(INSTALL, '_RETAINED_SOURCES', retained):
+                with self.assertRaisesRegex(INSTALL.InstallError, 'accepted signer policy reader is unavailable'):
                     INSTALL._policy_mode(policy)
-            finally:
-                INSTALL.__file__ = original
 
     def test_actual_shared_policy_reader_rejects_bool_unknown_and_duplicate(self):
         with tempfile.TemporaryDirectory() as td:
@@ -457,7 +580,7 @@ class FinalBoundaryTests(unittest.TestCase):
             helper.write_text("import sys\nsys.stdout.buffer.write(b'x' * 1048576); sys.stdout.flush()\n")
             with patch.object(tempfile, "TemporaryFile", side_effect=AssertionError("output must not spool to disk")):
                 with self.assertRaisesRegex(INSTALL.InstallError, "output is too large"):
-                    INSTALL.ProcessSigner(helper, timeout=2)._run([])
+                    run_owned(helper, timeout=2)
 
     def test_normal_leader_exit_does_not_leave_held_pipe_descendant(self):
         import fcntl
@@ -465,32 +588,21 @@ class FinalBoundaryTests(unittest.TestCase):
             lock = Path(td) / "child.lock"
             helper = Path(td) / "descendant.py"
             helper.write_text("import os,fcntl,time\nr,w=os.pipe()\npid=os.fork()\nif pid == 0:\n os.close(r)\n f=open(" + repr(str(lock)) + ", 'w')\n fcntl.flock(f,fcntl.LOCK_EX)\n os.write(w,b'1');os.close(w)\n time.sleep(4)\n os._exit(0)\nos.close(w);os.read(r,1);os.close(r)\nprint('{}',flush=True)\n")
-            with self.assertRaisesRegex(INSTALL.InstallError, "timed out"):
-                INSTALL.ProcessSigner(helper, timeout=0.3)._run([])
+            self.assertEqual(run_owned(helper, timeout=2), {})
             with lock.open('r') as stream:
                 fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
     def test_cancellation_cleans_actual_pipe_holding_child(self):
         import fcntl
-        from unittest.mock import patch
         with tempfile.TemporaryDirectory() as td:
             lock = Path(td) / "cancel-child.lock"
             helper = Path(td) / "cancel.py"
-            helper.write_text("import os,fcntl,time\nr,w=os.pipe()\npid=os.fork()\nif pid == 0:\n os.close(r)\n f=open(" + repr(str(lock)) + ", 'w')\n fcntl.flock(f,fcntl.LOCK_EX)\n os.write(w,b'1');os.close(w)\n time.sleep(4)\n os._exit(0)\nos.close(w);os.read(r,1);os.close(r)\nprint('{}',flush=True)\ntime.sleep(4)\n")
-            original = INSTALL.selectors.DefaultSelector
-            interrupted = []
-            class InterruptOnce(original):
-                def select(self, timeout=None):
-                    events = super().select(timeout)
-                    if events and not interrupted:
-                        interrupted.append(True)
-                        raise KeyboardInterrupt("actual ready pipe cancellation")
-                    return events
-            with patch.object(INSTALL.selectors, "DefaultSelector", InterruptOnce):
-                with self.assertRaises(KeyboardInterrupt):
-                    INSTALL.ProcessSigner(helper, timeout=2)._run([])
-            self.assertTrue(interrupted)
+            # The fake helper signals this exact live test process only after its
+            # real child holds the lock. READY cannot trigger this cancellation.
+            helper.write_text("import os,fcntl,time,signal\nr,w=os.pipe()\npid=os.fork()\nif pid == 0:\n os.close(r)\n f=open(" + repr(str(lock)) + ", 'w')\n fcntl.flock(f,fcntl.LOCK_EX)\n os.write(w,b'1');os.close(w)\n time.sleep(10)\n os._exit(0)\nos.close(w);os.read(r,1);os.close(r)\nos.kill(" + str(os.getpid()) + ",signal.SIGINT)\ntime.sleep(10)\n")
+            with self.assertRaises(KeyboardInterrupt):
+                run_owned(helper, timeout=4)
             with lock.open('r') as stream:
                 fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
@@ -500,10 +612,157 @@ class FinalBoundaryTests(unittest.TestCase):
             helper = Path(td) / "environment.py"
             helper.write_text("import json,os\nprint(json.dumps({'leaked': 'INSTALL_TEST_SECRET' in os.environ}))\n")
             with patch.dict(os.environ, {"INSTALL_TEST_SECRET": "fixture-only-not-a-secret"}):
-                self.assertEqual(INSTALL.ProcessSigner(helper)._run([]), {"leaked": False})
+                self.assertEqual(run_owned(helper), {"leaked": False})
             helper.write_text("import sys\nsys.stderr.buffer.write(b'x' * 1048576);sys.stderr.flush()\n")
             with self.assertRaisesRegex(INSTALL.InstallError, "output is too large"):
-                INSTALL.ProcessSigner(helper, timeout=2)._run([])
+                run_owned(helper, timeout=2)
+
+
+
+class GuardianBoundaryTests(unittest.TestCase):
+    def test_retained_sources_survive_actual_disk_replacement(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            helper = root / 'signer.py'
+            helper.write_text('import json\nprint(json.dumps(dict(original=True)))\n')
+            runner = INSTALL.ProcessSigner(helper)
+            paths = INSTALL.product_paths('boi', root)
+            helper.write_text('raise RuntimeError("replacement executed")\n')
+            # The installer and signer have both been pinned before replacement.
+            with INSTALL._product_lock(paths) as fd:
+                runner.bind_owner(paths, fd)
+                with patch.object(INSTALL, '_read_helper_source', side_effect=AssertionError('fresh source trust')):
+                    self.assertEqual(runner._run([]), {'original': True})
+
+    def test_both_initial_source_snapshots_survive_real_replacement(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            installer = root / 'macos-app-install.py'
+            signer = root / 'macos-signing.py'
+            installer.write_bytes(SOURCE.read_bytes())
+            signer.write_text('import json\nprint(json.dumps(dict(pinned=True)))\n')
+            spec = importlib.util.spec_from_file_location('pinned_installer_fixture', installer)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            try:
+                spec.loader.exec_module(module)
+                installer.write_text('raise RuntimeError("changed installer executed")\n')
+                signer.write_text('raise RuntimeError("changed signer executed")\n')
+                paths = module.product_paths('boi', root)
+                with module._product_lock(paths) as fd:
+                    runner = module.ProcessSigner()
+                    runner.bind_owner(paths, fd)
+                    self.assertEqual(runner._run([]), {'pinned': True})
+            finally:
+                del sys.modules[spec.name]
+
+    def test_failed_signal_with_live_pipe_retains_unreaped_owner(self):
+        import errno
+        from unittest.mock import patch
+        process = subprocess.Popen([sys.executable, '-I', '-B', '-c', 'import time; time.sleep(5)'],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            with patch.object(INSTALL.os, 'killpg', side_effect=PermissionError(errno.EPERM, 'fixture denied')):
+                with self.assertRaisesRegex(INSTALL.InstallError, 'signal error:.*fixture denied'):
+                    INSTALL._cleanup_work(process, (process.stdout, process.stderr), .05)
+            self.assertIsNone(process.returncode, 'failed cleanup reaped a living owner')
+        finally:
+            INSTALL._cleanup_work(process, (process.stdout, process.stderr), 2)
+            process.stdout.close(); process.stderr.close()
+
+    def test_internal_source_binding_rejects_missing_and_oversized(self):
+        source = INSTALL._RETAINED_SOURCES['macos-app-install.py']
+        for value in ({}, {'macos-app-install.py': source, 'macos-signing.py': b'x' * (INSTALL.MAX_HELPER_BYTES + 1)}):
+            import types
+            module = types.ModuleType('bad_retained')
+            module.__file__ = str(SOURCE)
+            module.contents = value
+            sys.modules[module.__name__] = module
+            try:
+                with self.assertRaisesRegex(RuntimeError, 'invalid retained'):
+                    exec(compile(source, str(SOURCE), 'exec'), module.__dict__)
+            finally:
+                del sys.modules[module.__name__]
+
+    def test_early_unexpected_exit_is_reaped_without_quarantine(self):
+        with tempfile.TemporaryDirectory() as td:
+            helper = Path(td) / 'exit.py'
+            helper.write_text('import os\nos._exit(17)\n')
+            with self.assertRaisesRegex(INSTALL.InstallError, 'completion frame missing'):
+                run_owned(helper, timeout=2)
+            paths = INSTALL.product_paths('boi', helper.parent / 'runner-owner')
+            self.assertFalse(INSTALL._failure_path(paths).exists())
+            self.assertFalse(INSTALL._control_directory(paths).exists())
+            with INSTALL._product_lock(paths):
+                pass
+
+    def test_cleanup_after_reap_is_read_only_and_esrch_still_reaps(self):
+        import errno
+        from unittest.mock import Mock, patch
+        process = Mock(pid=123, returncode=None)
+        with patch.object(INSTALL.os, 'killpg', side_effect=ProcessLookupError(errno.ESRCH, 'gone')) as signal_call:
+            INSTALL._cleanup_work(process, (), .1)
+        process.wait.assert_called_once()
+        self.assertEqual(signal_call.call_args_list[0].args, (123, INSTALL.signal.SIGKILL))
+        self.assertEqual(signal_call.call_args_list[1].args, (123, 0))
+        process = Mock(pid=123, returncode=0)
+        with patch.object(INSTALL.os, 'killpg', side_effect=ProcessLookupError(errno.ESRCH, 'gone')) as signal_call:
+            INSTALL._cleanup_work(process, (), .1)
+        self.assertEqual([call.args for call in signal_call.call_args_list], [(123, 0)])
+        process.wait.assert_not_called()
+
+    def test_no_signer_execution_before_ready_go_handshake(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            helper = Path(td) / 'startup.py'
+            marker = Path(td) / 'executed'
+            helper.write_text('from pathlib import Path\nPath(' + repr(str(marker)) + ').write_text("executed")\nprint("{}")\n')
+            original = INSTALL.os.write
+            seen = []
+            def intercept(fd, value):
+                if value == b'G':
+                    seen.append(not marker.exists())
+                    raise INSTALL.InstallError('injected cancellation before GO')
+                return original(fd, value)
+            with patch.object(INSTALL.os, 'write', side_effect=intercept):
+                with self.assertRaisesRegex(INSTALL.InstallError, 'before GO'):
+                    run_owned(helper, timeout=2)
+            self.assertEqual(seen, [True])
+            self.assertFalse(marker.exists())
+            paths = INSTALL.product_paths('boi', helper.parent / 'runner-owner')
+            self.assertFalse(INSTALL._control_directory(paths).exists())
+            with INSTALL._product_lock(paths): pass
+
+    def test_timeout_removes_actual_descendant_before_return(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as td:
+            helper = Path(td) / 'timeout.py'
+            lock = Path(td) / 'timeout-child.lock'
+            helper.write_text('import os,fcntl,time\nr,w=os.pipe()\nif os.fork()==0:\n os.close(r)\n f=open(' + repr(str(lock)) + ', "w")\n fcntl.flock(f,fcntl.LOCK_EX)\n os.write(w,b"1");os.close(w)\n time.sleep(10)\n os._exit(0)\nos.close(w);os.read(r,1);os.close(r)\ntime.sleep(10)\n')
+            with self.assertRaisesRegex(INSTALL.InstallError, 'timed out'):
+                run_owned(helper, timeout=2)
+            with lock.open('r') as contender:
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_ready_and_failure_frames_may_coalesce_without_losing_failure(self):
+        self.assertEqual(INSTALL._status_transition(b'R', False), (True, False))
+        self.assertEqual(INSTALL._status_transition(b'F', True), (True, True))
+        self.assertEqual(INSTALL._status_transition(b'RF', False), (True, True))
+        for frame, ready in ((b'', False), (b'F', False), (b'RR', False), (b'FF', True), (b'FR', True), (b'RRF', False)):
+            with self.assertRaises(INSTALL.InstallError):
+                INSTALL._status_transition(frame, ready)
+
+    def test_duplicate_and_oversized_control_frames_fail(self):
+        import socket
+        for payload in (b'{"token":null,"token":null,"command":"status"}\n', b'x' * (INSTALL.CONTROL_LIMIT + 1)):
+            reader, writer = socket.socketpair()
+            try:
+                writer.sendall(payload)
+                with self.assertRaises(INSTALL.InstallError):
+                    INSTALL._receive_control(reader)
+            finally:
+                reader.close(); writer.close()
 
 
 

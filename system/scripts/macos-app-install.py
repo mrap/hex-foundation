@@ -7,6 +7,7 @@ verification stay behind the injected signer protocol.
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import ctypes
 import dataclasses
@@ -18,6 +19,11 @@ import os
 import re
 import secrets
 import selectors
+import select
+import signal
+import socket
+import struct
+import threading
 import types
 import shutil
 import stat
@@ -62,82 +68,16 @@ class ProcessSigner:
         self.helper = helper.absolute()
         self.python = python
         self.timeout = timeout
+        self._owner = None
+        self._source = (_RETAINED_SOURCES["macos-signing.py"] if self.helper == _PINNED_SIGNER_PATH
+                        else _read_helper_source(self.helper))
+
+    def bind_owner(self, paths, lock_fd: int) -> None:
+        _validate_lock_fd(lock_fd, paths)
+        self._owner = (paths, lock_fd)
 
     def _run(self, argv: list[str]) -> Mapping[str, Any]:
-        environment = {"HOME": str(Path.home()), "PATH": "/usr/bin:/bin", "LC_ALL": "C"}
-        command = [self.python, "-I", "-B", str(self.helper), *argv]
-        process = None
-        try:
-            process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       env=environment, start_new_session=True)
-            deadline = time.monotonic() + self.timeout
-            buffers = [bytearray(), bytearray()]
-            # Do not poll or reap the leader until both pipes close. Its allocated
-            # PID anchors group cleanup when a cooperative descendant holds a pipe.
-            with selectors.DefaultSelector() as selector:
-                for index, stream in enumerate((process.stdout, process.stderr)):
-                    os.set_blocking(stream.fileno(), False)
-                    selector.register(stream, selectors.EVENT_READ, index)
-                while selector.get_map():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise InstallError(f"signer helper timed out: {self.helper}")
-                    for key, _ in selector.select(remaining):
-                        buffer = buffers[key.data]
-                        chunk = os.read(key.fd, min(65536, MAX_JSON_BYTES + 1 - len(buffer)))
-                        if not chunk:
-                            selector.unregister(key.fileobj)
-                        else:
-                            buffer.extend(chunk)
-                            if len(buffer) > MAX_JSON_BYTES:
-                                raise InstallError("signer helper output is too large")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise InstallError(f"signer helper timed out: {self.helper}")
-            returncode = process.wait(timeout=remaining)
-            output, error = bytes(buffers[0]), bytes(buffers[1])
-        except BaseException as exc:
-            # Popen.wait timeout does not reap. No group signal follows a successful
-            # wait, so a reused leader PID cannot select an unrelated process group.
-            cleanup_error = None
-            if process is not None and process.returncode is None:
-                try:
-                    os.killpg(process.pid, 9)
-                except ProcessLookupError:
-                    pass
-                except OSError as failure:
-                    cleanup_error = failure
-                cleanup_deadline = time.monotonic() + 5
-                try:
-                    # Observe EOF after the group signal while the leader is still
-                    # unreaped. Discard remaining bytes with constant memory.
-                    with selectors.DefaultSelector() as cleanup_selector:
-                        for stream in (process.stdout, process.stderr):
-                            os.set_blocking(stream.fileno(), False)
-                            cleanup_selector.register(stream, selectors.EVENT_READ)
-                        while cleanup_selector.get_map():
-                            remaining = cleanup_deadline - time.monotonic()
-                            if remaining <= 0:
-                                raise subprocess.TimeoutExpired(command, 5)
-                            for key, _ in cleanup_selector.select(remaining):
-                                if not os.read(key.fd, 65536):
-                                    cleanup_selector.unregister(key.fileobj)
-                except (OSError, subprocess.TimeoutExpired) as failure:
-                    cleanup_error = failure
-                try:
-                    process.wait(timeout=max(0.001, cleanup_deadline - time.monotonic()))
-                except (OSError, subprocess.TimeoutExpired) as failure:
-                    cleanup_error = failure
-            if cleanup_error is not None:
-                raise InstallError(f"signer helper cleanup failed: {cleanup_error}; original: {exc}") from exc
-            if isinstance(exc, (OSError, subprocess.TimeoutExpired)):
-                raise InstallError(f"signer helper unavailable or timed out: {self.helper}") from exc
-            raise
-        finally:
-            if process is not None:
-                for stream in (process.stdout, process.stderr):
-                    if stream is not None:
-                        stream.close()
+        returncode, output, error = _run_guardian(self, argv)
         if returncode:
             raise InstallError(f"signer helper failed ({returncode}): {error.decode(errors='replace').strip()[-500:]}")
         try:
@@ -342,14 +282,11 @@ def _product_lock(paths: Paths):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             if exc.errno in (errno.EACCES, errno.EAGAIN):
-                raise InstallError(f"product install busy: {paths.lock}") from exc
+                raise InstallError(_busy_message(paths)) from exc
             raise InstallError(f"cannot lock {paths.lock}: {exc}") from exc
         yield fd
     finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
+        os.close(fd)
 
 
 def _libc_renameatx(source_fd: int, source: str, destination_fd: int, destination: str, flags: int) -> None:
@@ -483,7 +420,7 @@ def _policy_mode(policy: Path) -> str:
     module.__file__ = str(signer_path)
     sys.modules[module_name] = module
     try:
-        content = _read_helper_source(signer_path)
+        content = _RETAINED_SOURCES["macos-signing.py"]
         exec(compile(content, str(signer_path), "exec"), module.__dict__)
         reader = getattr(module, "_read_policy", None)
         if not callable(reader):
@@ -719,9 +656,11 @@ def install(product: str, root: Path, source: Path, signer: Signer, *, policy_pa
     paths.root.mkdir(parents=True, exist_ok=True)
     _validate_helper_dir(paths)
     paths.helper_dir.mkdir(parents=True, exist_ok=True)
-    with _product_lock(paths), _open_dir(paths.root) as app_fd, _open_dir(paths.cli.parent, create=True) as cli_fd, _open_dir(paths.helper_dir) as helper_fd:
+    with _product_lock(paths) as product_lock_fd, _open_dir(paths.root) as app_fd, _open_dir(paths.cli.parent, create=True) as cli_fd, _open_dir(paths.helper_dir) as helper_fd:
         if os.path.lexists(paths.journal):
             raise InstallError(f"open install journal requires recovery: {paths.journal}")
+        if isinstance(signer, ProcessSigner):
+            signer.bind_owner(paths, product_lock_fd)
         initial_mode = detect_mode(product, root, policy, signer)
         if initial_mode == "signed-policy-missing":
             raise InstallError("signed product cannot be replaced while central policy is missing")
@@ -877,12 +816,529 @@ def install(product: str, root: Path, source: Path, signer: Signer, *, policy_pa
             raise InstallError(detail, published=bool(published) or bool(rollback_errors)) from exc
 
 
+# Private entrypoints remain in this provenance-checked helper. No environment
+# variable selects code, product, or process authority.
+_INTERNAL_ENTRY = r'''import base64, hashlib, json, os, sys, types
+path, expected, entry, descriptor = sys.argv[1:5]
+with os.fdopen(int(descriptor), 'rb') as stream:
+    payload = stream.read(2800001)
+if len(payload) > 2800000 or hashlib.sha256(payload).hexdigest() != expected:
+    raise ValueError('retained helper frame mismatch')
+contents = {name: base64.b64decode(value, validate=True) for name, value in json.loads(payload).items()}
+module = types.ModuleType('_app_owned_entry'); module.__file__ = path
+module.contents = contents
+sys.modules[module.__name__] = module
+exec(compile(contents['macos-app-install.py'], path, 'exec'), module.__dict__)
+raise SystemExit(getattr(module, entry)(sys.argv[5:]))
+'''
+CLEANUP_BUDGET = 5.0
+CONTROL_LIMIT = 2048
+
+
+def _entry_command(entry: str, arguments: list[str], signer_source: bytes):
+    retained = dict(_RETAINED_SOURCES)
+    retained['macos-signing.py'] = signer_source
+    payload = json.dumps({name: base64.b64encode(value).decode('ascii')
+                          for name, value in retained.items()}).encode()
+    reader, writer = os.pipe()
+    command = ['/usr/bin/python3', '-I', '-B', '-c', _INTERNAL_ENTRY,
+               str(_PINNED_INSTALLER_PATH), hashlib.sha256(payload).hexdigest(),
+               entry, str(reader), *arguments]
+    return command, reader, writer, payload
+
+
+def _send_source(fd: int, payload: bytes, deadline: float) -> None:
+    os.set_blocking(fd, False)
+    remaining = memoryview(payload)
+    while remaining:
+        budget = deadline - time.monotonic()
+        if budget <= 0 or not select.select([], [fd], [], max(0, budget))[1]:
+            raise InstallError('retained helper transfer timed out')
+        try:
+            count = os.write(fd, remaining)
+        except BlockingIOError:
+            continue
+        remaining = remaining[count:]
+
+
+def _work_entry(arguments: list[str]) -> int:
+    helper, completion, argv_json = arguments
+    completion_fd = int(completion)
+    status = 1
+    try:
+        source = _RETAINED_SOURCES["macos-signing.py"]
+        module = types.ModuleType('__main__')
+        module.__file__ = helper
+        sys.modules['__main__'] = module
+        sys.argv = [helper, *json.loads(argv_json)]
+        try:
+            exec(compile(source, helper, 'exec'), module.__dict__)
+            status = 0
+        except SystemExit as exc:
+            status = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+    except BaseException:
+        import traceback
+        traceback.print_exc()
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.write(completion_fd, struct.pack('!i', max(0, min(status, 255))))
+    except BaseException:
+        # The guardian still owns this unreaped anchor and detects a missing frame.
+        pass
+    finally:
+        os.close(completion_fd)
+    # Never free the work-group identity between result production and cleanup.
+    while True:
+        signal.pause()
+
+
+def _group_present(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def _cleanup_work(process: subprocess.Popen, streams: tuple, budget: float) -> Optional[str]:
+    deadline = time.monotonic() + budget
+    signal_failure = None
+    if process.returncode is None:
+        # No poll/wait happens before this signal. The direct child remains an
+        # allocated group anchor, including when it exited unexpectedly.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError as exc:
+            if exc.errno not in (errno.ESRCH, errno.EPERM):
+                raise
+            # Darwin returns EPERM for some zombie-only groups. This is not
+            # success: require bounded EOF, reap and subsequent group absence.
+            signal_failure = exc
+        with selectors.DefaultSelector() as selector:
+            for stream in streams:
+                if not stream.closed:
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise InstallError(f'work pipes did not close during cleanup; signal error: {signal_failure}')
+                for key, _ in selector.select(remaining):
+                    if not os.read(key.fd, 65536):
+                        selector.unregister(key.fileobj)
+        try:
+            process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as exc:
+            raise InstallError(f'work leader did not exit; signal error: {signal_failure}') from exc
+    # After reap this is observation only. Never signal a possibly reused PGID.
+    while _group_present(process.pid):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise InstallError(f'work group remains present after cleanup; signal error: {signal_failure}')
+        time.sleep(min(0.01, remaining))
+    return str(signal_failure) if signal_failure is not None else None
+
+
+def _failure_path(paths: Paths) -> Path:
+    return paths.root / f'.{paths.product}.app-cleanup-failure.json'
+
+
+def _busy_message(paths: Paths) -> str:
+    return (f'product install busy: {paths.lock}; inspect {_failure_path(paths)}; '
+            f'run cleanup-status {paths.product} --root {paths.root}')
+
+
+def _store_failure(paths: Paths, value: dict) -> None:
+    destination = _failure_path(paths)
+    previous = _entry_identity(destination)
+    if previous['present']:
+        old = _read_json(destination, 'cleanup failure receipt')
+        if old.get('product') != paths.product or old.get('root') != str(paths.root) or (
+            old.get('token') != value['token'] and old.get('status') != 'clean'
+        ):
+            raise InstallError('foreign cleanup failure receipt must be preserved')
+    temporary = destination.with_name(destination.name + '.' + secrets.token_hex(8))
+    _write_private(temporary, (json.dumps(value, sort_keys=True) + '\n').encode())
+    with _open_dir(paths.root) as parent_fd:
+        if _entry_identity(destination) != previous:
+            raise InstallError('cleanup receipt changed before publication')
+        if previous['present']:
+            os.replace(temporary, destination)
+        else:
+            _atomic_new(parent_fd, temporary, destination)
+        _fsync_dir(parent_fd)
+
+
+def _unique_control_pairs(items):
+    result = {}
+    for key, value in items:
+        if key in result: raise InstallError('duplicate cleanup control field')
+        result[key] = value
+    return result
+
+
+def _receive_control(connection: socket.socket, timeout: float = 2) -> dict:
+    connection.settimeout(timeout)
+    data = bytearray()
+    while b'\n' not in data:
+        part = connection.recv(min(512, CONTROL_LIMIT + 1 - len(data)))
+        if not part:
+            raise InstallError('incomplete cleanup request')
+        data.extend(part)
+        if len(data) > CONTROL_LIMIT:
+            raise InstallError('cleanup request too large')
+    if data.count(b'\n') != 1 or not data.endswith(b'\n'):
+        raise InstallError('invalid cleanup framing')
+    value = json.loads(data, object_pairs_hook=_unique_control_pairs)
+    if not isinstance(value, dict):
+        raise InstallError('invalid cleanup request')
+    return value
+
+
+def _control_directory(paths: Paths) -> Path:
+    identity = hashlib.sha256((paths.product + ':' + str(paths.root)).encode()).hexdigest()[:32]
+    return Path('/private/tmp') / f'hex-app-cleanup-{os.getuid()}-{identity}'
+
+
+@contextlib.contextmanager
+def _control_endpoint(paths: Paths):
+    # Establish discoverability before work. Normal operations remove this
+    # transient socket and create no diagnostic receipt or signed-state writes.
+    parent = Path('/private/tmp')
+    info = parent.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o1777:
+        raise InstallError('cleanup socket parent is not the system sticky directory')
+    directory = _control_directory(paths)
+    directory.mkdir(mode=0o700)  # Existing actor/guardian is preserved, never removed.
+    endpoint = directory / 'control.sock'
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        server.bind(str(endpoint)); server.listen(1)
+        yield server, directory, secrets.token_hex(16)
+    finally:
+        server.close()
+        if endpoint.exists(): endpoint.unlink()
+        if directory.exists(): directory.rmdir()
+
+
+def _record_failure(paths: Paths, value: dict) -> None:
+    try:
+        _store_failure(paths, value)
+        value.pop('receipt_error', None)
+    except Exception as exc:
+        # The live endpoint was established before work and is located without
+        # this receipt. Storage loss must not unwind the owner or release flock.
+        value['receipt_error'] = str(exc)[:250]
+
+
+def _quarantine(paths: Paths, process: subprocess.Popen, streams: tuple,
+                status_fd: int, failure: Exception, budget: float, recovery, lock_fd: int) -> None:
+    server, directory, token = recovery
+    value = {'schema_version': 1, 'product': paths.product, 'root': str(paths.root),
+             'status': 'blocked', 'token': token, 'endpoint': str(directory / 'control.sock'),
+             'guardian_pid': os.getpid(), 'work_pid': process.pid,
+             'anchor_reaped': process.returncode is not None, 'error': str(failure)[:500]}
+    _record_failure(paths, value)
+    try:
+        os.write(status_fd, b'F')
+    except BrokenPipeError:
+        pass  # The fixed live endpoint remains discoverable without this caller.
+    os.close(status_fd)
+    for fd in (1, 2):
+        try: os.close(fd)
+        except OSError: pass
+    while True:
+        connection, _ = server.accept()  # Requests, not a recurring scan.
+        with connection:
+            try:
+                request = _receive_control(connection)
+                if set(request) != {'token', 'command'}:
+                    raise InstallError('invalid cleanup request fields')
+                if request['token'] != token and not (request['token'] is None and request['command'] == 'status'):
+                    raise InstallError('cleanup endpoint identity mismatch')
+                if request['command'] not in ('status', 'retry'):
+                    raise InstallError('unsupported cleanup operation')
+                if request['command'] == 'retry':
+                    try:
+                        _cleanup_work(process, streams, budget)
+                        value.update(status='clean', error='', anchor_reaped=True)
+                    except Exception as exc:
+                        value.update(error=str(exc)[:500], anchor_reaped=process.returncode is not None)
+                    _record_failure(paths, value)
+                if value['status'] == 'clean':
+                    # Close only our inherited reference after proven cleanup,
+                    # before returning the recovery result. Never LOCK_UN.
+                    server.close()
+                    (directory / 'control.sock').unlink()
+                    directory.rmdir()
+                    os.close(lock_fd)
+                    try:
+                        connection.sendall((json.dumps(value) + '\n').encode())
+                    finally:
+                        return
+                connection.sendall((json.dumps(value) + '\n').encode())
+            except (OSError, ValueError, InstallError) as exc:
+                try: connection.sendall((json.dumps({'error': str(exc)[:500]}) + '\n').encode())
+                except OSError: pass
+
+
+def _guardian_entry(arguments: list[str]) -> int:
+    config = json.loads(arguments[0])
+    paths = product_paths(config['product'], Path(config['root']))
+    _validate_lock_fd(config['lock_fd'], paths)
+    with _control_endpoint(paths) as recovery:
+        return _guardian_run(config, paths, recovery)
+
+
+def _guardian_run(config, paths, recovery):
+    live, ready, lock_fd = config['live_fd'], config['ready_fd'], config['lock_fd']
+    _validate_lock_fd(lock_fd, paths)
+    with _open_dir(paths.root):
+        if paths.root.stat().st_uid != os.getuid():
+            raise InstallError('product root is not owned by this user')
+    os.write(ready, b'R')
+    remaining = config['deadline'] - time.monotonic()
+    if remaining <= 0 or not select.select([live], [], [], remaining)[0] or os.read(live, 1) != b'G':
+        return 1
+    completed_r, completed_w = os.pipe()
+    helper = Path(config['helper'])
+    argv, source_r, source_w, payload = _entry_command(
+        '_work_entry', [str(helper), str(completed_w), json.dumps(config['argv'])],
+        _RETAINED_SOURCES['macos-signing.py'])
+    process = None
+    try:
+        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, start_new_session=True,
+                                   pass_fds=(completed_w, source_r), env=config['environment'])
+        os.close(source_r); source_r = -1
+        _send_source(source_w, payload, config['deadline'])
+    except BaseException:
+        os.close(source_w); source_w = -1
+        if process is not None:
+            try:
+                _cleanup_work(process, (process.stdout, process.stderr), config['cleanup_budget'])
+            except Exception as exc:
+                _quarantine(paths, process, (process.stdout, process.stderr), ready, exc, config['cleanup_budget'], recovery, lock_fd)
+        raise
+    finally:
+        for descriptor in (source_r, source_w, completed_w):
+            if descriptor >= 0: os.close(descriptor)
+    streams = (process.stdout, process.stderr)
+    buffers = [bytearray(), bytearray()]
+    completion = bytearray(); result = None; failure = None
+    try:
+        with selectors.DefaultSelector() as selector:
+            for index, stream in enumerate(streams):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, index)
+            selector.register(live, selectors.EVENT_READ, 'live')
+            selector.register(completed_r, selectors.EVENT_READ, 'completion')
+            while result is None:
+                remaining = config['deadline'] - time.monotonic()
+                if remaining <= 0: raise InstallError('signer helper timed out')
+                for key, _ in selector.select(remaining):
+                    if key.data == 'live':
+                        os.read(live, 1)
+                        raise InstallError('signer caller canceled or exited')
+                    if key.data == 'completion':
+                        part = os.read(completed_r, 5 - len(completion))
+                        if not part: raise InstallError('signer completion frame missing')
+                        completion.extend(part)
+                        if len(completion) > 4: raise InstallError('signer completion frame too large')
+                        if len(completion) == 4: result = struct.unpack('!i', completion)[0]
+                    else:
+                        buffer = buffers[key.data]
+                        part = os.read(key.fd, min(65536, MAX_JSON_BYTES + 1 - len(buffer)))
+                        if not part: selector.unregister(key.fileobj)
+                        else:
+                            buffer.extend(part)
+                            if len(buffer) > MAX_JSON_BYTES: raise InstallError('signer helper output is too large')
+        # Flush precedes completion. Drain remaining ready bytes before cleanup;
+        # the anchor deliberately keeps its output descriptors open.
+        for index, stream in enumerate(streams):
+            while True:
+                try: part = os.read(stream.fileno(), min(65536, MAX_JSON_BYTES + 1 - len(buffers[index])))
+                except BlockingIOError: break
+                if not part: break
+                buffers[index].extend(part)
+                if len(buffers[index]) > MAX_JSON_BYTES: raise InstallError('signer helper output is too large')
+    except BaseException as exc:
+        failure = exc
+    finally:
+        os.close(completed_r)
+    try:
+        warning = _cleanup_work(process, streams, config['cleanup_budget'])
+        if warning is not None:
+            print(f'cleanup signal failed before verified group absence: {warning}', file=sys.stderr)
+    except Exception as exc:
+        _quarantine(paths, process, streams, ready, exc, config['cleanup_budget'], recovery, lock_fd)
+        return 1
+    finally:
+        for stream in streams: stream.close()
+    if failure is not None:
+        print(str(failure)[:500], file=sys.stderr)
+        return 1
+    for fd, buffer in zip((1, 2), buffers):
+        remaining = memoryview(buffer)
+        while remaining:
+            remaining = remaining[os.write(fd, remaining):]
+    return result
+
+
+def _reap_guardian(process: subprocess.Popen) -> None:
+    # One blocking wait, not a polling monitor. If the CLI exits first, the OS
+    # adopts and eventually reaps the exceptional guardian after recovery.
+    process.wait()
+
+
+def _status_transition(frame: bytes, ready: bool) -> tuple[bool, bool]:
+    if not frame or len(frame) > 2:
+        raise InstallError('invalid guardian status frame')
+    failed = False
+    for marker in frame:
+        if marker == ord('R') and not ready:
+            ready = True
+        elif marker == ord('F') and ready and not failed:
+            failed = True
+        else:
+            raise InstallError('invalid guardian status frame')
+    return ready, failed
+
+
+def _run_guardian(signer, argv: list[str]) -> tuple[int, bytes, bytes]:
+    if signer._owner is None:
+        raise InstallError('signer execution requires a validated product lock')
+    paths, lock_fd = signer._owner
+    _validate_lock_fd(lock_fd, paths)
+    live_r, live_w = os.pipe(); ready_r, ready_w = os.pipe()
+    environment = {'HOME': str(Path.home()), 'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}
+    deadline = time.monotonic() + signer.timeout
+    config = {'product': paths.product, 'root': str(paths.root), 'helper': str(signer.helper),
+              'argv': argv, 'live_fd': live_r, 'ready_fd': ready_w, 'lock_fd': lock_fd,
+              'deadline': deadline, 'cleanup_budget': CLEANUP_BUDGET, 'environment': environment}
+    process = None; cancellation = None; quarantined = False
+    command, source_r, source_w, payload = _entry_command(
+        "_guardian_entry", [json.dumps(config)], signer._source)
+    try:
+        process = subprocess.Popen(command,
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   start_new_session=True, pass_fds=(live_r, ready_w, lock_fd, source_r), env=environment)
+        os.close(source_r); source_r = -1
+        _send_source(source_w, payload, deadline)
+        os.close(source_w); source_w = -1
+        os.close(live_r); live_r = -1
+        os.close(ready_w); ready_w = -1
+        buffers = [bytearray(), bytearray()]; ready = False
+        with selectors.DefaultSelector() as selector:
+            for index, stream in enumerate((process.stdout, process.stderr)):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, index)
+            selector.register(ready_r, selectors.EVENT_READ, 'status')
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    if cancellation is not None: raise InstallError('guardian cleanup did not finish; product ownership remains unresolved')
+                    cancellation = InstallError('signer helper timed out')
+                    os.close(live_w); live_w = -1
+                    deadline = time.monotonic() + CLEANUP_BUDGET + 2
+                    continue
+                try:
+                    events = selector.select(remaining)
+                except BaseException as exc:
+                    if cancellation is not None: raise
+                    cancellation = exc
+                    os.close(live_w); live_w = -1
+                    deadline = time.monotonic() + CLEANUP_BUDGET + 2
+                    continue
+                for key, _ in events:
+                    if key.data == 'status':
+                        frame = os.read(ready_r, 2)
+                        if not frame: selector.unregister(ready_r)
+                        else:
+                            previous = ready
+                            ready, quarantined = _status_transition(frame, ready)
+                            if ready and not previous and live_w >= 0:
+                                os.write(live_w, b'G')
+                            if quarantined:
+                                raise InstallError(f'cleanup incomplete; {_busy_message(paths)}')
+                    else:
+                        part = os.read(key.fd, min(65536, MAX_JSON_BYTES + 1 - len(buffers[key.data])))
+                        if not part: selector.unregister(key.fileobj)
+                        else:
+                            buffers[key.data].extend(part)
+                            if len(buffers[key.data]) > MAX_JSON_BYTES:
+                                raise InstallError('guardian output is too large')
+        code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        if cancellation is not None: raise cancellation
+        if not ready: raise InstallError('guardian did not establish ownership')
+        return code, bytes(buffers[0]), bytes(buffers[1])
+    except BaseException:
+        if source_w >= 0:
+            os.close(source_w); source_w = -1
+        if live_w >= 0:
+            os.close(live_w); live_w = -1
+        if process is not None and process.returncode is None and not quarantined:
+            # Cancellation can arrive outside selector.select too. Always request
+            # cleanup and give this owner its bounded completion window.
+            cancel_deadline = time.monotonic() + CLEANUP_BUDGET + 2
+            with selectors.DefaultSelector() as selector:
+                for stream in (process.stdout, process.stderr):
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, selectors.EVENT_READ)
+                while selector.get_map() and time.monotonic() < cancel_deadline:
+                    for key, _ in selector.select(max(0, cancel_deadline - time.monotonic())):
+                        if not os.read(key.fd, 65536): selector.unregister(key.fileobj)
+            try:
+                process.wait(timeout=max(0.001, cancel_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                pass  # The live guardian retains the lock and recovery authority.
+        raise
+    finally:
+        for fd in (live_r, live_w, ready_r, ready_w, source_r, source_w):
+            if fd >= 0: os.close(fd)
+        if process is not None:
+            for stream in (process.stdout, process.stderr): stream.close()
+            if process.returncode is None:
+                # Never kill this cleanup owner. Closing liveness requests cleanup.
+                threading.Thread(target=_reap_guardian, args=(process,), daemon=True).start()
+
+
+def cleanup_operation(product: str, root: Path, operation: str) -> dict:
+    paths = product_paths(product, root)
+    directory = _control_directory(paths)
+    if not os.path.lexists(directory):
+        record = _read_json(_failure_path(paths), 'cleanup failure receipt')
+        if record.get('schema_version') != 1 or record.get('product') != product or record.get('root') != str(paths.root):
+            raise InstallError('cleanup failure receipt does not match product')
+        if record.get('status') == 'clean': return record
+        raise InstallError('cleanup guardian unavailable; recorded PIDs are not signaling authority')
+    info = directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise InstallError('cleanup endpoint directory is not private')
+    endpoint = directory / 'control.sock'
+    if not stat.S_ISSOCK(endpoint.lstat().st_mode):
+        raise InstallError('cleanup endpoint mismatch')
+
+    def request(command, token):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(CLEANUP_BUDGET + 3)
+            connection.connect(str(endpoint))
+            connection.sendall((json.dumps({'token': token, 'command': command}) + '\n').encode())
+            value = _receive_control(connection, CLEANUP_BUDGET + 3)
+        if value.get('schema_version') != 1 or value.get('product') != product or value.get('root') != str(paths.root):
+            raise InstallError('cleanup guardian response mismatch')
+        actual = value.get('token')
+        if not isinstance(actual, str) or not re.fullmatch('[0-9a-f]{32}', actual) or (token is not None and actual != token):
+            raise InstallError('cleanup guardian token mismatch')
+        return value
+    status = request('status', None)
+    return request('retry', status['token']) if operation == 'retry' else status
+
+
 def _helper_provenance(helper: Path, root: Path, source_revision: str) -> dict[str, Any]:
-    app_install = Path(__file__).absolute()
-    return {
-        "macos-signing.py": {"sha256": _sha256(helper), "source_revision": source_revision},
-        "macos-app-install.py": {"sha256": _sha256(app_install), "source_revision": source_revision},
-    }
+    return {name: {"sha256": hashlib.sha256(source).hexdigest(), "source_revision": source_revision}
+            for name, source in _RETAINED_SOURCES.items()}
 
 
 def _emit(value: Mapping[str, Any]) -> int:
@@ -932,6 +1388,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     common("preflight")
     common("verify-current")
     common("service-owner")
+    common("cleanup-status")
+    common("cleanup-retry")
     install_parser = commands.add_parser("install")
     install_parser.add_argument("product", choices=sorted(PRODUCTS))
     install_parser.add_argument("--root", required=True, type=Path)
@@ -945,11 +1403,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         if args.policy is not None and args.policy.absolute() != policy.absolute():
             raise InstallError("CLI signing policy must use the central machine path")
+        if args.command in ("cleanup-status", "cleanup-retry"):
+            result = cleanup_operation(args.product, args.root, args.command.removeprefix("cleanup-"))
+            _emit(result)
+            return 0 if result.get("status") == "clean" or args.command == "cleanup-status" else 1
         signer = ProcessSigner()
         if args.command == "mode":
             paths = product_paths(args.product, args.root)
             if paths.root.exists():
-                with _product_lock(paths):
+                with _product_lock(paths) as lock_fd:
+                    signer.bind_owner(paths, lock_fd)
                     mode = detect_mode(args.product, args.root, policy, signer)
             else:
                 mode = "empty"
@@ -958,18 +1421,22 @@ def main(argv: Optional[list[str]] = None) -> int:
             paths = product_paths(args.product, args.root)
             if args.lock_fd is not None:
                 _validate_lock_fd(args.lock_fd, paths)
+                signer.bind_owner(paths, args.lock_fd)
                 result = preflight(args.product, args.root, signer, policy_path=policy, lock_held=True)
             else:
-                with _product_lock(paths):
+                with _product_lock(paths) as lock_fd:
+                    signer.bind_owner(paths, lock_fd)
                     result = preflight(args.product, args.root, signer, policy_path=policy, lock_held=True)
             return _emit(result)
         if args.command in {"verify-current", "service-owner"}:
             paths = product_paths(args.product, args.root)
             if args.lock_fd is not None:
                 _validate_lock_fd(args.lock_fd, paths)
+                signer.bind_owner(paths, args.lock_fd)
                 result = service_owner(args.product, args.root, signer, policy_path=policy, lock_held=True)
             elif args.command == "verify-current":
-                with _product_lock(paths):
+                with _product_lock(paths) as lock_fd:
+                    signer.bind_owner(paths, lock_fd)
                     result = service_owner(args.product, args.root, signer, policy_path=policy, lock_held=True)
             else:
                 raise InstallError("service-owner requires --lock-fd")
@@ -980,6 +1447,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     except InstallError as exc:
         print(json.dumps({"schema_version": STATE_SCHEMA_VERSION, "error": str(exc), "published": bool(exc.published) if exc.published is not None else False}), file=sys.stderr)
         return 1
+
+
+# Rust service bootstraps supply both already verified byte strings. Internal
+# hops propagate that exact binding. A standalone source CLI pins siblings once
+# at initial entry, never re-accepting later on-disk replacements.
+_PINNED_INSTALLER_PATH = Path(__file__).absolute()
+_PINNED_SIGNER_PATH = _PINNED_INSTALLER_PATH.with_name('macos-signing.py')
+if 'contents' in globals():
+    _RETAINED_SOURCES = dict(contents)
+    if set(_RETAINED_SOURCES) != {'macos-app-install.py', 'macos-signing.py'} or any(
+        not isinstance(value, bytes) or not value or len(value) > MAX_HELPER_BYTES
+        for value in _RETAINED_SOURCES.values()
+    ):
+        raise InstallError('invalid retained helper source binding')
+else:
+    _RETAINED_SOURCES = {name: _read_helper_source(_PINNED_INSTALLER_PATH.with_name(name))
+                         for name in ('macos-app-install.py', 'macos-signing.py')}
 
 
 if __name__ == "__main__":
