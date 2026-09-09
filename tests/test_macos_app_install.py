@@ -184,6 +184,162 @@ class MacAppInstallTests(unittest.TestCase):
             INSTALL._atomic_move = original_move
         self.assertEqual(INSTALL._tree_sha256(paths.app), old_hash)
 
+    def interrupted_stage(self):
+        original = self.signer.stage
+        def fail_after_files(*args):
+            original(*args)
+            raise INSTALL.InstallError("stage interrupted after owned files")
+        self.signer.stage = fail_after_files
+        with self.assertRaisesRegex(INSTALL.InstallError, "stage interrupted"):
+            self.install()
+        paths = INSTALL.product_paths("boi", self.root)
+        return paths, json.loads(paths.journal.read_text())
+
+    def test_abandon_actual_cli_preserves_owned_staging_evidence(self):
+        paths, journal = self.interrupted_stage()
+        original_journal = paths.journal.read_bytes()
+        candidate = Path(journal["candidate"])
+        candidate_hash = INSTALL._tree_sha256(candidate)
+        receipt = candidate.with_name(candidate.name + ".receipt.json")
+        receipt_bytes = receipt.read_bytes()
+        result = subprocess.run([sys.executable, "-I", "-B", str(SOURCE),
+                                 "abandon-staging", "boi", "--root", str(self.root)],
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        value = json.loads(result.stdout)
+        archive = Path(value["archive_path"])
+        self.assertEqual(value["action"], "abandoned-staging")
+        self.assertFalse(value["published"])
+        self.assertEqual((archive / paths.journal.name).read_bytes(), original_journal)
+        self.assertEqual(INSTALL._tree_sha256(archive / candidate.name), candidate_hash)
+        self.assertEqual((archive / receipt.name).read_bytes(), receipt_bytes)
+        self.assertFalse(paths.journal.exists())
+        self.assertFalse(candidate.exists())
+        self.assertFalse(paths.app.exists())
+        self.assertEqual(INSTALL.detect_mode("boi", self.root, self.policy, self.signer), "empty")
+        self.signer = FakeSigner()
+        self.install()
+        self.assertTrue(paths.app.is_dir())
+
+    def test_abandon_refuses_old_journal_and_public_actor_changes(self):
+        paths, journal = self.interrupted_stage()
+        saved = paths.journal.read_bytes()
+        for field in ("staging_prestate", "staging_owned"):
+            with self.subTest(missing=field):
+                edited = dict(journal); edited.pop(field, None)
+                paths.journal.write_text(json.dumps(edited))
+                with self.assertRaises(INSTALL.InstallError):
+                    INSTALL.abandon_staging("boi", self.root)
+                self.assertTrue(Path(journal["candidate"]).exists())
+                paths.journal.write_bytes(saved)
+        for target in (paths.cli, paths.state, paths.helper_dir / "macos-signing.py"):
+            with self.subTest(actor=target.name):
+                before = target.read_bytes() if target.exists() else None
+                target.write_bytes(b"operator replacement")
+                with self.assertRaisesRegex(INSTALL.InstallError, "prestate"):
+                    INSTALL.abandon_staging("boi", self.root)
+                self.assertEqual(target.read_bytes(), b"operator replacement")
+                self.assertTrue(paths.journal.exists())
+                if before is None: target.unlink()
+                else: target.write_bytes(before)
+
+    def test_abandon_refuses_candidate_replacement_and_nonstaging_phase(self):
+        paths, journal = self.interrupted_stage()
+        candidate = Path(journal["candidate"])
+        executable = candidate / "Contents/MacOS/boi"
+        executable.write_bytes(b"actor candidate")
+        with self.assertRaisesRegex(INSTALL.InstallError, "staging evidence"):
+            INSTALL.abandon_staging("boi", self.root)
+        self.assertEqual(executable.read_bytes(), b"actor candidate")
+        journal["phase"] = "app-swap"
+        paths.journal.write_text(json.dumps(journal))
+        with self.assertRaisesRegex(INSTALL.InstallError, "staging"):
+            INSTALL.abandon_staging("boi", self.root)
+        self.assertTrue(paths.journal.exists())
+
+    def test_abandon_archive_failure_keeps_journal_blocker(self):
+        paths, journal = self.interrupted_stage()
+        original = INSTALL._atomic_move
+        def fail_move(*args):
+            raise OSError("injected archive filesystem error")
+        INSTALL._atomic_move = fail_move
+        try:
+            with self.assertRaises(INSTALL.InstallError):
+                INSTALL.abandon_staging("boi", self.root)
+        finally:
+            INSTALL._atomic_move = original
+        self.assertTrue(paths.journal.exists())
+        self.assertTrue(Path(journal["candidate"]).exists())
+
+    def test_abandon_retains_actor_archive_and_changed_existing_app(self):
+        self.install()
+        paths, journal = self.interrupted_stage()
+        archive = self.root / (".boi.abandoned-staging-" + journal["transaction_id"])
+        archive.mkdir(); (archive / "actor").write_bytes(b"keep")
+        with self.assertRaises(INSTALL.InstallError):
+            INSTALL.abandon_staging("boi", self.root)
+        self.assertEqual((archive / "actor").read_bytes(), b"keep")
+        paths.executable.write_bytes(b"operator edit inside installed app")
+        with self.assertRaisesRegex(INSTALL.InstallError, "prestate"):
+            INSTALL.abandon_staging("boi", self.root)
+        self.assertTrue(paths.journal.exists())
+        self.assertEqual(paths.executable.read_bytes(), b"operator edit inside installed app")
+
+    def test_abandon_partial_archive_keeps_blocker_and_all_bytes(self):
+        paths, journal = self.interrupted_stage()
+        original = INSTALL._atomic_move
+        calls = []
+        def second_move_fails(*args):
+            calls.append(args)
+            if len(calls) == 2: raise OSError("injected second move failure")
+            return original(*args)
+        INSTALL._atomic_move = second_move_fails
+        try:
+            with self.assertRaises(INSTALL.StagingRecoveryError) as error:
+                INSTALL.abandon_staging("boi", self.root)
+        finally:
+            INSTALL._atomic_move = original
+        archive = Path(error.exception.archive)
+        candidate = Path(journal["candidate"])
+        self.assertTrue((archive / candidate.name / "Contents/MacOS/boi").exists())
+        self.assertTrue(candidate.with_name(candidate.name + ".receipt.json").exists())
+        self.assertTrue(paths.journal.exists())
+        with self.assertRaises(INSTALL.InstallError):
+            INSTALL.abandon_staging("boi", self.root)
+
+    def test_abandon_checks_hex_alias_prestate(self):
+        self.signer.fail_stage = True
+        with self.assertRaises(INSTALL.InstallError):
+            INSTALL.install("hex", self.root, self.source, self.signer, policy_path=self.policy,
+                            helper_provenance=self.helpers,
+                            helper_sources={name: self.root / "libexec" / name for name in self.helpers},
+                            source_revision="e" * 40)
+        paths = INSTALL.product_paths("hex", self.root)
+        self.assertIsNotNone(paths.alias)
+        paths.alias.symlink_to("actor-target")
+        with self.assertRaisesRegex(INSTALL.InstallError, "prestate"):
+            INSTALL.abandon_staging("hex", self.root)
+        self.assertEqual(os.readlink(paths.alias), "actor-target")
+        self.assertTrue(paths.journal.exists())
+
+    def test_staging_evidence_write_failure_does_not_claim_publication(self):
+        original = INSTALL._write_journal
+        def fail_owned_record(paths, journal):
+            if "staging_owned" in journal:
+                raise OSError("injected evidence write failure")
+            return original(paths, journal)
+        self.signer.fail_stage = True
+        INSTALL._write_journal = fail_owned_record
+        try:
+            with self.assertRaisesRegex(INSTALL.InstallError, "evidence write failure") as error:
+                self.install()
+        finally:
+            INSTALL._write_journal = original
+        self.assertFalse(error.exception.published)
+        with self.assertRaises(INSTALL.InstallError):
+            INSTALL.abandon_staging("boi", self.root)
+        self.assertTrue(INSTALL.product_paths("boi", self.root).journal.exists())
+
     def test_stage_failure_leaves_journal_and_no_public_app(self):
         self.signer.fail_stage = True
         with self.assertRaises(INSTALL.InstallError):

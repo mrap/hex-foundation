@@ -242,3 +242,33 @@ syncs the app parent. Failures remain loud, retain the journal and use the exist
 identity-checked rollback. An actor replacement stops rollback without deleting
 that actor's data. A partial publication is reported as such; it is not silently
 removed or described as a clean install.
+
+
+## Abandon a qualified staging failure
+
+`python3 -I -B macos-app-install.py abandon-staging PRODUCT --root ROOT`
+archives one failed prepublication attempt under
+`ROOT/.PRODUCT.abandoned-staging-TRANSACTION`. It does not sign, restore an old
+installation, publish a new installation, or change a service. A successful
+result has `action: abandoned-staging`, `published: false`, and `archive_path`.
+The next installation is a fresh transaction.
+
+New journals record the exact public app, CLI, alias, state and helper prestate,
+plus bound parent identities. App content is included. A caught staging failure
+also records candidate, receipt and rollback identities. Abandonment requires
+those records, an unchanged public prestate, unchanged staging evidence, and an
+absent or empty rollback directory. The product lock remains held throughout.
+The command prepares and syncs an exclusive archive manifest, moves only the
+matching evidence without replacing existing entries, then moves the journal
+last. All evidence remains available in that archive. It never deletes an actor
+replacement or rewrites any public product file.
+
+Old journals, later publication phases, and hard crashes without retained owned
+staging evidence remain blocked for manual review. A candidate-shaped filename
+alone is not sufficient evidence. This is cooperative local recovery, not a
+hostile same-user filesystem sandbox or complete post-crash rollback protocol.
+If archiving fails partway, the error reports `published: null` and the archive
+path. Keep both locations intact. The journal remains a blocker until its final
+move; do not delete it to force a retry. A final sync error after that move may
+leave a complete archive with no journal, and still reports incomplete recovery.
+No automatic retry of a partial archive is supported.

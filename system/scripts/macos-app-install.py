@@ -948,6 +948,115 @@ def _restore_public(parent_fd: int, target: Path, rollback: Path, old_name: str,
         os.close(rollback_fd)
 
 
+def _staging_identity(path: Path) -> dict[str, Any]:
+    identity = _entry_identity(path)
+    if identity.get("kind") == "d":
+        identity["tree_sha256"] = _tree_sha256(path)
+    return identity
+
+
+def _staging_targets(paths: Paths) -> dict[str, Path]:
+    targets = {"app": paths.app, "cli": paths.cli, "state": paths.state,
+               "signer": paths.helper_dir / "macos-signing.py",
+               "installer": paths.helper_dir / "macos-app-install.py"}
+    if paths.alias is not None:
+        targets["alias"] = paths.alias
+    return targets
+
+
+def _staging_prestate(paths: Paths) -> dict[str, Any]:
+    return {"targets": {name: _staging_identity(path) for name, path in _staging_targets(paths).items()},
+            "parents": {str(path.relative_to(paths.root)): _entry_identity(path)
+                        for path in (paths.root, paths.cli.parent, paths.helper_dir)}}
+
+
+class StagingRecoveryError(InstallError):
+    def __init__(self, detail: str, archive: Optional[Path] = None):
+        super().__init__(detail, published=None)
+        self.archive = str(archive) if archive is not None else None
+
+
+def abandon_staging(product: str, root: Path) -> dict[str, Any]:
+    """Archive a qualified, stopped prepublication attempt. Never restore public files."""
+    paths = product_paths(product, root)
+    _path_guard(paths)
+    if not paths.root.is_dir() or paths.root.is_symlink():
+        raise StagingRecoveryError("staging recovery requires an existing fixed root")
+    archive = None
+    try:
+        with _product_lock(paths), _open_dir(paths.root) as root_fd, \
+                _open_dir(paths.cli.parent) as cli_fd, _open_dir(paths.helper_dir) as helper_fd:
+            journal_identity = _entry_identity(paths.journal)
+            journal = _read_json(paths.journal, "staging journal")
+            if _entry_identity(paths.journal) != journal_identity:
+                raise InstallError("staging journal changed while read")
+            transaction = journal.get("transaction_id")
+            if (journal.get("schema_version") != JOURNAL_SCHEMA_VERSION or
+                    journal.get("product") != product or journal.get("root") != str(paths.root) or
+                    journal.get("phase") != "staging" or
+                    any(key in journal for key in ("candidate_hash", "verified", "old_helpers")) or
+                    not isinstance(transaction, str) or not re.fullmatch(r"[0-9a-f]{24}", transaction)):
+                raise InstallError("only a matching prepublication staging journal can be abandoned")
+            candidate = _new_candidate(paths, transaction)
+            receipt = candidate.with_name(candidate.name + ".receipt.json")
+            rollback = _rollback_dir(paths, transaction)
+            if journal.get("candidate") != str(candidate) or journal.get("rollback") != str(rollback):
+                raise InstallError("staging journal paths do not match fixed transaction paths")
+            expected = journal.get("staging_prestate")
+            owned = journal.get("staging_owned")
+            artifacts = {"candidate": candidate, "receipt": receipt, "rollback": rollback}
+            if not isinstance(expected, dict) or not isinstance(owned, dict) or set(owned) != set(artifacts):
+                raise InstallError("staging journal lacks qualified prestate or owned evidence; manual review required")
+            def unchanged():
+                for fd, parent in ((root_fd, paths.root), (cli_fd, paths.cli.parent), (helper_fd, paths.helper_dir)):
+                    _revalidate_parent(fd, parent)
+                if _staging_prestate(paths) != expected:
+                    raise InstallError("public staging prestate changed; refusing abandonment")
+                if _entry_identity(paths.journal) != journal_identity:
+                    raise InstallError("staging journal changed during recovery")
+            unchanged()
+            for name, path in artifacts.items():
+                if _staging_identity(path) != owned[name]:
+                    raise InstallError("owned staging evidence changed: " + name)
+                if owned[name].get("present"):
+                    required_kind = "-" if name == "receipt" else "d"
+                    if owned[name].get("kind") != required_kind:
+                        raise InstallError("unexpected staging evidence type: " + name)
+            if rollback.exists() and any(rollback.iterdir()):
+                raise InstallError("nonempty rollback is not prepublication staging")
+            archive = paths.root / f".{product}.abandoned-staging-{transaction}"
+            archive.mkdir(mode=0o700)
+            archive_identity = _entry_identity(archive)
+            with _open_dir(archive) as archive_fd:
+                manifest = {"schema_version": 1, "product": product, "transaction_id": transaction,
+                            "journal_identity": journal_identity, "staging_owned": owned,
+                            "staging_prestate": expected}
+                _write_private(archive / "recovery-manifest.json", (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode())
+                _fsync_dir(archive_fd)
+                _fsync_dir(root_fd)
+                for name, path in artifacts.items():
+                    unchanged()
+                    _revalidate_parent(archive_fd, archive)
+                    if _entry_identity(archive) != archive_identity or _staging_identity(path) != owned[name]:
+                        raise InstallError("staging evidence or archive changed before move")
+                    if owned[name].get("present"):
+                        _atomic_move(root_fd, path, archive_fd, archive / path.name)
+                        if _staging_identity(archive / path.name) != owned[name]:
+                            raise InstallError("staging evidence changed while archived")
+                _fsync_dir(archive_fd)
+                _fsync_dir(root_fd)
+                unchanged()
+                _revalidate_parent(archive_fd, archive)
+                # The journal remains the fail-closed blocker until all evidence is archived.
+                _atomic_move(root_fd, paths.journal, archive_fd, archive / paths.journal.name)
+                _fsync_dir(archive_fd)
+                _fsync_dir(root_fd)
+            return {"schema_version": 1, "product": product, "action": "abandoned-staging",
+                    "transaction_id": transaction, "archive_path": str(archive), "published": False}
+    except (InstallError, OSError) as exc:
+        raise StagingRecoveryError(str(exc), archive) from exc
+
+
 def install(product: str, root: Path, source: Path, signer: Signer, *, policy_path: Optional[Path] = None, helper_provenance: Optional[Mapping[str, Any]] = None, helper_sources: Optional[Mapping[str, Path]] = None, source_revision: Optional[str] = None, version: str = "1.0.0") -> dict[str, Any]:
     """Stage and publish one complete app. The caller owns no service action."""
     item = PRODUCTS.get(product)
@@ -995,6 +1104,7 @@ def install(product: str, root: Path, source: Path, signer: Signer, *, policy_pa
         if initial_mode == "signed-current" and old_app != _entry_identity(paths.app):
             raise InstallError("app changed during state detection")
         journal: dict[str, Any] = {"schema_version": JOURNAL_SCHEMA_VERSION, "transaction_id": transaction_id, "product": product, "phase": "staging", "root": str(paths.root), "candidate": str(candidate), "rollback": str(rollback), "expected_old_app": old_app, "expected_old_cli": old_cli}
+        journal["staging_prestate"] = _staging_prestate(paths)
         published: list[tuple[int, Path, str, bool, dict[str, Any], Optional[Path]]] = []
         _write_journal(paths, journal)
         try:
@@ -1132,6 +1242,19 @@ def install(product: str, root: Path, source: Path, signer: Signer, *, policy_pa
             return state
         except Exception as exc:
             rollback_errors = []
+            staging_evidence_error = None
+            if journal["phase"] == "staging" and not published:
+                try:
+                    # This is a cooperative, completed signer call, not evidence from
+                    # a crash or a still-running guardian. Such attempts stay blocked.
+                    if os.path.lexists(_failure_path(paths)):
+                        raise InstallError("signer cleanup remains unresolved")
+                    journal["staging_owned"] = {"candidate": _staging_identity(candidate),
+                                                "receipt": _staging_identity(receipt),
+                                                "rollback": _staging_identity(rollback)}
+                    _write_journal(paths, journal)
+                except Exception as evidence_exc:
+                    staging_evidence_error = "staging evidence could not be retained: " + str(evidence_exc)
             if rollback.is_dir():
                 for parent_fd, target, old_name, had_old, expected_current, fallback in reversed(published):
                     try:
@@ -1139,6 +1262,8 @@ def install(product: str, root: Path, source: Path, signer: Signer, *, policy_pa
                     except Exception as rollback_exc:
                         rollback_errors.append(str(rollback_exc))
             detail = str(exc)
+            if staging_evidence_error:
+                detail += "; " + staging_evidence_error
             if rollback_errors:
                 detail += "; rollback failed: " + "; ".join(rollback_errors)
             raise InstallError(detail, published=bool(published) or bool(rollback_errors)) from exc
@@ -1910,6 +2035,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     common("service-owner")
     service_parser = common("service-reconcile")
     service_parser.add_argument("--dry-run", action="store_true")
+    common("abandon-staging")
     common("cleanup-status")
     common("cleanup-retry")
     alias_parser = commands.add_parser("compatibility-alias")
@@ -1933,6 +2059,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                                              ProcessSigner(), dry_run=args.dry_run))
         if args.policy is not None and args.policy.absolute() != policy.absolute():
             raise InstallError("CLI signing policy must use the central machine path")
+        if args.command == "abandon-staging":
+            if args.lock_fd is not None:
+                raise StagingRecoveryError("abandon-staging acquires its own product lock")
+            return _emit(abandon_staging(args.product, args.root))
         if args.command in ("cleanup-status", "cleanup-retry"):
             result = cleanup_operation(args.product, args.root, args.command.removeprefix("cleanup-"))
             _emit(result)
@@ -1979,6 +2109,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         helper = Path(__file__).with_name("macos-signing.py")
         state = install(args.product, args.root, args.source, signer, policy_path=policy, helper_provenance=_helper_provenance(helper, args.root, args.helper_source_revision), helper_sources={"macos-signing.py": helper, "macos-app-install.py": Path(__file__).absolute()}, source_revision=args.source_revision, version=args.version)
         return _emit(state)
+    except StagingRecoveryError as exc:
+        print(json.dumps({"schema_version": 1, "error": str(exc), "published": None,
+                          "archive_path": exc.archive, "action": "abandonment-incomplete"}), file=sys.stderr)
+        return 1
     except AliasError as exc:
         print(json.dumps(dict(exc.result, error=str(exc))), file=sys.stderr)
         return 1
