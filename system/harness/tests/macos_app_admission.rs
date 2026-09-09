@@ -30,13 +30,30 @@ fn install_signed_fixture(root: &Path) {
     )
     .unwrap();
     let signer = source_scripts.join("macos-signing.py");
-    let signer_source = r#"import json, pathlib, shutil, sys
-def _read_policy(path):
-    value=json.loads(path.read_text())
-    assert value['schema_version']==1 and len(value['certificate_sha1'])==40 and len(value['team_id'])==10
-    return value
+    let accepted_signer = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../system/scripts/macos-signing.py")
+            .canonicalize()
+            .unwrap(),
+    )
+    .unwrap();
+    let reader_start = accepted_signer.find("def _unique_json_pairs").unwrap();
+    let reader_end = accepted_signer[reader_start..]
+        .find("\ndef _sha256")
+        .unwrap()
+        + reader_start;
+    let policy_reader = &accepted_signer[reader_start..reader_end];
+    let signer_source = format!(
+        r#"import json, pathlib, shutil, sys, re
+from pathlib import Path
+class SigningError(RuntimeError): pass
+SCHEMA_VERSION=1
+POLICY_KEYS={{"schema_version", "certificate_sha1", "team_id", "keychain"}}
+FINGERPRINT_RE=re.compile(r"^[0-9A-Fa-f]{{40}}$")
+TEAM_RE=re.compile(r"^[A-Za-z0-9]{{10}}$")
+{policy_reader}
 def _result():
-    return {'identifier':'com.mrap.hex','version':'1.0.0','team_id':'TEAM123456','certificate_sha1':'A'*40,'designated_requirements':{'arm64':'anchor apple generic'},'mach_o_uuids':{'arm64':'11111111-1111-1111-1111-111111111111'}}
+    return {{'identifier':'com.mrap.hex','version':'{version}','team_id':'TEAM123456','certificate_sha1':'A'*40,'designated_requirements':{{'arm64':'anchor apple generic'}},'mach_o_uuids':{{'arm64':'11111111-1111-1111-1111-111111111111'}}}}
 def main():
     args=sys.argv[1:]
     if args[0]=='verify-installed':
@@ -46,8 +63,10 @@ def main():
         source=pathlib.Path(args[0]); candidate=pathlib.Path(args[3]); candidate.joinpath('Contents/MacOS').mkdir(parents=True); shutil.copy2(source,candidate/'Contents/MacOS/hex'); (candidate/'Contents/Info.plist').write_bytes(b'fixture plist'); print(json.dumps(_result()))
 if __name__ == '__main__':
     main()
-"#
-    .replace("1.0.0", env!("CARGO_PKG_VERSION"));
+"#,
+        policy_reader = policy_reader,
+        version = env!("CARGO_PKG_VERSION"),
+    );
     fs::write(&signer, signer_source).unwrap();
     let source_bin = source.join("hex-source");
     fs::write(&source_bin, b"fixture hex executable").unwrap();
@@ -174,19 +193,44 @@ fn watchdog_recovery_only_reads_service_status_when_install_is_invalid() {
     assert!(!temp.path().join("hex/.hex/logs").exists());
 }
 
+fn write_locked_launchctl_spy(root: &Path) {
+    let spy = root.join("launchctl");
+    fs::write(
+        &spy,
+        r##"#!/bin/sh
+/usr/bin/python3 - "$HEX_DIR/.hex/.hex.app-install.lock" <<'PY'
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    raise SystemExit(1)
+raise SystemExit(0)
+PY
+probe=$?
+if [ "$probe" -eq 0 ]; then
+    printf 'lock=free %s\n' "$*" >> "$HOME/launchctl-calls"
+    exit 97
+fi
+if [ "$probe" -ne 1 ]; then
+    printf 'lock=probe-error(%s) %s\n' "$probe" "$*" >> "$HOME/launchctl-calls"
+    exit 98
+fi
+printf 'lock=held %s\n' "$*" >> "$HOME/launchctl-calls"
+case "$1" in print) exit 0;; *) exit 0;; esac
+"##,
+    )
+    .unwrap();
+    fs::set_permissions(&spy, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 #[test]
 fn start_uses_verified_app_owner_and_common_installer() {
     let temp = tempfile::tempdir().unwrap();
     install_signed_fixture(temp.path());
     let home = temp.path().join("home");
     let hex = temp.path().join("hex");
-    let spy = temp.path().join("launchctl");
-    fs::write(
-        &spy,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/launchctl-calls\"\ncase \"$1\" in print) exit 0;; *) exit 0;; esac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&spy, fs::Permissions::from_mode(0o755)).unwrap();
+    write_locked_launchctl_spy(temp.path());
     let output = Command::new(env!("CARGO_BIN_EXE_hex"))
         .args(["harness", "start"])
         .env_clear()
@@ -202,9 +246,54 @@ fn start_uses_verified_app_owner_and_common_installer() {
     );
     let calls = fs::read_to_string(home.join("launchctl-calls")).unwrap();
     assert!(calls.contains("bootstrap"), "{calls}");
+    assert!(
+        calls.lines().all(|line| line.starts_with("lock=held ")),
+        "{calls}"
+    );
     let plist =
         fs::read_to_string(home.join("Library/LaunchAgents/com.hex.harness.plist")).unwrap();
     assert!(plist.contains("Hex.app/Contents/MacOS/hex"), "{plist}");
     assert!(plist.contains("com.mrap.hex"), "{plist}");
     assert!(hex.join(".hex/Hex.app.install-state.json").is_file());
+}
+
+#[test]
+fn changed_install_evidence_blocks_before_any_service_mutation() {
+    for defect in ["executable", "helper", "policy", "journal"] {
+        let temp = tempfile::tempdir().unwrap();
+        install_signed_fixture(temp.path());
+        let home = temp.path().join("home");
+        let hex = temp.path().join("hex");
+        match defect {
+            "executable" => {
+                fs::write(hex.join(".hex/Hex.app/Contents/MacOS/hex"), b"changed").unwrap()
+            }
+            "helper" => fs::write(hex.join(".hex/libexec/macos-signing.py"), b"changed").unwrap(),
+            "policy" => fs::write(
+                home.join("Library/Application Support/Hex/build-signing/policy.json"),
+                b"{}",
+            )
+            .unwrap(),
+            "journal" => fs::write(hex.join(".hex/.hex.app-install.journal.json"), b"{}").unwrap(),
+            _ => unreachable!(),
+        }
+        write_locked_launchctl_spy(temp.path());
+        let output = Command::new(env!("CARGO_BIN_EXE_hex"))
+            .args(["harness", "start"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("HEX_DIR", &hex)
+            .env("PATH", format!("{}:/usr/bin:/bin", temp.path().display()))
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{defect}");
+        assert!(!home.join("launchctl-calls").exists(), "{defect}");
+        assert!(!hex.join(".hex/logs").exists(), "{defect}");
+        assert!(
+            !home
+                .join("Library/LaunchAgents/com.hex.harness.plist")
+                .exists(),
+            "{defect}"
+        );
+    }
 }
