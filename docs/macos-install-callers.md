@@ -37,15 +37,17 @@ its recorded source revision equals the selected checkout revision. It reads the
 transaction at `~/.codeintel`, and never copies them into `.hex/bin` when the
 products are managed. It records the source checkout revision before the build
 and refuses publication if the checkout becomes dirty or moves. Each Cargo
-build uses a fresh private target directory, so an old artifact cannot satisfy
-the exact output check.
+build uses a fresh private target directory, passes the local `rustc` host
+target explicitly, and requires both package binaries at that target's release
+path. An old artifact cannot satisfy the exact output check.
 
 After both managed products publish, the caller invokes
 `service-reconcile code-intel-daemon --root "$HOME/.codeintel"`. It accepts only
 schema 1, the exact product, `signed-current`, fixed owner paths, and the actions
 `loaded`, `stopped`, `absent`, `updated-stopped`, `restarted`, or `recovered`.
 Changed actions must report `service_needs_change=true` and `published=true`.
-Every successful response also carries `service_recovery_pending`; when a stale
+Every successful response also carries `service_recovery_pending`; a healthy
+stopped or unloaded dry-run is accepted without requiring a restart. When a stale
 daemon has a validated pending marker, the caller settles that marker before
 publishing a replacement app.
 The common operation keeps absent or stopped services stopped. Any reconciliation

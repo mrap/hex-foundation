@@ -109,14 +109,14 @@ _macos_app_service_reconcile() {
     MACOS_APP_SERVICE_RECOVERY_PENDING=$(/usr/bin/python3 -I -B -c '
 import json,sys
 value=json.loads(sys.stdin.read())
-if not isinstance(value, dict) or value.get("schema_version") != 1 or value.get("product") != sys.argv[1] or value.get("mode") != "signed-current" or type(value.get("service_action")) is not str or type(value.get("service_needs_change")) is not bool or type(value.get("published")) is not bool or type(value.get("service_recovery_pending")) is not bool or not isinstance(value.get("plist_path"),str) or not isinstance(value.get("executable_path"),str):
+if not isinstance(value, dict) or type(value.get("schema_version")) is not int or value.get("schema_version") != 1 or value.get("product") != sys.argv[1] or value.get("mode") != "signed-current" or type(value.get("service_action")) is not str or type(value.get("service_needs_change")) is not bool or type(value.get("published")) is not bool or type(value.get("service_recovery_pending")) is not bool or not isinstance(value.get("plist_path"),str) or not isinstance(value.get("executable_path"),str):
     raise SystemExit("invalid service-reconcile response")
 action=value["service_action"]
 changed=action in {"restarted","recovered","updated-stopped"}
 unchanged=action in {"loaded","stopped","absent"}
 preview=action in {"would-restart","would-update-stopped"}
 if sys.argv[4] == "true":
-    if not preview or not value["service_needs_change"] or value["published"]:
+    if (preview and (not value["service_needs_change"] or value["published"])) or (not preview and (not unchanged or value["service_needs_change"] or value["published"])):
         raise SystemExit("invalid dry-run service state")
 elif not (changed or unchanged) or value["service_needs_change"] != changed or value["published"] != changed:
     raise SystemExit("invalid service-reconcile state")
@@ -844,18 +844,18 @@ _harness_build_from_source() {
 # hex. Best-effort: a failure here must not fail the hex install (and must not
 # trigger the prebuilt-hex download fallback) — warn loudly and move on.
 _code_intel_build_and_deploy() {
+    local target_dir="${1:-${CARGO_TARGET_DIR:-$TARGET_DIR/.hex/cargo-target}}"
+    local cli_managed="${2:-false}" daemon_managed="${3:-false}" source_revision="${4:-}"
+    local cli_mode="${5:-}" daemon_mode="${6:-}" cli_revision="${7:-}" daemon_revision="${8:-}"
     if [ ! -f "$SCRIPT_DIR/system/code-intel/Cargo.toml" ]; then
-        if [ "$2" = true ] || [ "$3" = true ]; then
+        if [ "$cli_managed" = true ] || [ "$daemon_managed" = true ]; then
             echo "ERROR: managed code-intel state exists but Cargo.toml is missing" >&2
             return 1
         fi
         return 0
     fi
-    local target_dir="${1:-${CARGO_TARGET_DIR:-$TARGET_DIR/.hex/cargo-target}}"
-    local cli_managed="${2:-false}" daemon_managed="${3:-false}" source_revision="${4:-}"
-    local cli_mode="${5:-}" daemon_mode="${6:-}" cli_revision="${7:-}" daemon_revision="${8:-}"
     local version
-    version=$(/usr/bin/python3 -I -B -c 'import re,sys; text=open(sys.argv[1]).read(); match=re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.M); sys.stdout.write(match.group(1)+"\n") if match else sys.exit("missing code-intel version")' "$SCRIPT_DIR/system/code-intel/Cargo.toml") || return 1
+    version=$(/usr/bin/python3 -I -B -c 'import re,sys; text=open(sys.argv[1]).read(); block=re.search(r"(?ms)^\[package\]\s*(.*?)(?=^\[|\Z)",text); match=re.search(r"^version\s*=\s*\"([^\"]+)\"\s*$",block.group(1),re.M) if block else None; sys.stdout.write(match.group(1)+"\n") if match else sys.exit("missing package version")' "$SCRIPT_DIR/system/code-intel/Cargo.toml") || return 1
     if [ "$cli_managed" = true ] || [ "$daemon_managed" = true ]; then
         [ "$cli_managed" = true ] && [ "$daemon_managed" = true ] || {
             echo "ERROR: code-intel products have inconsistent managed state; refusing partial publication" >&2
@@ -879,37 +879,50 @@ _code_intel_build_and_deploy() {
         fi
     fi
     local build_target
+    local host_target
     mkdir -p "$target_dir" || return 1
     build_target=$(mktemp -d "$target_dir/code-intel-build.XXXXXX") || return 1
+    host_target=$(rustc -vV | awk '/^host: / {print $2}') || { rm -rf -- "$build_target"; return 1; }
+    case "$host_target" in
+        ""|*/*|*" "*)
+        echo "ERROR: rustc host target is invalid" >&2
+        rm -rf -- "$build_target"
+        return 1
+        ;;
+    esac
+    cleanup_target() { rm -rf -- "$build_target"; }
     echo "  Building code-intel binaries (cq, scipd)..."
-    if ! ( cd "$SCRIPT_DIR/system/code-intel" && CARGO_TARGET_DIR="$build_target" cargo build --release 2>&1 ); then
+    if ! ( cd "$SCRIPT_DIR/system/code-intel" && CARGO_TARGET_DIR="$build_target" cargo build --locked --release --package scipd --bin cq --bin scipd --target "$host_target" 2>&1 ); then
         echo "  ERROR: code-intel build failed; no companion publication occurred" >&2
+        cleanup_target
         return 1
     fi
     local source_after source_status_after
-    source_status_after=$(git -C "$SCRIPT_DIR" status --porcelain --untracked-files=all) || return 1
-    source_after=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || return 1
+    source_status_after=$(git -C "$SCRIPT_DIR" status --porcelain --untracked-files=all) || { cleanup_target; return 1; }
+    source_after=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || { cleanup_target; return 1; }
     if [ -n "$source_status_after" ] || [ "$source_after" != "$source_revision" ]; then
         echo "  ERROR: source checkout changed during code-intel build; refusing companion publication" >&2
+        cleanup_target
         return 1
     fi
     local name ci_bin
     for name in cq scipd; do
-        ci_bin="$build_target/release/$name"
-        [ -x "$ci_bin" ] || { echo "ERROR: missing exact code-intel artifact: $ci_bin" >&2; return 1; }
+        ci_bin="$build_target/$host_target/release/$name"
+        [ -x "$ci_bin" ] || { echo "ERROR: missing exact code-intel artifact: $ci_bin" >&2; cleanup_target; return 1; }
         local product=code-intel-cli root="$HOME/.codeintel"
         [ "$name" = scipd ] && product=code-intel-daemon
         if [ "$cli_managed" = true ]; then
             local source_now source_status_now
-            source_status_now=$(git -C "$SCRIPT_DIR" status --porcelain --untracked-files=all) || return 1
-            source_now=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || return 1
+            source_status_now=$(git -C "$SCRIPT_DIR" status --porcelain --untracked-files=all) || { cleanup_target; return 1; }
+            source_now=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || { cleanup_target; return 1; }
             if [ -n "$source_status_now" ] || [ "$source_now" != "$source_revision" ]; then
                 echo "  ERROR: source checkout changed before publishing $name; refusing companion publication" >&2
+                cleanup_target
                 return 1
             fi
             if { [ "$name" = cq ] && { [ "$cli_mode" != signed-current ] || [ "$cli_revision" != "$source_revision" ]; }; } || { [ "$name" = scipd ] && { [ "$daemon_mode" != signed-current ] || [ "$daemon_revision" != "$source_revision" ]; }; }; then
-                _macos_app_install "$product" "$root" "$ci_bin" "$version" "$source_revision" "$source_revision" || return 1
-                _macos_app_compatibility_alias "$product" "$root" "$TARGET_DIR" "$source_revision" || return 1
+                _macos_app_install "$product" "$root" "$ci_bin" "$version" "$source_revision" "$source_revision" || { cleanup_target; return 1; }
+                _macos_app_compatibility_alias "$product" "$root" "$TARGET_DIR" "$source_revision" || { cleanup_target; return 1; }
             fi
         else
             mkdir -p "$TARGET_DIR/.hex/bin"
@@ -918,8 +931,9 @@ _code_intel_build_and_deploy() {
         fi
     done
     if [ "$cli_managed" = true ]; then
-        _macos_app_service_reconcile code-intel-daemon "$HOME/.codeintel" || return 1
+        _macos_app_service_reconcile code-intel-daemon "$HOME/.codeintel" || { cleanup_target; return 1; }
     fi
+    cleanup_target
 }
 
 _harness_download_prebuilt() {

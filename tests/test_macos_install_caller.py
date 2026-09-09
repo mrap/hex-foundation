@@ -360,7 +360,7 @@ def test_codeintel_managed_build_uses_exact_artifacts_and_reconcile() -> None:
         temp = Path(raw)
         source = temp / "source"
         (source / "system" / "code-intel").mkdir(parents=True)
-        (source / "system" / "code-intel" / "Cargo.toml").write_text('version = "2.3.4"\n', encoding="utf-8")
+        (source / "system" / "code-intel" / "Cargo.toml").write_text('[package]\nname = "scipd"\nversion = "2.3.4"\n', encoding="utf-8")
         subprocess.run(["git", "init", "-q", str(source)], check=True)
         subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.com"], check=True)
         subprocess.run(["git", "-C", str(source), "config", "user.name", "test"], check=True)
@@ -374,10 +374,11 @@ def test_codeintel_managed_build_uses_exact_artifacts_and_reconcile() -> None:
             "#!/bin/sh\n"
             "if [ \"${CARGO_MODE:-ok}\" = fail ]; then exit 23; fi\n"
             "if [ \"${SOURCE_CHANGE:-0}\" = 1 ]; then printf changed >> \"$TEST_SOURCE/system/code-intel/Cargo.toml\"; fi\n"
-            "mkdir -p \"$CARGO_TARGET_DIR/release\"\n"
-            "printf cq > \"$CARGO_TARGET_DIR/release/cq\"\n"
-            "if [ \"${MISSING_SCIPD:-0}\" != 1 ]; then printf scipd > \"$CARGO_TARGET_DIR/release/scipd\"; fi\n"
-            "chmod +x \"$CARGO_TARGET_DIR/release/cq\"; [ \"${MISSING_SCIPD:-0}\" = 1 ] || chmod +x \"$CARGO_TARGET_DIR/release/scipd\"\n",
+            "target=host; while [ $# -gt 0 ]; do [ \"$1\" = --target ] && target=$2 && shift; shift; done\n"
+            "mkdir -p \"$CARGO_TARGET_DIR/$target/release\"\n"
+            "printf cq > \"$CARGO_TARGET_DIR/$target/release/cq\"\n"
+            "if [ \"${MISSING_SCIPD:-0}\" != 1 ]; then printf scipd > \"$CARGO_TARGET_DIR/$target/release/scipd\"; fi\n"
+            "chmod +x \"$CARGO_TARGET_DIR/$target/release/cq\"; [ \"${MISSING_SCIPD:-0}\" = 1 ] || chmod +x \"$CARGO_TARGET_DIR/$target/release/scipd\"\n",
             encoding="utf-8",
         )
         (fake_bin / "cargo").chmod(0o755)
@@ -390,7 +391,7 @@ def test_codeintel_managed_build_uses_exact_artifacts_and_reconcile() -> None:
             "if args[0] == 'install' and os.environ.get('INSTALL_FAIL') == args[1]: raise SystemExit(17)\n"
             "if args[0] == 'compatibility-alias': print(json.dumps({'schema_version':1,'product':args[1],'source_revision':os.environ.get('TEST_REVISION','a'*40),'generation':'g','alias_path':os.environ['HEX_WORKSPACE']+'/.hex/bin/'+('scipd' if args[1]=='code-intel-daemon' else 'cq'),'target_path':args[3]+'/bin/'+('scipd' if args[1]=='code-intel-daemon' else 'cq'),'action':'current','changed':False,'published':False}))\n"
             "elif args[0] == 'service-reconcile' and os.environ.get('RECONCILE_BAD') == '1': print('{}'); raise SystemExit(0)\n"
-            "elif args[0] == 'service-reconcile': pending=os.environ.get('SERVICE_PENDING') == '1'; dry='--dry-run' in args; action='would-update-stopped' if dry else ('recovered' if pending else 'stopped'); changed=action in {'recovered','updated-stopped','restarted'}; print(json.dumps({'schema_version':1,'product':args[1],'mode':'signed-current','service_action':action,'service_needs_change':dry or changed,'published':changed,'service_recovery_pending':pending,'plist_path':os.environ['HOME']+'/Library/LaunchAgents/com.hex.scipd.plist','executable_path':args[3]+'/SCIPD.app/Contents/MacOS/scipd'}))\n"
+            "elif args[0] == 'service-reconcile': pending=os.environ.get('SERVICE_PENDING') == '1'; dry='--dry-run' in args; action='would-update-stopped' if dry and pending else ('stopped' if dry else ('recovered' if pending else 'stopped')); changed=action in {'recovered','updated-stopped','restarted'}; print(json.dumps({'schema_version':1,'product':args[1],'mode':'signed-current','service_action':action,'service_needs_change':dry and pending or changed,'published':changed,'service_recovery_pending':pending,'plist_path':os.environ['HOME']+'/Library/LaunchAgents/com.hex.scipd.plist','executable_path':args[3]+'/SCIPD.app/Contents/MacOS/scipd'}))\n"
             "else: print(json.dumps({'schema_version':1,'product':args[1],'mode':'signed-current'}))\n",
             encoding="utf-8",
         )
@@ -405,8 +406,7 @@ TARGET_DIR="$TEST_TARGET"
 MACOS_APP_INSTALLER="$TEST_HELPER"
 _macos_app_enabled() { return 0; }
 _code_intel_build_and_deploy "$TEST_TARGET_DIR" true true "$TEST_REVISION" signed-current signed-current "${CLI_REVISION:-}" "${DAEMON_REVISION:-}"
-test "$(find "$TEST_TARGET_DIR" -path '*/release/cq' -type f | wc -l | tr -d ' ')" -ge 1
-test "$(find "$TEST_TARGET_DIR" -path '*/release/scipd' -type f | wc -l | tr -d ' ')" -ge 1
+test ! -e "$TEST_TARGET_DIR"/code-intel-build.*
 test ! -e "$TEST_HEX/.hex/bin/cq"
 test ! -e "$TEST_HEX/.hex/bin/scipd"
 """,
@@ -436,6 +436,18 @@ test ! -e "$TEST_HEX/.hex/bin/scipd"
         assert calls[0][calls[0].index("--version") + 1] == "2.3.4"
         assert calls[0][calls[0].index("--source") + 1].startswith(str(target / "code-intel-build."))
         assert calls[0][calls[0].index("--source") + 1].endswith("/release/cq")
+        assert not list(target.glob("code-intel-build.*"))
+
+        log.write_text("", encoding="utf-8")
+        healthy_retry = subprocess.run(
+            ["bash", str(shell)],
+            env=env | {"CLI_REVISION": "old" * 10, "DAEMON_REVISION": "old" * 10},
+            capture_output=True,
+            text=True,
+        )
+        assert healthy_retry.returncode == 0, healthy_retry.stderr
+        healthy_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        assert "--dry-run" in next(call for call in healthy_calls if call[0] == "service-reconcile")
 
         log.write_text("", encoding="utf-8")
         pending_retry = subprocess.run(
@@ -473,7 +485,7 @@ def test_managed_companion_failure_is_not_raw_fallback_after_hex_success() -> No
         source = temp / "source"
         (source / "system" / "harness").mkdir(parents=True)
         (source / "system" / "code-intel").mkdir(parents=True)
-        (source / "system" / "code-intel" / "Cargo.toml").write_text('version = "2.3.4"\n', encoding="utf-8")
+        (source / "system" / "code-intel" / "Cargo.toml").write_text('[package]\nname = "scipd"\nversion = "2.3.4"\n', encoding="utf-8")
         subprocess.run(["git", "init", "-q", str(source)], check=True)
         subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.com"], check=True)
         subprocess.run(["git", "-C", str(source), "config", "user.name", "test"], check=True)
@@ -482,11 +494,11 @@ def test_managed_companion_failure_is_not_raw_fallback_after_hex_success() -> No
         fake_bin = temp / "bin"
         fake_bin.mkdir()
         (fake_bin / "cargo").write_text(
-            "#!/bin/sh\nmkdir -p \"$CARGO_TARGET_DIR/release\"\n"
-            "printf hex > \"$CARGO_TARGET_DIR/release/hex\"\n"
-            "printf cq > \"$CARGO_TARGET_DIR/release/cq\"\n"
-            "printf scipd > \"$CARGO_TARGET_DIR/release/scipd\"\n"
-            "chmod +x \"$CARGO_TARGET_DIR/release/hex\" \"$CARGO_TARGET_DIR/release/cq\" \"$CARGO_TARGET_DIR/release/scipd\"\n",
+            "#!/bin/sh\ntarget_prefix=; while [ $# -gt 0 ]; do [ \"$1\" = --target ] && target_prefix=/$2 && shift; shift; done\nmkdir -p \"$CARGO_TARGET_DIR$target_prefix/release\"\n"
+            "printf hex > \"$CARGO_TARGET_DIR$target_prefix/release/hex\"\n"
+            "printf cq > \"$CARGO_TARGET_DIR$target_prefix/release/cq\"\n"
+            "printf scipd > \"$CARGO_TARGET_DIR$target_prefix/release/scipd\"\n"
+            "chmod +x \"$CARGO_TARGET_DIR$target_prefix/release/hex\" \"$CARGO_TARGET_DIR$target_prefix/release/cq\" \"$CARGO_TARGET_DIR$target_prefix/release/scipd\"\n",
             encoding="utf-8",
         )
         (fake_bin / "cargo").chmod(0o755)
