@@ -837,6 +837,30 @@ fn binary_is_stale(hex_dir: &Path, source_dir: &Path) -> io::Result<bool> {
     ))
 }
 
+/// Report whether the managed foundation pin needs reconciliation. This is a
+/// metadata-only change and must not force a binary rebuild, but it must keep
+/// the no-op preflight from skipping the VERSIONS sync.
+fn versions_pin_is_stale(hex_dir: &Path, source_dir: &Path) -> io::Result<bool> {
+    let versions_file = hex_dir.join("VERSIONS");
+    let cargo_toml = source_dir.join("system/harness/Cargo.toml");
+    if !versions_file.exists() || !cargo_toml.exists() {
+        return Ok(false);
+    }
+    let existing = fs::read_to_string(&versions_file)?;
+    let cargo_ver = read_cargo_version(&cargo_toml)?;
+    let expected = format!("HEX_FOUNDATION_VERSION=v{cargo_ver}");
+    let mut found = 0;
+    for line in existing.lines() {
+        if line.trim_start().starts_with("HEX_FOUNDATION_VERSION=") {
+            found += 1;
+            if line.trim() != expected {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(found != 1)
+}
+
 /// True if the user has a personal overlay that `build.rs` compiles under
 /// `--features personal` — keyed on overlay-dir PRESENCE (`harness-personal/`
 /// integration probes, or `modules/` personal workers), not any specific file.
@@ -2039,8 +2063,23 @@ pub fn run(args: &[String]) -> i32 {
             return 1;
         }
     };
+    let versions_pin_stale = match versions_pin_is_stale(&hex_dir, &source_dir) {
+        Ok(stale) => stale,
+        Err(e) => {
+            eprintln!("  [FAIL] Could not inspect foundation version pin during preflight: {e}");
+            return 1;
+        }
+    };
+    if versions_pin_stale {
+        println!("  → VERSIONS foundation pin needs reconciliation.");
+    }
 
-    if total_changed == 0 && total_new == 0 && !version_changed && !binary_stale {
+    if total_changed == 0
+        && total_new == 0
+        && !version_changed
+        && !binary_stale
+        && !versions_pin_stale
+    {
         println!("  [OK] Everything is up to date. Nothing to do.");
         return 0;
     }
@@ -2507,6 +2546,76 @@ mod tests {
             binary_is_stale(&instance, &source).is_err(),
             "finding a version line is not parsing a manifest"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_reconciles_stale_versions_pin_when_other_inputs_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let instance = tmp.path().join("instance");
+        let source_files = [
+            "system/scripts/a.sh",
+            "system/skills/s/SKILL.md",
+            "system/commands/c.md",
+            "system/hooks/h.sh",
+            "system/iii/i.yml",
+            "system/templates/t.txt",
+            "system/version.txt",
+            "templates/AGENTS.md",
+        ];
+        for relative in source_files {
+            write_file(&source.join(relative), relative);
+            let destination = match relative {
+                "system/scripts/a.sh" => instance.join(".hex/scripts/a.sh"),
+                "system/skills/s/SKILL.md" => instance.join(".hex/skills/s/SKILL.md"),
+                "system/commands/c.md" => instance.join(".hex/commands/c.md"),
+                "system/hooks/h.sh" => instance.join(".hex/hooks/h.sh"),
+                "system/iii/i.yml" => instance.join(".hex/iii/i.yml"),
+                "system/templates/t.txt" => instance.join(".hex/templates/t.txt"),
+                "system/version.txt" => instance.join(".hex/version.txt"),
+                "templates/AGENTS.md" => continue,
+                _ => unreachable!(),
+            };
+            write_file(&destination, relative);
+        }
+        write_file(
+            &instance.join(".claude/commands/c.md"),
+            "system/commands/c.md",
+        );
+        write_file(
+            &source.join("system/harness/Cargo.toml"),
+            "[package]\nname = \"hex-harness\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        );
+        init_test_repo(&source);
+        seed_commit(&source, "stale versions preflight fixture");
+
+        write_file(&instance.join("AGENTS.md"), "# test instance\n");
+        write_file(
+            &instance.join("VERSIONS"),
+            "# keep this comment\nHEX_FOUNDATION_VERSION=v0.0.0\nOTHER_PIN=v9\nHEX_FOUNDATION_VERSION=v0.0.0\n",
+        );
+        let bin = instance.join(".hex/bin/hex");
+        write_file(&bin, "#!/bin/sh\nprintf 'hex 1.0.0\\n'\n");
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        let sha = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&source)
+            .output()
+            .unwrap();
+        assert!(sha.status.success());
+        fs::write(instance.join(".hex/bin/hex.sha"), sha.stdout).unwrap();
+
+        unsafe { std::env::set_var("HEX_DIR", &instance) };
+        let args = vec!["--local".to_string(), source.to_string_lossy().into_owned()];
+        let exit = run(&args);
+        unsafe { std::env::remove_var("HEX_DIR") };
+        assert_eq!(exit, 0);
+        let versions = fs::read_to_string(instance.join("VERSIONS")).unwrap();
+        assert_eq!(versions.matches("HEX_FOUNDATION_VERSION=").count(), 1);
+        assert!(versions.contains("HEX_FOUNDATION_VERSION=v1.0.0"));
+        assert!(versions.contains("# keep this comment"));
+        assert!(versions.contains("OTHER_PIN=v9"));
     }
 
     // The wrapper block's guard is the function signature "claude() {".
