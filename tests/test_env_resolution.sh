@@ -110,6 +110,42 @@ else
   assert_fail "hex binary not available — cannot test env.sh sourcing"
 fi
 
+# ── Test 2a: GWS default and secure secret loading ──────────────────────────
+bold "── GWS and secrets ──"
+if [ -n "$HEX_BIN" ]; then
+  SECRETS_DIR="$INSTALL_DIR/.hex/secrets"
+  mkdir -p "$SECRETS_DIR"
+  printf '%s\n' 'export ENV_SH_ALLOWED=loaded' > "$SECRETS_DIR/allowed.env"
+  printf '%s\n' 'export ENV_SH_REJECTED=should_not_load' > "$SECRETS_DIR/shared.env"
+  chmod 600 "$SECRETS_DIR/allowed.env"
+  chmod 640 "$SECRETS_DIR/shared.env"
+
+  GWS_OUT=$(env -u GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND \
+    HEX_DIR="$INSTALL_DIR" PATH="$(dirname "$HEX_BIN"):$PATH" \
+    bash -c "source '$INSTALL_DIR/.hex/scripts/env.sh'; printf 'backend=%s allowed=%s rejected=%s\n' \"\$GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND\" \"\$ENV_SH_ALLOWED\" \"\${ENV_SH_REJECTED:-missing}\"" 2>&1)
+  if echo "$GWS_OUT" | grep -q 'backend=file allowed=loaded rejected=missing'; then
+    assert_pass "env.sh defaults GWS to the file backend and loads private secrets"
+  else
+    assert_fail "env.sh did not apply the GWS default or private-secret rule: $GWS_OUT"
+  fi
+  if echo "$GWS_OUT" | grep -q 'ERROR: refusing to load secret file shared.env: group or other permissions are set'; then
+    assert_pass "env.sh rejects group-readable secrets without exposing their path"
+  else
+    assert_fail "env.sh did not report the rejected secret file: $GWS_OUT"
+  fi
+
+  GWS_OVERRIDE=$(GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=keyring \
+    HEX_DIR="$INSTALL_DIR" PATH="$(dirname "$HEX_BIN"):$PATH" \
+    bash -c "source '$INSTALL_DIR/.hex/scripts/env.sh'; printf '%s' \"\$GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND\"" 2>/dev/null)
+  if [ "$GWS_OVERRIDE" = "keyring" ]; then
+    assert_pass "env.sh preserves an explicit GWS backend"
+  else
+    assert_fail "env.sh overwrote an explicit GWS backend: $GWS_OVERRIDE"
+  fi
+else
+  assert_fail "hex binary not available — cannot test GWS and secret loading"
+fi
+
 # ── Test 3: PATH composition via `hex env path` ─────────────────────────────
 bold "── PATH (hex env path) ──"
 if [ -n "$HEX_BIN" ]; then
