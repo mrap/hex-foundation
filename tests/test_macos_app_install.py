@@ -620,6 +620,51 @@ class FinalBoundaryTests(unittest.TestCase):
 
 
 class GuardianBoundaryTests(unittest.TestCase):
+    def test_clean_quarantine_exits_when_recovery_client_disconnects(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td) / "control"
+            directory.mkdir()
+            (directory / "control.sock").write_bytes(b"fixture endpoint")
+            paths = INSTALL.product_paths("boi", Path(td) / ".boi")
+            process = SimpleNamespace(pid=123, returncode=None)
+            closed = []
+            records = []
+            test = self
+
+            class Connection:
+                def __enter__(self): return self
+                def __exit__(self, *args): return False
+                def sendall(self, data):
+                    test.assertEqual(json.loads(data)["status"], "clean")
+                    test.assertTrue(server.closed)
+                    test.assertFalse(directory.exists())
+                    test.assertIn(991, closed)
+                    raise BrokenPipeError("recovery client disconnected")
+
+            class Server:
+                closed = False
+                accepts = 0
+                def accept(self):
+                    self.accepts += 1
+                    test.assertEqual(self.accepts, 1, "must not accept after cleanup closes server")
+                    return Connection(), None
+                def close(self): self.closed = True
+
+            server = Server()
+            def cleanup(*args): process.returncode = 0
+            with patch.object(INSTALL, "_cleanup_work", side_effect=cleanup) as clean, \
+                    patch.object(INSTALL, "_record_failure", side_effect=lambda paths, value: records.append(dict(value))), \
+                    patch.object(INSTALL, "_receive_control", return_value={"token": "token", "command": "retry"}), \
+                    patch.object(INSTALL.os, "write"), \
+                    patch.object(INSTALL.os, "close", side_effect=closed.append):
+                INSTALL._quarantine(paths, process, (), 992, OSError("initial cleanup failure"), 1, (server, directory, "token"), 991)
+            clean.assert_called_once_with(process, (), 1)
+            self.assertEqual([record["status"] for record in records], ["blocked", "clean"])
+            self.assertEqual(closed.count(991), 1)
+            self.assertEqual(server.accepts, 1)
+
     def test_retained_sources_survive_actual_disk_replacement(self):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as td:

@@ -1399,8 +1399,9 @@ def _quarantine(paths: Paths, process: subprocess.Popen, streams: tuple,
                     os.close(lock_fd)
                     try:
                         connection.sendall((json.dumps(value) + '\n').encode())
-                    finally:
-                        return
+                    except OSError:
+                        pass  # Cleanup is complete even if the client disconnected.
+                    return
                 connection.sendall((json.dumps(value) + '\n').encode())
             except (OSError, ValueError, InstallError) as exc:
                 try: connection.sendall((json.dumps({'error': str(exc)[:500]}) + '\n').encode())
