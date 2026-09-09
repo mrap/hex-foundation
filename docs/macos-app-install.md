@@ -28,6 +28,23 @@ public signature expectations, current hashes, and helper provenance. A
 caller that already holds the lock must pass the inherited lock context rather
 than acquire a nested lock.
 
+## scipd service reconciliation
+
+`service-reconcile code-intel-daemon --root ~/.codeintel` is the narrow launchd
+operation for the existing `com.hex.scipd` user service. It verifies the signed
+owner and helpers while holding the code-intel product lock, then reads the
+existing `~/Library/LaunchAgents/com.hex.scipd.plist` without following a
+symlink. It changes only `ProgramArguments` and the singleton
+`AssociatedBundleIdentifiers` value. It preserves other plist settings.
+
+The operation never creates an absent plist or starts an unloaded service. It
+may update an existing stopped plist without starting it. It restarts only a
+service that was loaded before the transaction. A restart failure after plist
+publication returns nonzero with `published: true`; callers must inspect that
+result before retrying. `code-intel-cli` is not a service and is rejected by
+this command. `--dry-run` performs no plist or launchd mutation and reports
+`service_needs_change`.
+
 ## Fixed locations
 
 The machine policy is shared:
