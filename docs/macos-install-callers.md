@@ -31,17 +31,22 @@ keeps its existing raw path until the common mode command reports a managed
 state.
 
 The source installer prepares both code-intel products before a build and
-rechecks them after the build. It reads the version from
+rechecks them after the build. A signed-current product is reusable only when
+its recorded source revision equals the selected checkout revision. It reads the version from
 `system/code-intel/Cargo.toml`, publishes `cq` and `scipd` through the common
 transaction at `~/.codeintel`, and never copies them into `.hex/bin` when the
 products are managed. It records the source checkout revision before the build
-and refuses publication if the checkout becomes dirty or moves.
+and refuses publication if the checkout becomes dirty or moves. Each Cargo
+build uses a fresh private target directory, so an old artifact cannot satisfy
+the exact output check.
 
 After both managed products publish, the caller invokes
 `service-reconcile code-intel-daemon --root "$HOME/.codeintel"`. It accepts only
-schema 1, the exact product, `signed-current`, a string `service_action`, and a
-boolean `service_needs_change`. The common operation keeps absent or stopped
-services stopped. Any reconciliation error fails the install.
+schema 1, the exact product, `signed-current`, fixed owner paths, and the actions
+`loaded`, `stopped`, `absent`, `updated-stopped`, `restarted`, or `recovered`.
+Changed actions must report `service_needs_change=true` and `published=true`.
+The common operation keeps absent or stopped services stopped. Any reconciliation
+error fails the install.
 
 The caller also invokes the shared `compatibility-alias` operation for each
 managed product. It guards `.hex/bin/cq` and `.hex/bin/scipd` against stale raw
