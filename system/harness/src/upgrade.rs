@@ -821,13 +821,20 @@ fn binary_is_stale(hex_dir: &Path, source_dir: &Path) -> io::Result<bool> {
     if !versions_file.exists() || !cargo_toml.exists() {
         return Ok(false);
     }
+    let signing_mode = hex::app_identity::prepare_upgrade(hex_dir, source_dir)?;
+    if signing_mode == hex::app_identity::UpgradeMode::Migrate {
+        return Ok(true);
+    }
     // VERSIONS is required by the apply step even when every selected file
     // is unchanged. Validate it before allowing the no-op fast path.
     fs::read_to_string(&versions_file)?;
     let cargo_ver = read_cargo_version(&cargo_toml)?;
     let hex_dot_dir = hex_dir.join(".hex");
     let installed_ver = read_installed_version(&hex_dot_dir.join("bin/hex"))?;
-    let installed_sha = read_optional_utf8(&hex_dot_dir.join("bin/hex.sha"))?;
+    let installed_sha = match signing_mode {
+        hex::app_identity::UpgradeMode::Signed(revision) => Some(revision),
+        _ => read_optional_utf8(&hex_dot_dir.join("bin/hex.sha"))?,
+    };
     let source_sha = read_source_sha(source_dir)?;
     Ok(binary_needs_rebuild(
         installed_ver.as_deref(),
@@ -903,6 +910,10 @@ fn sync_versions_file_protected(
         eprintln!("  [FAIL] Could not read package version from Cargo.toml: {e}");
         BinaryStepFailure::Build
     })?;
+    let signing_mode = hex::app_identity::prepare_upgrade(hex_dir, source_dir).map_err(|e| {
+        eprintln!("  [FAIL] App identity preflight failed: {e}");
+        BinaryStepFailure::Build
+    })?;
 
     // Preserve every existing line — comments, blank lines, and any
     // KEY=VALUE we do not manage (BOI_VERSION, custom instance pins,
@@ -973,15 +984,23 @@ fn sync_versions_file_protected(
     let installed_bin = hex_dot_dir.join("bin/hex");
     let installed_sha_file = hex_dot_dir.join("bin/hex.sha");
 
-    let installed_ver = read_installed_version(&installed_bin).map_err(|e| {
-        eprintln!("  [FAIL] Could not read installed hex version: {e}");
-        BinaryStepFailure::Build
-    })?;
+    let installed_ver = if signing_mode == hex::app_identity::UpgradeMode::Migrate {
+        None
+    } else {
+        read_installed_version(&installed_bin).map_err(|e| {
+            eprintln!("  [FAIL] Could not read installed hex version: {e}");
+            BinaryStepFailure::Build
+        })?
+    };
 
-    let installed_sha = read_optional_utf8(&installed_sha_file).map_err(|e| {
-        eprintln!("  [FAIL] Could not read installed SHA: {e}");
-        BinaryStepFailure::Build
-    })?;
+    let installed_sha = if let hex::app_identity::UpgradeMode::Signed(ref revision) = signing_mode {
+        Some(revision.clone())
+    } else {
+        read_optional_utf8(&installed_sha_file).map_err(|e| {
+            eprintln!("  [FAIL] Could not read installed SHA: {e}");
+            BinaryStepFailure::Build
+        })?
+    };
     let source_sha = Some(read_source_sha(source_dir).map_err(|e| {
         eprintln!("  [FAIL] Could not read source SHA: {e}");
         BinaryStepFailure::Build
@@ -1102,10 +1121,35 @@ fn sync_versions_file_protected(
             Ok(s) if s.success() => {
                 // --target-dir guarantees the binary is always here.
                 let release_bin = harness_dst.join("target/release/hex");
-                match atomic_install_binary(&release_bin, &installed_bin) {
+                // Re-check after compilation. A newly configured or previously
+                // signed app must not fall through to legacy raw installation.
+                let final_mode =
+                    hex::app_identity::prepare_upgrade(hex_dir, source_dir).map_err(|e| {
+                        eprintln!("  [FAIL] App install preflight failed: {e}");
+                        BinaryStepFailure::Build
+                    })?;
+                if signing_mode != hex::app_identity::UpgradeMode::Legacy
+                    && final_mode == hex::app_identity::UpgradeMode::Legacy
+                {
+                    eprintln!("  [FAIL] Signed installation evidence disappeared during build");
+                    return Err(BinaryStepFailure::Build);
+                }
+                let managed = final_mode != hex::app_identity::UpgradeMode::Legacy;
+                let installed = if managed {
+                    hex::app_identity::install_build(
+                        hex_dir,
+                        source_dir,
+                        &release_bin,
+                        &cargo_ver,
+                        source_sha.as_deref().ok_or(BinaryStepFailure::Build)?,
+                    )
+                } else {
+                    atomic_install_binary(&release_bin, &installed_bin)
+                };
+                match installed {
                     Ok(()) => {
                         println!("  [OK] hex binary rebuilt and swapped (atomic): v{cargo_ver}");
-                        if let Some(ref sha) = source_sha {
+                        if let Some(sha) = source_sha.as_ref().filter(|_| !managed) {
                             if let Some((workspace, snapshot)) = protection {
                                 protect_generated_path(
                                     workspace,
@@ -1157,7 +1201,7 @@ fn sync_versions_file_protected(
                         // regardless of the restart outcome so the only deltas a
                         // restart failure introduces are the nonzero exit and the
                         // distinct message below.
-                        build_and_install_code_intel(&hex_dot_dir);
+                        build_and_install_code_intel(&hex_dot_dir, managed);
                         // The binary WAS swapped. If the harness restart failed,
                         // the running harness still holds the OLD binary in memory
                         // — propagate that as a DISTINCT failure kind so run()
@@ -1211,7 +1255,11 @@ fn sync_versions_file_protected(
 /// location is deterministic regardless of workspace nesting (OBS-017), and
 /// `atomic_install_binary` for the swap (codesign + rename, never mutates the
 /// live inode). Best-effort: warns loudly on failure, never fails the upgrade.
-fn build_and_install_code_intel(hex_dot_dir: &Path) {
+fn build_and_install_code_intel(hex_dot_dir: &Path, preserve_identity: bool) {
+    if preserve_identity {
+        eprintln!("  [WARN] Code-intel binaries are preserved. Their separate signed service identity is not qualified; this upgrade does not replace them.");
+        return;
+    }
     let codeintel_dst = hex_dot_dir.join("code-intel");
     if !codeintel_dst.join("Cargo.toml").exists() {
         return; // code-intel not synced (older foundation) — nothing to build

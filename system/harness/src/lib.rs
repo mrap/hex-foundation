@@ -5,6 +5,7 @@ extern crate self as hex;
 
 pub mod act_evidence;
 pub mod alert;
+pub mod app_identity;
 pub mod applier;
 pub mod audit;
 pub mod backup;

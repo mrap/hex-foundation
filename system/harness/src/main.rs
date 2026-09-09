@@ -2395,29 +2395,6 @@ fn run_failures_probe() -> i32 {
 /// line.
 const HARNESS_LABEL: &str = "com.hex.harness";
 
-/// Build the platform-neutral `ServiceSpec` that daemon-green renders into the
-/// per-user launchd plist (macOS) or systemd --user unit (Linux). Reproduces
-/// the exact behavior of the old `render_harness_plist` template:
-///   - program           = $HEX_DIR/.hex/bin/hex
-///   - args              = ["harness", "serve"]
-///   - working_dir       = $HEX_DIR
-///   - env               = HEX_DIR, III_URL, PATH (homebrew prepended),
-///     GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
-///   - keep_alive        = true (restart on crash)
-///   - run_at_load       = true (start at login)
-///   - log_path          = $HEX_DIR/.hex/logs/com.hex.harness.log
-///
-/// daemon-green guarantees the rendered plist omits the launchd login-session
-/// detach key (verified 2026-06-05: when present, keychain reads fail rc=36;
-/// when absent, rc=0). We deliberately do NOT — and CANNOT — set it here.
-fn build_harness_spec(hex_dir: &std::path::Path) -> daemon_green::ServiceSpec {
-    // Single source of truth lives in the lib (`harness::supervise`) so the watchdog and
-    // `hex harness start` build an identical spec. Secrets are NOT baked into the plist —
-    // the harness reads $HEX_DIR/.hex/secrets/*.env at `serve` startup via
-    // bootstrap_secrets_env(); the plist carries only HEX_DIR, PATH, III_URL, log path.
-    hex::harness::supervise::build_harness_spec(hex_dir)
-}
-
 /// Load every `*.env` file from `$HEX_DIR/.hex/secrets/` into the process
 /// environment. Called at `hex harness serve` startup, before any thread is
 /// spawned. Follows symlinks (metadata()) so symlinked secrets files work.
@@ -2489,42 +2466,16 @@ fn bootstrap_secrets_env(hex_dir: &std::path::Path) {
 /// (bootstrap/kickstart, asuser fallback, wait-out-bootout retry).
 fn harness_start() -> i32 {
     let hex_dir = get_hex_dir();
-    // launchd / systemd won't create the log dir for us.
-    let _ = std::fs::create_dir_all(hex_dir.join(".hex").join("logs"));
-    let spec = build_harness_spec(&hex_dir);
-    let mgr = daemon_green::native();
-    if let Err(e) = mgr.install(&spec) {
-        eprintln!("hex harness start: install failed: {e}");
-        return 1;
-    }
-    // Starting is an explicit operator intent — clear any prior `stop` sentinel so the
-    // watchdog resumes supervising.
-    hex::harness::supervise::clear_intentionally_down(&hex_dir);
-    let rc = match mgr.start(HARNESS_LABEL) {
+    match hex::harness::supervise::start_services(&hex_dir) {
         Ok(()) => {
-            eprintln!("hex harness start: {HARNESS_LABEL} loaded");
+            eprintln!("hex harness and watchdog loaded");
             0
         }
-        Err(e) => {
-            eprintln!("hex harness start: start failed: {e}");
+        Err(error) => {
+            eprintln!("hex harness start failed: {error}");
             1
         }
-    };
-    // Install + load the watchdog alongside the harness so the pair is set up together.
-    // The watchdog is a tiny KeepAlive peer that re-bootstraps the harness if it ever goes
-    // missing/dead — it is never bounced by upgrade/release, so it survives to recover it.
-    let wd = hex::harness::supervise::build_watchdog_spec(&hex_dir);
-    if let Err(e) = mgr.install(&wd) {
-        eprintln!("hex harness start: watchdog install failed (non-fatal): {e}");
-    } else if let Err(e) = mgr.start(hex::harness::supervise::WATCHDOG_LABEL) {
-        eprintln!("hex harness start: watchdog start failed (non-fatal): {e}");
-    } else {
-        eprintln!(
-            "hex harness start: {} loaded",
-            hex::harness::supervise::WATCHDOG_LABEL
-        );
     }
-    rc
 }
 
 /// `hex harness stop` — stop + unload the per-user service via daemon-green.
@@ -2552,11 +2503,12 @@ fn harness_stop() -> i32 {
 /// boot would leave the engine dead while we reported success (the 2026-06-12 failure mode).
 fn harness_restart() -> i32 {
     let hex_dir = get_hex_dir();
-    // An explicit restart is operator intent — clear any prior stop sentinel.
-    hex::harness::supervise::clear_intentionally_down(&hex_dir);
-    match hex::harness::supervise::restart_and_verify(&hex_dir, HARNESS_LABEL) {
+    match hex::harness::supervise::restart_explicit(&hex_dir, HARNESS_LABEL) {
         Ok(_) => 0,
-        Err(_) => 1, // already logged [FAIL] + S6 alert inside restart_and_verify
+        Err(error) => {
+            eprintln!("hex harness restart failed: {error}");
+            1
+        }
     }
 }
 
@@ -2567,6 +2519,10 @@ fn harness_ensure() -> i32 {
     use hex::harness::supervise::{engine_listening, ensure_once, EnsureAction, ENGINE_ADDR};
     let hex_dir = get_hex_dir();
     match ensure_once(&hex_dir) {
+        EnsureAction::Blocked => {
+            eprintln!("hex harness recovery is blocked by app identity or install state");
+            1
+        }
         EnsureAction::NoOp => {
             eprintln!("hex harness ensure: {HARNESS_LABEL} healthy");
             0
