@@ -772,6 +772,45 @@ fn read_installed_version(path: &Path) -> io::Result<Option<String>> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing installed hex version"))
 }
 
+/// Read optional installed metadata without confusing an I/O failure with
+/// an intentionally absent file. An installed SHA is optional for prebuilt
+/// binaries, but a present unreadable file is an upgrade failure.
+fn read_optional_utf8(path: &Path) -> io::Result<Option<String>> {
+    match fs::read(path) {
+        Ok(bytes) => String::from_utf8(bytes)
+            .map(|text| Some(text.trim().to_owned()))
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Read the source commit used to prove the rebuilt binary's provenance.
+fn read_source_sha(source_dir: &Path) -> io::Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(source_dir)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "git rev-parse HEAD failed with {}",
+            output.status
+        )));
+    }
+    let sha = String::from_utf8(output.stdout)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        .trim()
+        .to_owned();
+    if sha.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "git rev-parse HEAD returned no commit",
+        ));
+    }
+    Ok(sha)
+}
+
 /// Gather inputs and decide whether the binary is stale. Returns false
 /// ("nothing to do") when VERSIONS or Cargo.toml is absent, matching
 /// `sync_versions_file`'s own preconditions — if those are missing the
@@ -788,27 +827,8 @@ fn binary_is_stale(hex_dir: &Path, source_dir: &Path) -> io::Result<bool> {
     let cargo_ver = read_cargo_version(&cargo_toml)?;
     let hex_dot_dir = hex_dir.join(".hex");
     let installed_ver = read_installed_version(&hex_dot_dir.join("bin/hex"))?;
-    let installed_sha = read_file_state(&hex_dot_dir.join("bin/hex.sha"))?
-        .map(String::from_utf8)
-        .transpose()
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        .map(|s| s.trim().to_string());
-    let source_output = Command::new("git")
-        .arg("-C")
-        .arg(source_dir)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .map_err(|e| io::Error::new(e.kind(), format!("could not read source SHA: {e}")))?;
-    if !source_output.status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("could not read source SHA from {}", source_dir.display()),
-        ));
-    }
-    let source_sha = String::from_utf8(source_output.stdout)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        .trim()
-        .to_string();
+    let installed_sha = read_optional_utf8(&hex_dot_dir.join("bin/hex.sha"))?;
+    let source_sha = read_source_sha(source_dir)?;
     Ok(binary_needs_rebuild(
         installed_ver.as_deref(),
         &cargo_ver,
@@ -934,23 +954,14 @@ fn sync_versions_file_protected(
         BinaryStepFailure::Build
     })?;
 
-    let installed_sha = fs::read_to_string(&installed_sha_file)
-        .ok()
-        .map(|s| s.trim().to_string());
-
-    let source_sha = Command::new("git")
-        .arg("-C")
-        .arg(source_dir)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        });
+    let installed_sha = read_optional_utf8(&installed_sha_file).map_err(|e| {
+        eprintln!("  [FAIL] Could not read installed SHA: {e}");
+        BinaryStepFailure::Build
+    })?;
+    let source_sha = Some(read_source_sha(source_dir).map_err(|e| {
+        eprintln!("  [FAIL] Could not read source SHA: {e}");
+        BinaryStepFailure::Build
+    })?);
 
     // `version_mismatch` drives the human-readable reason below; the actual
     // rebuild decision is `binary_needs_rebuild` (shared with the upstream gate).
@@ -3062,6 +3073,8 @@ mod tests {
             &source_dir.join("system/harness/Cargo.toml"),
             "[package]\nname = \"hex-harness\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
         );
+        init_test_repo(&source_dir);
+        seed_commit(&source_dir, "metadata health fixture");
         let bin_dir = hex_dir.join(".hex/bin");
         fs::create_dir_all(&bin_dir).unwrap();
         let mock_bin = bin_dir.join("hex");
@@ -3089,6 +3102,55 @@ mod tests {
         assert!(sync_versions_file(&hex_dir, &source_dir, &backup_dir).is_ok());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn sync_versions_file_rejects_unreadable_installed_sha() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let hex_dir = tmp.path().join("hex");
+        let source_dir = tmp.path().join("source");
+        let backup_dir = tmp.path().join("backup");
+        fs::create_dir_all(&backup_dir).unwrap();
+        write_file(&hex_dir.join("VERSIONS"), "HEX_FOUNDATION_VERSION=v0.1.0\n");
+        write_file(
+            &source_dir.join("system/harness/Cargo.toml"),
+            "[package]\nname = \"hex-harness\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        );
+        init_test_repo(&source_dir);
+        seed_commit(&source_dir, "unreadable SHA fixture");
+        let bin_dir = hex_dir.join(".hex/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let mock_bin = bin_dir.join("hex");
+        fs::write(&mock_bin, "#!/bin/sh\necho hex 1.0.0\n").unwrap();
+        fs::set_permissions(&mock_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::create_dir(hex_dir.join(".hex/bin/hex.sha")).unwrap();
+
+        assert!(
+            sync_versions_file(&hex_dir, &source_dir, &backup_dir).is_err(),
+            "an unreadable present SHA must fail, not become an unverifiable skip"
+        );
+    }
+
+    #[test]
+    fn sync_versions_file_rejects_source_without_git_head() {
+        let (tmp, source, instance) = binary_preflight_fixture();
+        fs::write(source.join(".git/HEAD"), "ref: refs/heads/missing\n").unwrap();
+        assert!(
+            sync_versions_file(&instance, &source, &tmp.path().join("backup")).is_err(),
+            "matching installed version cannot mask a broken source repository"
+        );
+    }
+
+    #[test]
+    fn sync_versions_file_rejects_invalid_utf8_installed_sha() {
+        let (tmp, source, instance) = binary_preflight_fixture();
+        fs::write(instance.join(".hex/bin/hex.sha"), [0xff]).unwrap();
+        assert!(
+            sync_versions_file(&instance, &source, &tmp.path().join("backup")).is_err(),
+            "invalid installed SHA must not be treated as an absent optional file"
+        );
+    }
+
     /// The deploy-black-hole path itself (OBS-017): a rebuild is NEEDED
     /// (version mismatch) but the rebuild machinery fails — here the harness
     /// source sync fails deterministically because `.hex/harness` exists as a
@@ -3110,6 +3172,8 @@ mod tests {
             &source_dir.join("system/harness/Cargo.toml"),
             "[package]\nname = \"hex-harness\"\nversion = \"2.0.0\"\nedition = \"2021\"\n",
         );
+        init_test_repo(&source_dir);
+        seed_commit(&source_dir, "rebuild failure fixture");
         // Installed binary reports an OLDER version → rebuild required.
         let bin_dir = hex_dir.join(".hex/bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -3172,6 +3236,8 @@ mod tests {
             &source_dir.join("system/harness/Cargo.toml"),
             "[package]\nname = \"hex-harness\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
         );
+        init_test_repo(&source_dir);
+        seed_commit(&source_dir, "versions preservation fixture");
 
         // Mock installed hex binary reporting the same version so
         // binary_needs_rebuild returns false (no cargo build triggered by
@@ -3379,6 +3445,8 @@ CUSTOM_INSTANCE_PIN=abc123
             &source_dir.join("system/harness/Cargo.toml"),
             "[package]\nname = \"hex-harness\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
         );
+        init_test_repo(&source_dir);
+        seed_commit(&source_dir, "binary health fixture");
         let bin_dir = hex_dir.join(".hex/bin");
         fs::create_dir_all(&bin_dir).unwrap();
         let mock_bin = bin_dir.join("hex");
