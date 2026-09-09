@@ -173,17 +173,18 @@ class StageTests(unittest.TestCase):
             self.assertEqual(runner.calls, [])
             self.assertFalse(self.output.exists())
 
-    def test_hex_cargo_version_with_zero_major_is_supported(self):
-        runner = Runner()
-        version = hex_cargo_version()
-        self.assertTrue(version.startswith("0."), version)
-        result = self.stage(runner, version=version)
-        verified = SIGN.verify_installed(self.output, "hex", self.policy, run=runner)
-        self.assertEqual(result["version"], version)
-        self.assertEqual(verified["version"], version)
-        info = plistlib.loads((self.output / "Contents/Info.plist").read_bytes())
-        self.assertEqual(info["CFBundleVersion"], version)
-        self.assertEqual(info["CFBundleShortVersionString"], version)
+    def test_current_hex_and_zero_major_versions_are_supported(self):
+        for version in dict.fromkeys([hex_cargo_version(), "0.1.0"]):
+            with self.subTest(version=version):
+                runner = Runner()
+                bundle = self.root / ("Hex-" + version + ".app")
+                result = self.stage(runner, version=version, output=bundle, receipt=None)
+                verified = SIGN.verify_installed(bundle, "hex", self.policy, run=runner)
+                self.assertEqual(result["version"], version)
+                self.assertEqual(verified["version"], version)
+                info = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
+                self.assertEqual(info["CFBundleVersion"], version)
+                self.assertEqual(info["CFBundleShortVersionString"], version)
 
     def test_invalid_later_architecture_uuid_prevents_signing(self):
         runner = Runner()
