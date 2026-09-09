@@ -1042,7 +1042,7 @@ dependencies = [
 [[package]]
 name = "daemon-green"
 version = "0.1.0"
-source = "git+https://github.com/mrap/daemon-green?rev=5171fbb206e93b56523275f72bd1b97c776de90a#5171fbb206e93b56523275f72bd1b97c776de90a"
+source = "git+https://github.com/mrap/daemon-green?rev=0ea88bc24b62a1070e4f7a31a59420124366b3c2#0ea88bc24b62a1070e4f7a31a59420124366b3c2"
 
 [[package]]
 name = "darling"
