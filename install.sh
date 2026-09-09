@@ -35,6 +35,7 @@ MACOS_APP_MODE="legacy-raw"
 MACOS_APP_MANAGED=false
 MACOS_APP_POLICY_AVAILABLE=false
 MACOS_APP_SOURCE_REVISION=""
+MACOS_APP_SERVICE_RECOVERY_PENDING=false
 
 _macos_app_enabled() {
     [ "$(uname -s)" = "Darwin" ]
@@ -95,27 +96,36 @@ _macos_app_install() {
 }
 
 _macos_app_service_reconcile() {
-    local product=$1 root=$2 payload
+    local product=$1 root=$2 dry_run=${3:-false} payload
     [ "$product" = code-intel-daemon ] || {
         echo "ERROR: service reconciliation is only valid for code-intel-daemon" >&2
         return 1
     }
-    payload="$(_macos_app_json service-reconcile "$product" "$root")" || return 1
-    /usr/bin/python3 -I -B -c '
+    if [ "$dry_run" = true ]; then
+        payload="$(_macos_app_json service-reconcile "$product" "$root" --dry-run)" || return 1
+    else
+        payload="$(_macos_app_json service-reconcile "$product" "$root")" || return 1
+    fi
+    MACOS_APP_SERVICE_RECOVERY_PENDING=$(/usr/bin/python3 -I -B -c '
 import json,sys
 value=json.loads(sys.stdin.read())
-if not isinstance(value, dict) or value.get("schema_version") != 1 or value.get("product") != sys.argv[1] or value.get("mode") != "signed-current" or type(value.get("service_action")) is not str or type(value.get("service_needs_change")) is not bool or type(value.get("published")) is not bool or not isinstance(value.get("plist_path"),str) or not isinstance(value.get("executable_path"),str):
+if not isinstance(value, dict) or value.get("schema_version") != 1 or value.get("product") != sys.argv[1] or value.get("mode") != "signed-current" or type(value.get("service_action")) is not str or type(value.get("service_needs_change")) is not bool or type(value.get("published")) is not bool or type(value.get("service_recovery_pending")) is not bool or not isinstance(value.get("plist_path"),str) or not isinstance(value.get("executable_path"),str):
     raise SystemExit("invalid service-reconcile response")
 action=value["service_action"]
 changed=action in {"restarted","recovered","updated-stopped"}
 unchanged=action in {"loaded","stopped","absent"}
-if not (changed or unchanged) or value["service_needs_change"] != changed or value["published"] != changed:
+preview=action in {"would-restart","would-update-stopped"}
+if sys.argv[4] == "true":
+    if not preview or not value["service_needs_change"] or value["published"]:
+        raise SystemExit("invalid dry-run service state")
+elif not (changed or unchanged) or value["service_needs_change"] != changed or value["published"] != changed:
     raise SystemExit("invalid service-reconcile state")
 expected_plist=sys.argv[2]+"/Library/LaunchAgents/com.hex.scipd.plist"
 expected_executable=sys.argv[3]+"/SCIPD.app/Contents/MacOS/scipd"
 if value["plist_path"] != expected_plist or value["executable_path"] != expected_executable:
     raise SystemExit("service-reconcile paths do not match the fixed owner")
-' "$product" "$HOME" "$root" <<< "$payload"
+print(str(value["service_recovery_pending"]).lower())
+' "$product" "$HOME" "$root" "$dry_run" <<< "$payload") || return 1
 }
 
 _macos_app_compatibility_alias() {
@@ -174,6 +184,7 @@ _macos_app_prepare() {
     MACOS_APP_MANAGED=false
     MACOS_APP_POLICY_AVAILABLE=false
     MACOS_APP_SOURCE_REVISION=""
+    MACOS_APP_SERVICE_RECOVERY_PENDING=false
     if ! _macos_app_enabled; then
         return 0
     fi
@@ -850,6 +861,12 @@ _code_intel_build_and_deploy() {
             echo "ERROR: code-intel products have inconsistent managed state; refusing partial publication" >&2
             return 1
         }
+        if [ "$daemon_mode" = signed-current ] && [ -n "$daemon_revision" ] && [ "$daemon_revision" != "$source_revision" ]; then
+            _macos_app_service_reconcile code-intel-daemon "$HOME/.codeintel" true || return 1
+            if [ "$MACOS_APP_SERVICE_RECOVERY_PENDING" = true ]; then
+                _macos_app_service_reconcile code-intel-daemon "$HOME/.codeintel" false || return 1
+            fi
+        fi
         if [ "$cli_mode" = signed-current ] && [ "$cli_revision" = "$source_revision" ]; then
             _macos_app_compatibility_alias code-intel-cli "$HOME/.codeintel" "$TARGET_DIR" "$source_revision" || return 1
         fi

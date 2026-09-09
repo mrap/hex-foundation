@@ -45,6 +45,9 @@ After both managed products publish, the caller invokes
 schema 1, the exact product, `signed-current`, fixed owner paths, and the actions
 `loaded`, `stopped`, `absent`, `updated-stopped`, `restarted`, or `recovered`.
 Changed actions must report `service_needs_change=true` and `published=true`.
+Every successful response also carries `service_recovery_pending`; when a stale
+daemon has a validated pending marker, the caller settles that marker before
+publishing a replacement app.
 The common operation keeps absent or stopped services stopped. Any reconciliation
 error fails the install.
 

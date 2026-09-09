@@ -390,7 +390,7 @@ def test_codeintel_managed_build_uses_exact_artifacts_and_reconcile() -> None:
             "if args[0] == 'install' and os.environ.get('INSTALL_FAIL') == args[1]: raise SystemExit(17)\n"
             "if args[0] == 'compatibility-alias': print(json.dumps({'schema_version':1,'product':args[1],'source_revision':os.environ.get('TEST_REVISION','a'*40),'generation':'g','alias_path':os.environ['HEX_WORKSPACE']+'/.hex/bin/'+('scipd' if args[1]=='code-intel-daemon' else 'cq'),'target_path':args[3]+'/bin/'+('scipd' if args[1]=='code-intel-daemon' else 'cq'),'action':'current','changed':False,'published':False}))\n"
             "elif args[0] == 'service-reconcile' and os.environ.get('RECONCILE_BAD') == '1': print('{}'); raise SystemExit(0)\n"
-            "elif args[0] == 'service-reconcile': print(json.dumps({'schema_version':1,'product':args[1],'mode':'signed-current','service_action':'stopped','service_needs_change':False,'published':False,'plist_path':os.environ['HOME']+'/Library/LaunchAgents/com.hex.scipd.plist','executable_path':args[3]+'/SCIPD.app/Contents/MacOS/scipd'}))\n"
+            "elif args[0] == 'service-reconcile': pending=os.environ.get('SERVICE_PENDING') == '1'; dry='--dry-run' in args; action='would-update-stopped' if dry else ('recovered' if pending else 'stopped'); changed=action in {'recovered','updated-stopped','restarted'}; print(json.dumps({'schema_version':1,'product':args[1],'mode':'signed-current','service_action':action,'service_needs_change':dry or changed,'published':changed,'service_recovery_pending':pending,'plist_path':os.environ['HOME']+'/Library/LaunchAgents/com.hex.scipd.plist','executable_path':args[3]+'/SCIPD.app/Contents/MacOS/scipd'}))\n"
             "else: print(json.dumps({'schema_version':1,'product':args[1],'mode':'signed-current'}))\n",
             encoding="utf-8",
         )
@@ -404,9 +404,9 @@ SCRIPT_DIR="$TEST_SOURCE"
 TARGET_DIR="$TEST_TARGET"
 MACOS_APP_INSTALLER="$TEST_HELPER"
 _macos_app_enabled() { return 0; }
-_code_intel_build_and_deploy "$TEST_TARGET_DIR" true true "$TEST_REVISION"
-test "$(find "$TEST_TARGET_DIR" -path '*/release/cq' -type f | wc -l | tr -d ' ')" = 1
-test "$(find "$TEST_TARGET_DIR" -path '*/release/scipd' -type f | wc -l | tr -d ' ')" = 1
+_code_intel_build_and_deploy "$TEST_TARGET_DIR" true true "$TEST_REVISION" signed-current signed-current "${CLI_REVISION:-}" "${DAEMON_REVISION:-}"
+test "$(find "$TEST_TARGET_DIR" -path '*/release/cq' -type f | wc -l | tr -d ' ')" -ge 1
+test "$(find "$TEST_TARGET_DIR" -path '*/release/scipd' -type f | wc -l | tr -d ' ')" -ge 1
 test ! -e "$TEST_HEX/.hex/bin/cq"
 test ! -e "$TEST_HEX/.hex/bin/scipd"
 """,
@@ -436,6 +436,20 @@ test ! -e "$TEST_HEX/.hex/bin/scipd"
         assert calls[0][calls[0].index("--version") + 1] == "2.3.4"
         assert calls[0][calls[0].index("--source") + 1].startswith(str(target / "code-intel-build."))
         assert calls[0][calls[0].index("--source") + 1].endswith("/release/cq")
+
+        log.write_text("", encoding="utf-8")
+        pending_retry = subprocess.run(
+            ["bash", str(shell)],
+            env=env | {"SERVICE_PENDING": "1", "CLI_REVISION": "old" * 10, "DAEMON_REVISION": "old" * 10},
+            capture_output=True,
+            text=True,
+        )
+        assert pending_retry.returncode == 0, pending_retry.stderr
+        pending_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        service_calls = [call for call in pending_calls if call[0] == "service-reconcile"]
+        assert "--dry-run" in service_calls[0]
+        assert "--dry-run" not in service_calls[1]
+        assert pending_calls.index(service_calls[0]) < pending_calls.index(next(call for call in pending_calls if call[0] == "install"))
 
         failed_build = subprocess.run(["bash", str(shell)], env=env | {"CARGO_MODE": "fail"}, capture_output=True, text=True)
         assert failed_build.returncode != 0
