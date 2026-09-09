@@ -133,6 +133,11 @@ if [ -n "$HEX_BIN" ]; then
   else
     assert_fail "env.sh did not report the rejected secret file: $GWS_OUT"
   fi
+  if ! echo "$GWS_OUT" | grep -q 'shared.env'; then
+    assert_pass "env.sh rejection output does not expose a secret filename"
+  else
+    assert_fail "env.sh rejection output exposed a secret filename: $GWS_OUT"
+  fi
 
   GWS_OVERRIDE=$(GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=keyring \
     HEX_DIR="$INSTALL_DIR" PATH="$(dirname "$HEX_BIN"):$PATH" \
