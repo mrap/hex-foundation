@@ -2551,6 +2551,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn preflight_reconciles_stale_versions_pin_when_other_inputs_match() {
+        let _env = crate::test_env::isolate_hex_dir();
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("source");
         let instance = tmp.path().join("instance");
@@ -2606,10 +2607,9 @@ mod tests {
         assert!(sha.status.success());
         fs::write(instance.join(".hex/bin/hex.sha"), sha.stdout).unwrap();
 
-        unsafe { std::env::set_var("HEX_DIR", &instance) };
+        std::env::set_var("HEX_DIR", &instance);
         let args = vec!["--local".to_string(), source.to_string_lossy().into_owned()];
         let exit = run(&args);
-        unsafe { std::env::remove_var("HEX_DIR") };
         assert_eq!(exit, 0);
         let versions = fs::read_to_string(instance.join("VERSIONS")).unwrap();
         assert_eq!(versions.matches("HEX_FOUNDATION_VERSION=").count(), 1);
