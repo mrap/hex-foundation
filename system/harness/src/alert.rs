@@ -10,7 +10,11 @@
 //!     topic URL. Every alert pushes; the three named [`AlertClass`] variants
 //!     push at urgent priority, the default class at normal priority. Push
 //!     BODIES are generic (`[key] title` only) — never payload, paths, or
-//!     personal data (the push service is third-party).
+//!     personal data (the push service is third-party). One caller
+//!     (`boi-spec-watch`) supplies an explicit, pre-sanitized name+outcome
+//!     push body via the crate-internal `_push` seam so its phone alerts are
+//!     human-readable; that override still never carries the machine key, a
+//!     raw id, a path, or diagnostic detail.
 //!   * gws/gmail email: only the three named classes (spend, harness-down,
 //!     work-order-failed), and only when an operator address is configured.
 //!
@@ -115,6 +119,24 @@ pub fn notify(key: &str, title: &str, msg: &str) -> bool {
 /// Severity-aware entrypoint. Resolves `HEX_DIR` (the single resolution point),
 /// then delegates to [`notify_at_with_class`].
 pub fn notify_with_class(key: &str, title: &str, msg: &str, class: AlertClass) -> bool {
+    notify_with_class_push(key, title, msg, class, None)
+}
+
+/// Like [`notify_with_class`], but with an optional PUSH-BODY OVERRIDE for the
+/// third-party push rail only. When `Some`, the push carries exactly that
+/// (caller-sanitized, generic) string instead of the default `[key] title`;
+/// the stderr line, telemetry row, macOS banner, and email rail are unchanged
+/// and still use `key`/`title`/`msg`. Lets `boi-spec-watch` send a
+/// human-readable job name + outcome to the phone without leaking the internal
+/// machine key. Crate-internal so the "arbitrary push body" seam never becomes
+/// public API.
+pub(crate) fn notify_with_class_push(
+    key: &str,
+    title: &str,
+    msg: &str,
+    class: AlertClass,
+    push_override: Option<&str>,
+) -> bool {
     let hex_dir = match std::env::var("HEX_DIR") {
         Ok(d) => std::path::PathBuf::from(d),
         Err(_) => {
@@ -122,7 +144,7 @@ pub fn notify_with_class(key: &str, title: &str, msg: &str, class: AlertClass) -
             return true;
         }
     };
-    notify_at_with_class(&hex_dir, key, title, msg, class)
+    notify_at_with_class_push(&hex_dir, key, title, msg, class, push_override)
 }
 
 /// Inner, testable form. Signature unchanged — historical callers keep working;
@@ -131,13 +153,28 @@ pub fn notify_at(hex_dir: &Path, key: &str, title: &str, msg: &str) -> bool {
     notify_at_with_class(hex_dir, key, title, msg, AlertClass::Default)
 }
 
-/// Inner, testable, severity-aware form.
+/// Inner, testable, severity-aware form. Delegates at no push override.
 pub fn notify_at_with_class(
     hex_dir: &Path,
     key: &str,
     title: &str,
     msg: &str,
     class: AlertClass,
+) -> bool {
+    notify_at_with_class_push(hex_dir, key, title, msg, class, None)
+}
+
+/// Inner, testable, severity-aware form with an optional push-body override.
+/// See [`notify_with_class_push`] for the override semantics: `push_override`
+/// affects ONLY the third-party push body; stderr, telemetry, the macOS banner,
+/// and the email rail all still use `key`/`title`/`msg`.
+pub(crate) fn notify_at_with_class_push(
+    hex_dir: &Path,
+    key: &str,
+    title: &str,
+    msg: &str,
+    class: AlertClass,
+    push_override: Option<&str>,
 ) -> bool {
     if suppressed(hex_dir, key) {
         return false;
@@ -173,7 +210,7 @@ pub fn notify_at_with_class(
 
     // Off-machine rails.
     match load_config(hex_dir) {
-        Some(cfg) => deliver_rails(hex_dir, &cfg, key, title, msg, class),
+        Some(cfg) => deliver_rails(hex_dir, &cfg, key, title, msg, class, push_override),
         None => {
             if take_unconfigured_warning() {
                 warn(
@@ -233,13 +270,21 @@ fn deliver_rails(
     title: &str,
     msg: &str,
     class: AlertClass,
+    push_override: Option<&str>,
 ) {
     // Push rail (rate-capped across all keys). Only consult the rate gate when
     // a topic URL is actually configured, so a missing URL never burns budget.
     match cfg.ntfy_topic_url.as_deref() {
         Some(url) if !url.is_empty() => match push_gate(hex_dir, cfg.max_pushes_per_hour) {
             PushDecision::Send => {
-                deliver_push(url, &push_body(key, title), class.push_priority(), false)
+                // A caller-supplied override (already sanitized + generic)
+                // replaces the default `[key] title`; the collapse notice and
+                // every other rail are untouched.
+                let body = match push_override {
+                    Some(b) => b.to_string(),
+                    None => push_body(key, title),
+                };
+                deliver_push(url, &body, class.push_priority(), false)
             }
             PushDecision::Collapse { suppressed } => deliver_push(
                 url,

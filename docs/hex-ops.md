@@ -218,7 +218,11 @@ transition classes:
 
 Alerts go through the shared operator path (`hex::alert::notify`: stderr +
 telemetry row + deduped macOS notification) — the same convention sibling
-workers use.
+workers use. The off-machine **phone push** carries a human-readable
+`NAME — OUTCOME` (e.g. `nightly-ingest — needs attention`), never the machine
+key/id or diagnostic detail; those stay in stderr/telemetry and the first-party
+email. See [boi-notifications.md](boi-notifications.md) for the message contract
+and privacy boundary.
 
 **First tick baselines silently** — no alert storm on deploy; a spec first
 observed already-terminal is not alerted.
