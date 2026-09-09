@@ -120,22 +120,6 @@ fn source_dirs_for_layout(layout: &str, source_root: &Path) -> Option<SourceDirs
     }
 }
 
-/// Walk a directory recursively, yielding all file paths (skipping __pycache__).
-fn walk_files(dir: &Path) -> impl Iterator<Item = PathBuf> {
-    WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let is_file = e.file_type().is_file();
-            let in_pycache = e
-                .path()
-                .components()
-                .any(|c| c.as_os_str() == "__pycache__");
-            is_file && !in_pycache
-        })
-        .map(|e| e.path().to_path_buf())
-}
-
 fn walk_files_checked(dir: &Path) -> io::Result<Vec<PathBuf>> {
     WalkDir::new(dir)
         .into_iter()
@@ -215,16 +199,16 @@ fn detect_changes(
     src_dir: &Path,
     dst_dir: &Path,
     label: &str,
-) -> (usize, usize, usize, Vec<String>) {
+) -> io::Result<(usize, usize, usize, Vec<String>)> {
     if !src_dir.exists() {
-        return (0, 0, 0, vec![]);
+        return Ok((0, 0, 0, vec![]));
     }
     let mut changed = 0;
     let mut new_count = 0;
     let mut unchanged = 0;
     let mut log = Vec::new();
 
-    for src_file in walk_files(src_dir) {
+    for src_file in walk_files_checked(src_dir)? {
         let rel = match src_file.strip_prefix(src_dir) {
             Ok(r) => r,
             Err(_) => continue,
@@ -244,7 +228,53 @@ fn detect_changes(
             unchanged += 1;
         }
     }
-    (changed, new_count, unchanged, log)
+    Ok((changed, new_count, unchanged, log))
+}
+
+/// Count stale files for a managed destination during preflight. Additive
+/// runtime trees intentionally skip this check because they are not pruned.
+fn detect_stale_changes(
+    src_dir: &Path,
+    dst_dir: &Path,
+    label: &str,
+) -> io::Result<(usize, Vec<String>)> {
+    // A missing source means this scope is not present in the selected
+    // layout. The apply deletion pass has the same policy and must not let
+    // preflight claim work that apply will skip.
+    if !src_dir.exists() || !dst_dir.exists() {
+        return Ok((0, vec![]));
+    }
+    let mut stale = 0;
+    let mut log = Vec::new();
+    for dst_file in walk_files_checked(dst_dir)? {
+        let rel = match dst_file.strip_prefix(dst_dir) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if rel.to_string_lossy().contains("settings.local.json") {
+            continue;
+        }
+        if !src_dir.join(rel).exists() {
+            stale += 1;
+            log.push(format!("  - {label}/{}", rel.to_string_lossy()));
+        }
+    }
+    Ok((stale, log))
+}
+
+fn detect_managed_changes(
+    src_dir: &Path,
+    dst_dir: &Path,
+    label: &str,
+    prune: bool,
+) -> io::Result<(usize, usize, usize, Vec<String>)> {
+    let (mut changed, new_count, unchanged, mut log) = detect_changes(src_dir, dst_dir, label)?;
+    if prune {
+        let (stale, stale_log) = detect_stale_changes(src_dir, dst_dir, label)?;
+        changed += stale;
+        log.extend(stale_log);
+    }
+    Ok((changed, new_count, unchanged, log))
 }
 
 /// Sync src_dir into dst_dir. Backs up overwritten files into backup_dir if provided.
@@ -698,55 +728,73 @@ fn binary_needs_rebuild(
 /// ("nothing to do") when VERSIONS or Cargo.toml is absent, matching
 /// `sync_versions_file`'s own preconditions — if those are missing the
 /// rebuild step no-ops anyway, so the gate shouldn't proceed on its account.
-fn binary_is_stale(hex_dir: &Path, source_dir: &Path) -> bool {
+fn binary_is_stale(hex_dir: &Path, source_dir: &Path) -> io::Result<bool> {
     let versions_file = hex_dir.join("VERSIONS");
     let cargo_toml = source_dir.join("system/harness/Cargo.toml");
     if !versions_file.exists() || !cargo_toml.exists() {
-        return false;
+        return Ok(false);
     }
-    let cargo_ver = fs::read_to_string(&cargo_toml).ok().and_then(|c| {
-        c.lines()
-            .find(|l| l.starts_with("version"))
-            .and_then(|l| l.split_once('"').map(|x| x.1))
+    let cargo_content = fs::read_to_string(&cargo_toml)?;
+    let cargo_ver = cargo_content.lines().find_map(|l| {
+        l.strip_prefix("version")
+            .and_then(|rest| rest.split_once('"').map(|x| x.1))
             .and_then(|s| s.split('"').next())
-            .map(|s| s.to_string())
+            .map(str::to_owned)
     });
-    let Some(cargo_ver) = cargo_ver else {
-        return false;
-    };
+    let cargo_ver = cargo_ver.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("could not parse version from {}", cargo_toml.display()),
+        )
+    })?;
 
     let hex_dot_dir = hex_dir.join(".hex");
-    let installed_ver = Command::new(hex_dot_dir.join("bin/hex"))
+    let installed_output = Command::new(hex_dot_dir.join("bin/hex"))
         .arg("--version")
         .output()
-        .ok()
-        .and_then(|o| {
-            String::from_utf8(o.stdout)
-                .ok()
-                .and_then(|s| s.split_whitespace().nth(1).map(|v| v.to_string()))
-        });
-    let installed_sha = fs::read_to_string(hex_dot_dir.join("bin/hex.sha"))
-        .ok()
+        .map(Some)
+        .or_else(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(io::Error::new(
+                    e.kind(),
+                    format!("could not read installed hex version: {e}"),
+                ))
+            }
+        })?;
+    let installed_ver = installed_output.and_then(|o| {
+        String::from_utf8(o.stdout)
+            .ok()
+            .and_then(|s| s.split_whitespace().nth(1).map(|v| v.to_string()))
+    });
+    let installed_sha = read_file_state(&hex_dot_dir.join("bin/hex.sha"))?
+        .map(String::from_utf8)
+        .transpose()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
         .map(|s| s.trim().to_string());
-    let source_sha = Command::new("git")
+    let source_output = Command::new("git")
         .arg("-C")
         .arg(source_dir)
         .args(["rev-parse", "HEAD"])
         .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        });
-    binary_needs_rebuild(
+        .map_err(|e| io::Error::new(e.kind(), format!("could not read source SHA: {e}")))?;
+    if !source_output.status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("could not read source SHA from {}", source_dir.display()),
+        ));
+    }
+    let source_sha = String::from_utf8(source_output.stdout)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        .trim()
+        .to_string();
+    Ok(binary_needs_rebuild(
         installed_ver.as_deref(),
         &cargo_ver,
         installed_sha.as_deref(),
-        source_sha.as_deref(),
-    )
+        Some(&source_sha),
+    ))
 }
 
 /// True if the user has a personal overlay that `build.rs` compiles under
@@ -1869,27 +1917,57 @@ pub fn run(args: &[String]) -> i32 {
 
     // Step 3: Detect changes
     println!("\n3. Detect Changes");
-    let (c1, n1, u1, log1) =
-        detect_changes(&src_dirs.scripts, &hex_dot_dir.join("scripts"), "scripts");
-    let (c2, n2, u2, log2) =
-        detect_changes(&src_dirs.skills, &hex_dot_dir.join("skills"), "skills");
-    let (c3, n3, u3, log3) = detect_changes(
+    macro_rules! detect {
+        ($src:expr, $dst:expr, $label:expr, $prune:expr) => {
+            match detect_managed_changes($src, $dst, $label, $prune) {
+                Ok(result) => result,
+                Err(e) => {
+                    eprintln!(
+                        "  [FAIL] Could not inspect {} during preflight: {e}",
+                        $label
+                    );
+                    return 1;
+                }
+            }
+        };
+    }
+    let (c1, n1, u1, log1) = detect!(
+        &src_dirs.scripts,
+        &hex_dot_dir.join("scripts"),
+        "scripts",
+        true
+    );
+    let (c2, n2, u2, log2) = detect!(
+        &src_dirs.skills,
+        &hex_dot_dir.join("skills"),
+        "skills",
+        true
+    );
+    let (c3, n3, u3, log3) = detect!(
         &src_dirs.commands,
         &hex_dot_dir.join("commands"),
         "commands",
+        true
     );
-    let (c4, n4, u4, log4) = detect_changes(&src_dirs.hooks, &hex_dot_dir.join("hooks"), "hooks");
+    let (c4, n4, u4, log4) = detect!(&src_dirs.hooks, &hex_dot_dir.join("hooks"), "hooks", true);
     // Additive dirs (iii engine config/workers, launchd + other templates)
-    let (c5, n5, u5, log5) = detect_changes(&src_dirs.iii, &hex_dot_dir.join("iii"), "iii");
-    let (c6, n6, u6, log6) = detect_changes(
+    let (c5, n5, u5, log5) = detect!(&src_dirs.iii, &hex_dot_dir.join("iii"), "iii", false);
+    let (c6, n6, u6, log6) = detect!(
         &src_dirs.templates,
         &hex_dot_dir.join("templates"),
         "templates",
+        false
+    );
+    let (c7, n7, u7, log7) = detect!(
+        &src_dirs.commands,
+        &hex_dir.join(".claude/commands"),
+        "command mirror",
+        true
     );
 
-    let total_changed = c1 + c2 + c3 + c4 + c5 + c6;
-    let total_new = n1 + n2 + n3 + n4 + n5 + n6;
-    let total_unchanged = u1 + u2 + u3 + u4 + u5 + u6;
+    let total_changed = c1 + c2 + c3 + c4 + c5 + c6 + c7;
+    let total_new = n1 + n2 + n3 + n4 + n5 + n6 + n7;
+    let total_unchanged = u1 + u2 + u3 + u4 + u5 + u6 + u7;
 
     println!("  → {total_changed} changed, {total_new} new, {total_unchanged} unchanged");
     for line in log1
@@ -1899,6 +1977,7 @@ pub fn run(args: &[String]) -> i32 {
         .chain(&log4)
         .chain(&log5)
         .chain(&log6)
+        .chain(&log7)
     {
         println!("{line}");
     }
@@ -1907,11 +1986,32 @@ pub fn run(args: &[String]) -> i32 {
     let mut version_changed = false;
     if let Some(src_ver_file) = &src_dirs.version_txt {
         if src_ver_file.exists() {
-            let src_ver = fs::read_to_string(src_ver_file).unwrap_or_default();
-            let dst_ver = fs::read_to_string(hex_dot_dir.join("version.txt")).unwrap_or_default();
+            let src_ver = match read_file_state(src_ver_file) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => Vec::new(),
+                Err(e) => {
+                    eprintln!(
+                        "  [FAIL] Could not read source version metadata {}: {e}",
+                        src_ver_file.display()
+                    );
+                    return 1;
+                }
+            };
+            let dst_ver = match read_file_state(&hex_dot_dir.join("version.txt")) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => Vec::new(),
+                Err(e) => {
+                    eprintln!("  [FAIL] Could not read installed version metadata: {e}");
+                    return 1;
+                }
+            };
             if src_ver != dst_ver {
                 version_changed = true;
-                println!("  ~ version.txt ({} → {})", dst_ver.trim(), src_ver.trim());
+                println!(
+                    "  ~ version.txt ({} → {})",
+                    String::from_utf8_lossy(&dst_ver).trim(),
+                    String::from_utf8_lossy(&src_ver).trim()
+                );
             }
         }
     }
@@ -1920,7 +2020,13 @@ pub fn run(args: &[String]) -> i32 {
     // synced files changed) must still trigger a rebuild. Without this the gate
     // below early-returns "Nothing to do" before Step 5 ever runs, and the
     // upgrade silently ships nothing while reporting success.
-    let binary_stale = binary_is_stale(&hex_dir, &source_dir);
+    let binary_stale = match binary_is_stale(&hex_dir, &source_dir) {
+        Ok(stale) => stale,
+        Err(e) => {
+            eprintln!("  [FAIL] Could not inspect binary metadata during preflight: {e}");
+            return 1;
+        }
+    };
 
     if total_changed == 0 && total_new == 0 && !version_changed && !binary_stale {
         println!("  [OK] Everything is up to date. Nothing to do.");
@@ -2258,6 +2364,61 @@ mod tests {
     fn write_file(path: &Path, content: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn preflight_counts_deletion_only_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source/scripts");
+        let destination = tmp.path().join("instance/.hex/scripts");
+        fs::create_dir_all(&source).unwrap();
+        write_file(&destination.join("stale.sh"), "stale");
+
+        let (changed, new_count, unchanged, log) =
+            detect_managed_changes(&source, &destination, "scripts", true).unwrap();
+        assert_eq!((changed, new_count, unchanged), (1, 0, 0));
+        assert!(log.iter().any(|line| line.contains("- scripts/stale.sh")));
+    }
+
+    #[test]
+    fn preflight_counts_command_mirror_only_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source/system/commands");
+        let mirror = tmp.path().join("instance/.claude/commands");
+        write_file(&source.join("hex.md"), "current");
+        write_file(&mirror.join("obsolete.md"), "obsolete");
+
+        let (changed, new_count, unchanged, log) =
+            detect_managed_changes(&source, &mirror, "command mirror", true).unwrap();
+        assert_eq!((changed, new_count, unchanged), (1, 1, 0));
+        assert!(log
+            .iter()
+            .any(|line| line.contains("- command mirror/obsolete.md")));
+        assert!(log
+            .iter()
+            .any(|line| line.contains("+ command mirror/hex.md")));
+    }
+
+    #[test]
+    fn preflight_ignores_unmanaged_build_and_dependency_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source/scripts");
+        let destination = tmp.path().join("instance/.hex/scripts");
+        write_file(&source.join("target/generated.sh"), "build output");
+        write_file(
+            &source.join("node_modules/pkg/generated.sh"),
+            "dependency output",
+        );
+        write_file(&destination.join("target/old.sh"), "build output");
+        write_file(
+            &destination.join("node_modules/pkg/old.sh"),
+            "dependency output",
+        );
+
+        let (changed, new_count, unchanged, log) =
+            detect_managed_changes(&source, &destination, "scripts", true).unwrap();
+        assert_eq!((changed, new_count, unchanged), (0, 0, 0));
+        assert!(log.is_empty());
     }
 
     // The wrapper block's guard is the function signature "claude() {".
