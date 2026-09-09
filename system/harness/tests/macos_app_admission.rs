@@ -186,10 +186,12 @@ fn watchdog_recovery_only_reads_service_status_when_install_is_invalid() {
         calls.lines().all(|line| line.starts_with("print ")),
         "{calls}"
     );
-    assert!(!temp
-        .path()
-        .join("hex/.hex/run/harness-bootstrap.lock")
-        .exists());
+    assert!(
+        !temp
+            .path()
+            .join("hex/.hex/run/harness-bootstrap.lock")
+            .exists()
+    );
     assert!(!temp.path().join("hex/.hex/logs").exists());
 }
 
@@ -204,7 +206,7 @@ fd = os.open(sys.argv[1], os.O_RDWR)
 try:
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
-    raise SystemExit(1)
+    raise SystemExit(10)
 raise SystemExit(0)
 PY
 probe=$?
@@ -212,7 +214,7 @@ if [ "$probe" -eq 0 ]; then
     printf 'lock=free %s\n' "$*" >> "$HOME/launchctl-calls"
     exit 97
 fi
-if [ "$probe" -ne 1 ]; then
+if [ "$probe" -ne 10 ]; then
     printf 'lock=probe-error(%s) %s\n' "$probe" "$*" >> "$HOME/launchctl-calls"
     exit 98
 fi
@@ -250,10 +252,19 @@ fn start_uses_verified_app_owner_and_common_installer() {
         calls.lines().all(|line| line.starts_with("lock=held ")),
         "{calls}"
     );
-    let plist =
-        fs::read_to_string(home.join("Library/LaunchAgents/com.hex.harness.plist")).unwrap();
-    assert!(plist.contains("Hex.app/Contents/MacOS/hex"), "{plist}");
-    assert!(plist.contains("com.mrap.hex"), "{plist}");
+    for service in ["com.hex.harness", "com.hex.harness-watchdog"] {
+        let checked = Command::new("/usr/bin/python3")
+            .args(["-I", "-B", "-c", "import plistlib,sys; p=plistlib.load(open(sys.argv[1],'rb')); assert p['AssociatedBundleIdentifiers']==['com.mrap.hex']; assert p['ProgramArguments'][0]==sys.argv[2]"])
+            .arg(home.join(format!("Library/LaunchAgents/{service}.plist")))
+            .arg(hex.join(".hex/Hex.app/Contents/MacOS/hex"))
+            .output()
+            .unwrap();
+        assert!(
+            checked.status.success(),
+            "{service}: {}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+    }
     assert!(hex.join(".hex/Hex.app.install-state.json").is_file());
 }
 
