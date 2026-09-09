@@ -188,7 +188,7 @@ class MacAppServiceTests(unittest.TestCase):
         self.seed()
         self.write_plist([str(self.paths.executable.absolute())], ["wrong.id"])
         pending = self.paths.root / "SCIPD.service-reconcile-pending.json"
-        pending.write_text(json.dumps({"schema_version": 1, "phase": "reload-pending"}), encoding="utf-8")
+        pending.write_text(json.dumps({"schema_version": 1, "product": "code-intel-daemon", "generation": json.loads(self.paths.state.read_text(encoding="utf-8"))["generation"], "plist_sha256": INSTALL._sha256(self.plist), "bundle_identifier": "com.mrap.hex.scipd", "executable_path": str(self.paths.executable.absolute()), "phase": "reload-pending", "original_loaded": True}), encoding="utf-8")
         launchctl = FakeLaunchctl(self.paths, False, "")
         result = INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=launchctl, plist_path=self.plist)
         self.assertEqual(result["service_action"], "recovered")
@@ -199,6 +199,23 @@ class MacAppServiceTests(unittest.TestCase):
         self.seed()
         self.write_plist([str(self.paths.executable.absolute())], ["com.mrap.hex.scipd"], Program="/tmp/not-scipd")
         with self.assertRaisesRegex(INSTALL.InstallError, "unsupported Program"):
+            INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=FakeLaunchctl(self.paths, False, ""), plist_path=self.plist)
+
+    def test_invalid_pending_marker_fails_before_mutation(self):
+        self.seed()
+        self.write_plist([str(self.paths.executable.absolute())])
+        pending = self.paths.root / "SCIPD.service-reconcile-pending.json"
+        pending.write_text(json.dumps({"schema_version": 1, "phase": "reload-pending"}), encoding="utf-8")
+        before = self.plist.read_bytes()
+        with self.assertRaisesRegex(INSTALL.InstallError, "invalid service reconcile pending"):
+            INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=FakeLaunchctl(self.paths, False, ""), plist_path=self.plist)
+        self.assertEqual(before, self.plist.read_bytes())
+
+    def test_pending_without_plist_fails_closed(self):
+        self.seed()
+        pending = self.paths.root / "SCIPD.service-reconcile-pending.json"
+        pending.write_text("{}", encoding="utf-8")
+        with self.assertRaisesRegex(INSTALL.InstallError, "no readable plist"):
             INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=FakeLaunchctl(self.paths, False, ""), plist_path=self.plist)
 
     def test_generation_change_forces_reload(self):

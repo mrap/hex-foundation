@@ -561,9 +561,9 @@ def _service_plist_path(path: Optional[Path]) -> Path:
     return path or (Path.home() / "Library/LaunchAgents" / f"{SCIPD_LAUNCHD_LABEL}.plist")
 
 
-def _read_service_plist(path: Path) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
+def _read_service_plist(path: Path) -> tuple[Optional[dict[str, Any]], dict[str, Any], Optional[str]]:
     if not os.path.lexists(path):
-        return None, {"present": False}
+        return None, {"present": False}, None
     if path.is_symlink():
         raise InstallError(f"service plist must not be a symlink: {path}")
     try:
@@ -586,7 +586,8 @@ def _read_service_plist(path: Path) -> tuple[Optional[dict[str, Any]], dict[str,
         raise InstallError(f"invalid service plist: {path}") from exc
     if not isinstance(value, dict):
         raise InstallError(f"service plist is not a dictionary: {path}")
-    return value, _entry_identity(path)
+    identity = {"present": True, "dev": info.st_dev, "ino": info.st_ino, "mode": stat.S_IMODE(info.st_mode), "kind": stat.filemode(info.st_mode)[0], "sha256": hashlib.sha256(payload).hexdigest()}
+    return value, identity, identity["sha256"]
 
 
 def _launchctl_default(argv: list[str], timeout: float = 5.0) -> tuple[int, str, str]:
@@ -652,6 +653,10 @@ def _launchctl_program(output: str) -> Optional[str]:
     return values[0]
 
 
+def _replace_bound(parent_fd: int, temporary: Path, destination: Path) -> None:
+    os.rename(temporary.name, destination.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+
+
 def _atomic_service_plist(path: Path, value: Mapping[str, Any], previous: Mapping[str, Any]) -> bool:
     if _entry_identity(path) != dict(previous):
         raise InstallError("service plist changed before publication")
@@ -665,7 +670,8 @@ def _atomic_service_plist(path: Path, value: Mapping[str, Any], previous: Mappin
         _write_private(temporary, plistlib.dumps(dict(value), fmt=plistlib.FMT_XML, sort_keys=False))
         if _entry_identity(path) != dict(previous):
             raise InstallError("service plist changed before publication")
-        os.replace(temporary, path)
+        _revalidate_parent(parent_fd, parent)
+        _replace_bound(parent_fd, temporary, path)
         published = True
         os.fsync(parent_fd)
     except BaseException as exc:
@@ -727,9 +733,10 @@ def _write_service_pending(paths: Paths, value: Mapping[str, Any]) -> None:
     temporary = path.with_name(path.name + f".tmp-{secrets.token_hex(8)}")
     _write_private(temporary, (json.dumps(dict(value), sort_keys=True) + "\n").encode())
     try:
-        os.replace(temporary, path)
         fd = os.open(paths.root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
         try:
+            _revalidate_parent(fd, paths.root)
+            _replace_bound(fd, temporary, path)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -746,9 +753,10 @@ def _clear_service_pending(paths: Paths) -> None:
     if path.is_symlink() or not path.is_file():
         raise InstallError(f"service pending marker is not a regular file: {path}", published=True)
     try:
-        path.unlink()
         fd = os.open(paths.root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
         try:
+            _revalidate_parent(fd, paths.root)
+            os.unlink(path.name, dir_fd=fd)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -763,9 +771,10 @@ def _write_service_receipt(paths: Paths, value: Mapping[str, Any]) -> None:
     temporary = path.with_name(path.name + f".tmp-{secrets.token_hex(8)}")
     _write_private(temporary, (json.dumps(dict(value), sort_keys=True) + "\n").encode())
     try:
-        os.replace(temporary, path)
         fd = os.open(paths.root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
         try:
+            _revalidate_parent(fd, paths.root)
+            _replace_bound(fd, temporary, path)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -773,6 +782,14 @@ def _write_service_receipt(paths: Paths, value: Mapping[str, Any]) -> None:
         if temporary.exists():
             temporary.unlink()
         raise InstallError(f"service state receipt publication failed: {exc}", published=True) from exc
+
+
+def _validate_service_pending(pending: Mapping[str, Any], owner: Mapping[str, Any], plist_sha256: str, product: str) -> None:
+    required = {"schema_version", "product", "generation", "plist_sha256", "bundle_identifier", "executable_path", "phase", "original_loaded"}
+    if set(pending) != required or pending.get("schema_version") != 1 or pending.get("product") != product or pending.get("phase") != "reload-pending" or pending.get("original_loaded") is not True:
+        raise InstallError("invalid service reconcile pending marker")
+    if pending.get("generation") != owner["generation"] or pending.get("plist_sha256") != plist_sha256 or pending.get("bundle_identifier") != owner["bundle_identifier"] or pending.get("executable_path") != owner["executable_path"]:
+        raise InstallError("service reconcile pending marker does not match current signed service")
 
 
 def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: Optional[Path] = None, dry_run: bool = False, launchctl: Optional[Callable[[list[str]], tuple[int, str, str]]] = None, plist_path: Optional[Path] = None) -> dict[str, Any]:
@@ -789,8 +806,11 @@ def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: 
         owner = service_owner(product, root, signer, policy_path=policy_path, lock_held=True)
         loaded, launch_output = _launchctl_loaded(launchctl, domain)
         live_program = _launchctl_program(launch_output) if loaded else None
-        current, previous = _read_service_plist(plist)
+        current, previous, plist_sha256 = _read_service_plist(plist)
+        pending = _read_service_pending(paths)
         if current is None:
+            if pending is not None:
+                raise InstallError("pending service reload has no readable plist")
             if loaded:
                 raise InstallError("loaded scipd service has no readable plist")
             return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "absent", "service_needs_change": False, "published": False, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
@@ -812,18 +832,21 @@ def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: 
             desired["Program"] = owner["executable_path"]
         desired["AssociatedBundleIdentifiers"] = [owner["bundle_identifier"]]
         receipt = _read_service_receipt(paths)
-        pending = _read_service_pending(paths)
-        plist_sha256 = _service_plist_sha256(plist)
+        if pending is not None:
+            _validate_service_pending(pending, owner, plist_sha256, product)
         receipt_matches = receipt == {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": plist_sha256, "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"]}
         recovery_pending = pending is not None
         needs_change = desired != current or (loaded and live_program != owner["executable_path"]) or (loaded and not receipt_matches) or recovery_pending
         if dry_run or not needs_change:
-            action = "would-restart" if dry_run and loaded and needs_change else "would-update-stopped" if dry_run and needs_change else "loaded" if loaded else "stopped"
+            action = "would-restart" if dry_run and needs_change and (loaded or recovery_pending) else "would-update-stopped" if dry_run and needs_change else "loaded" if loaded else "stopped"
             return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": action, "service_needs_change": needs_change, "published": False, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
         published = _atomic_service_plist(plist, desired, previous)
         if not loaded and not recovery_pending:
             return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "updated-stopped", "service_needs_change": True, "published": published, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
-        pending_value = {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": _service_plist_sha256(plist), "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"], "phase": "reload-pending"}
+        planned_sha256 = hashlib.sha256(plistlib.dumps(dict(desired), fmt=plistlib.FMT_XML, sort_keys=False)).hexdigest()
+        if _service_plist_sha256(plist) != planned_sha256:
+            raise InstallError("published service plist differs from planned bytes", published=published)
+        pending_value = {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": planned_sha256, "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"], "phase": "reload-pending", "original_loaded": True}
         _write_service_pending(paths, pending_value)
         try:
             if loaded:
@@ -836,7 +859,7 @@ def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: 
             verified_loaded, verified_output = _launchctl_loaded(launchctl, domain)
             if not verified_loaded or _launchctl_program(verified_output) != owner["executable_path"]:
                 raise InstallError("service reload did not load the verified scipd executable", published=True)
-            receipt_value = {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": _service_plist_sha256(plist), "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"]}
+            receipt_value = {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": planned_sha256, "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"]}
             _write_service_receipt(paths, receipt_value)
             _clear_service_pending(paths)
         except InstallError as exc:
