@@ -658,20 +658,18 @@ fn current_paths(hex_dir: &Path) -> io::Result<AppPaths> {
 
 #[derive(serde::Deserialize)]
 struct ModeResult {
-    schema_version: u32,
-    product: String,
     mode: String,
     source_revision: Option<String>,
     policy_available: Option<bool>,
     managed: Option<bool>,
 }
 
-fn source_command(
+fn source_command<T: serde::de::DeserializeOwned>(
     paths: &AppPaths,
     source_dir: &Path,
     command: &str,
     extra: &[std::ffi::OsString],
-) -> io::Result<ModeResult> {
+) -> io::Result<T> {
     let helper = source_dir.join("system/scripts/macos-app-install.py");
     // Selected Foundation source is the updater's trust input. Do not substitute
     // an older installed helper or an executable found through PATH.
@@ -691,11 +689,13 @@ fn source_command(
     ];
     args.extend_from_slice(extra);
     let output = run_python(&args, &paths.home, None, Duration::from_secs(300))?;
-    let result: ModeResult = serde_json::from_slice(&output).map_err(io::Error::other)?;
-    if result.schema_version != 1 || result.product != paths.product.name() {
+    let result: serde_json::Value = serde_json::from_slice(&output).map_err(io::Error::other)?;
+    if result.get("schema_version").and_then(|v| v.as_u64()) != Some(1)
+        || result.get("product").and_then(|v| v.as_str()) != Some(paths.product.name())
+    {
         return Err(io::Error::other("unexpected app-installer result"));
     }
-    Ok(result)
+    serde_json::from_value(result).map_err(io::Error::other)
 }
 
 pub fn prepare_upgrade(hex_dir: &Path, source_dir: &Path) -> io::Result<UpgradeMode> {
@@ -710,7 +710,7 @@ fn prepare_upgrade_at(paths: &AppPaths, source_dir: &Path) -> io::Result<Upgrade
     if !paths.managed_evidence()? {
         return Ok(UpgradeMode::Legacy);
     }
-    let result = source_command(paths, source_dir, "preflight", &[])?;
+    let result: ModeResult = source_command(paths, source_dir, "preflight", &[])?;
     if result.policy_available != Some(true) || result.managed != Some(true) {
         return Err(io::Error::other(
             "managed preflight did not verify the signing policy",
@@ -758,7 +758,7 @@ pub fn install_build(
         "--helper-source-revision".into(),
         revision.into(),
     ];
-    let result = source_command(&paths, source_dir, "install", &extra)?;
+    let result: ModeResult = source_command(&paths, source_dir, "install", &extra)?;
     if result.mode != "signed-current" || result.source_revision.as_deref() != Some(revision) {
         return Err(io::Error::other(
             "app installer did not commit the requested signed source",
@@ -804,13 +804,129 @@ pub fn install_codeintel_build(
         "--helper-source-revision".into(),
         revision.into(),
     ];
-    let result = source_command(&paths, source_dir, "install", &extra)?;
+    let result: ModeResult = source_command(&paths, source_dir, "install", &extra)?;
     if result.mode != "signed-current" || result.source_revision.as_deref() != Some(revision) {
         return Err(io::Error::other(
             "app installer did not commit the requested signed source",
         ));
     }
     Ok(())
+}
+
+/// Inspect or repair only the fixed Hex compatibility command for this product.
+/// The shared helper owns verification, locking, backup and publication.
+pub fn reconcile_codeintel_alias(
+    product: CodeIntelProduct,
+    hex_dir: &Path,
+    source_dir: &Path,
+    dry_run: bool,
+) -> io::Result<bool> {
+    #[derive(serde::Deserialize)]
+    struct AliasResult {
+        source_revision: String,
+        generation: String,
+        alias_path: PathBuf,
+        target_path: PathBuf,
+        action: String,
+        changed: bool,
+        published: bool,
+        archive_path: Option<PathBuf>,
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::other("HOME is required"))?;
+    let paths = AppPaths::code_intel(&home, product)?;
+    let mut extra = vec!["--hex-workspace".into(), hex_dir.as_os_str().to_owned()];
+    if dry_run {
+        extra.push("--dry-run".into());
+    }
+    let result: AliasResult = source_command(&paths, source_dir, "compatibility-alias", &extra)?;
+    let pending = matches!(result.action.as_str(), "would-create" | "would-migrate");
+    let changed = matches!(result.action.as_str(), "created" | "migrated");
+    let valid_action = if dry_run {
+        (pending || result.action == "current") && !result.changed && !result.published
+    } else {
+        (changed || result.action == "current")
+            && result.changed == changed
+            && result.published == changed
+    };
+    if !valid_action
+        || !valid_revision(&result.source_revision)
+        || result.generation.is_empty()
+        || result.alias_path
+            != hex_dir
+                .join(".hex/bin")
+                .join(paths.product.executable_name())
+        || result.target_path != paths.cli
+        || (result.action == "migrated" && result.archive_path.is_none())
+    {
+        return Err(io::Error::other("invalid compatibility-alias result"));
+    }
+    Ok(pending || changed)
+}
+
+#[derive(Debug, Default)]
+pub struct CodeIntelServiceChange {
+    pub needed: bool,
+    /// A validated interrupted reload must finish before replacing its app.
+    pub recovery_pending: bool,
+}
+
+/// Reconcile only the already declared code-intel service. No new service is enabled.
+pub fn reconcile_codeintel_service(
+    source_dir: &Path,
+    dry_run: bool,
+) -> io::Result<CodeIntelServiceChange> {
+    #[derive(serde::Deserialize)]
+    struct ServiceResult {
+        mode: String,
+        service_action: String,
+        service_needs_change: bool,
+        service_recovery_pending: bool,
+        published: bool,
+        plist_path: PathBuf,
+        executable_path: PathBuf,
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::other("HOME is required"))?;
+    let paths = AppPaths::code_intel(&home, CodeIntelProduct::Daemon)?;
+    let extra = if dry_run {
+        vec!["--dry-run".into()]
+    } else {
+        vec![]
+    };
+    let result: ServiceResult = source_command(&paths, source_dir, "service-reconcile", &extra)?;
+    let pending = matches!(
+        result.service_action.as_str(),
+        "would-restart" | "would-update-stopped"
+    );
+    let changed = matches!(
+        result.service_action.as_str(),
+        "restarted" | "recovered" | "updated-stopped"
+    );
+    let current = matches!(
+        result.service_action.as_str(),
+        "loaded" | "stopped" | "absent"
+    );
+    let valid_action = if dry_run {
+        (pending || current) && result.service_needs_change == pending && !result.published
+    } else {
+        (changed || current)
+            && result.service_needs_change == changed
+            && result.published == changed
+    };
+    if !valid_action
+        || result.mode != "signed-current"
+        || result.plist_path != home.join("Library/LaunchAgents/com.hex.scipd.plist")
+        || result.executable_path != paths.executable
+    {
+        return Err(io::Error::other("invalid code-intel service result"));
+    }
+    Ok(CodeIntelServiceChange {
+        needed: result.service_needs_change,
+        recovery_pending: result.service_recovery_pending,
+    })
 }
 
 #[cfg(test)]

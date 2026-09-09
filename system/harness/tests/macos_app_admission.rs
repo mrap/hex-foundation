@@ -188,12 +188,10 @@ fn watchdog_recovery_only_reads_service_status_when_install_is_invalid() {
         calls.lines().all(|line| line.starts_with("print ")),
         "{calls}"
     );
-    assert!(
-        !temp
-            .path()
-            .join("hex/.hex/run/harness-bootstrap.lock")
-            .exists()
-    );
+    assert!(!temp
+        .path()
+        .join("hex/.hex/run/harness-bootstrap.lock")
+        .exists());
     assert!(!temp.path().join("hex/.hex/logs").exists());
 }
 

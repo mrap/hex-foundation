@@ -52,7 +52,7 @@ jobs:
           changed="$(git diff --name-only "$base" "$HEAD_SHA")"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/ci.yml|Cargo.toml|Cargo.lock|install.sh|system/harness/Cargo.toml|system/harness/src/lib.rs|system/harness/src/upgrade.rs|system/harness/src/harness/supervise.rs|system/harness/src/main.rs|system/harness/src/*identity*|system/harness/tests/macos_app_admission.rs|system/scripts/macos-signing.py|system/scripts/macos-app-install.py|tests/test_macos_signing.py|tests/test_macos_app_install.py|tests/test_macos_install_caller.py|tests/test_macos_codeintel_products.py|system/code-intel/Cargo.toml|docs/macos-signing.md|docs/macos-app-install.md|docs/macos-install-callers.md|docs/macos-build-standard.md)
+              .github/workflows/ci.yml|Cargo.toml|Cargo.lock|install.sh|system/harness/Cargo.toml|system/harness/src/lib.rs|system/harness/src/upgrade.rs|system/harness/src/codeintel_upgrade.rs|system/harness/src/harness/supervise.rs|system/harness/src/main.rs|system/harness/src/*identity*|system/harness/tests/macos_app_admission.rs|system/harness/tests/macos_codeintel_upgrade.rs|system/scripts/macos-signing.py|system/scripts/macos-app-install.py|tests/test_macos_signing.py|tests/test_macos_app_install.py|tests/test_macos_install_caller.py|tests/test_macos_codeintel_products.py|tests/test_macos_app_alias.py|tests/test_macos_app_service.py|system/code-intel/Cargo.toml|docs/macos-signing.md|docs/macos-app-install.md|docs/macos-install-callers.md|docs/macos-build-standard.md|docs/macos-code-intel-alias.md)
                 macos_signing=true
                 ;;
             esac
@@ -133,6 +133,8 @@ jobs:
           test -f tests/test_macos_app_install.py
           test -f tests/test_macos_install_caller.py
           test -f tests/test_macos_codeintel_products.py
+          test -f tests/test_macos_app_alias.py
+          test -f tests/test_macos_app_service.py
           bash -n install.sh
       - name: Run signing and install policy tests
         shell: bash
@@ -143,6 +145,8 @@ jobs:
           python3 -W error -I -B tests/test_macos_app_install.py
           python3 -W error -I -B tests/test_macos_install_caller.py
           python3 -W error -I -B tests/test_macos_codeintel_products.py
+          python3 -W error -I -B tests/test_macos_app_alias.py
+          python3 -W error -I -B tests/test_macos_app_service.py
 
   macos-app-callers:
     name: macOS app build and service callers
@@ -163,3 +167,4 @@ jobs:
           cargo test --locked -p hex-harness --lib harness::supervise::tests
           cargo test --locked -p hex-harness --bin hex upgrade::tests
           cargo test --locked -p hex-harness --test macos_app_admission
+          cargo test --locked -p hex-harness --test macos_codeintel_upgrade

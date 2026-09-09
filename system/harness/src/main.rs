@@ -2,6 +2,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use std::io;
 use std::path::PathBuf;
 
+mod codeintel_upgrade;
 mod consolidate;
 mod throttle;
 use hex::doctor;

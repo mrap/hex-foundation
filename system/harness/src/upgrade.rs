@@ -1257,7 +1257,7 @@ fn sync_versions_file_protected(
 /// live inode). Best-effort: warns loudly on failure, never fails the upgrade.
 fn build_and_install_code_intel(hex_dot_dir: &Path, preserve_identity: bool) {
     if preserve_identity {
-        eprintln!("  [WARN] Code-intel binaries are preserved. Their separate signed service identity is not qualified; this upgrade does not replace them.");
+        // Managed companions have a separate required, resumable step in run().
         return;
     }
     let codeintel_dst = hex_dot_dir.join("code-intel");
@@ -2122,11 +2122,23 @@ pub fn run(args: &[String]) -> i32 {
         println!("  → VERSIONS foundation pin needs reconciliation.");
     }
 
+    let companion_plan = match crate::codeintel_upgrade::inspect(&hex_dir, &source_dir) {
+        Ok(plan) => plan,
+        Err(e) => {
+            eprintln!("  [FAIL] Code-intel preflight failed: {e}");
+            return 1;
+        }
+    };
+    if companion_plan.needs_work() {
+        println!("  → Code-intel needs a separate app, command path or service update.");
+    }
+
     if total_changed == 0
         && total_new == 0
         && !version_changed
         && !binary_stale
         && !versions_pin_stale
+        && !companion_plan.needs_work()
     {
         println!("  [OK] Everything is up to date. Nothing to do.");
         return 0;
@@ -2350,6 +2362,13 @@ pub fn run(args: &[String]) -> i32 {
         Some(&mut owned_paths),
     );
 
+    let companion_result = if binary_result.is_ok() {
+        crate::codeintel_upgrade::apply(&hex_dir, &source_dir, &companion_plan)
+    } else {
+        eprintln!("  Code-intel updates were not attempted because the Hex step failed.");
+        Ok(())
+    };
+
     // Step 6: Shell setup
     println!("\n6. Shell Setup");
     setup_shell(&hex_dir);
@@ -2369,6 +2388,12 @@ pub fn run(args: &[String]) -> i32 {
             eprintln!("  The workspace files may have synced, but the running code is stale.");
         }
         println!();
+        return 1;
+    }
+
+    if let Err(error) = companion_result {
+        eprintln!("  Upgrade INCOMPLETE: code-intel update failed: {error}");
+        eprintln!("  Completed Hex and companion updates remain installed. Retry resumes required companion work.");
         return 1;
     }
 
