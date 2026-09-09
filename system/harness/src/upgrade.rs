@@ -724,6 +724,54 @@ fn binary_needs_rebuild(
     version_mismatch || sha_mismatch
 }
 
+/// Parse the package field, not an arbitrary line beginning with `version`.
+fn read_cargo_version(path: &Path) -> io::Result<String> {
+    let content = fs::read_to_string(path)?;
+    let manifest: toml::Value =
+        toml::from_str(&content).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    manifest
+        .get("package")
+        .and_then(|p| p.get("version"))
+        .and_then(toml::Value::as_str)
+        .filter(|version| !version.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("missing package.version in {}", path.display()),
+            )
+        })
+}
+
+/// An absent binary needs installation. A failed probe cannot prove freshness.
+fn read_installed_version(path: &Path) -> io::Result<Option<String>> {
+    let output = match Command::new(path).arg("--version").output() {
+        Ok(output) => output,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "{} --version failed with {}",
+            path.display(),
+            output.status
+        )));
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let mut words = text.split_whitespace();
+    if words.next() != Some("hex") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid hex version output",
+        ));
+    }
+    words
+        .next()
+        .map(|version| Some(version.to_owned()))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing installed hex version"))
+}
+
 /// Gather inputs and decide whether the binary is stale. Returns false
 /// ("nothing to do") when VERSIONS or Cargo.toml is absent, matching
 /// `sync_versions_file`'s own preconditions — if those are missing the
@@ -734,40 +782,12 @@ fn binary_is_stale(hex_dir: &Path, source_dir: &Path) -> io::Result<bool> {
     if !versions_file.exists() || !cargo_toml.exists() {
         return Ok(false);
     }
-    let cargo_content = fs::read_to_string(&cargo_toml)?;
-    let cargo_ver = cargo_content.lines().find_map(|l| {
-        l.strip_prefix("version")
-            .and_then(|rest| rest.split_once('"').map(|x| x.1))
-            .and_then(|s| s.split('"').next())
-            .map(str::to_owned)
-    });
-    let cargo_ver = cargo_ver.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("could not parse version from {}", cargo_toml.display()),
-        )
-    })?;
-
+    // VERSIONS is required by the apply step even when every selected file
+    // is unchanged. Validate it before allowing the no-op fast path.
+    fs::read_to_string(&versions_file)?;
+    let cargo_ver = read_cargo_version(&cargo_toml)?;
     let hex_dot_dir = hex_dir.join(".hex");
-    let installed_output = Command::new(hex_dot_dir.join("bin/hex"))
-        .arg("--version")
-        .output()
-        .map(Some)
-        .or_else(|e| {
-            if e.kind() == io::ErrorKind::NotFound {
-                Ok(None)
-            } else {
-                Err(io::Error::new(
-                    e.kind(),
-                    format!("could not read installed hex version: {e}"),
-                ))
-            }
-        })?;
-    let installed_ver = installed_output.and_then(|o| {
-        String::from_utf8(o.stdout)
-            .ok()
-            .and_then(|s| s.split_whitespace().nth(1).map(|v| v.to_string()))
-    });
+    let installed_ver = read_installed_version(&hex_dot_dir.join("bin/hex"))?;
     let installed_sha = read_file_state(&hex_dot_dir.join("bin/hex.sha"))?
         .map(String::from_utf8)
         .transpose()
@@ -835,24 +855,10 @@ fn sync_versions_file_protected(
     if !cargo_toml.exists() {
         return Ok(());
     }
-    let cargo_content = match fs::read_to_string(&cargo_toml) {
-        Ok(s) => s,
-        Err(_) => {
-            eprintln!("  [WARN] Could not read Cargo.toml");
-            return Err(BinaryStepFailure::Build);
-        }
-    };
-    let cargo_ver = cargo_content
-        .lines()
-        .find(|l| l.starts_with("version"))
-        .and_then(|l| l.split_once('"').map(|x| x.1))
-        .and_then(|s| s.split('"').next())
-        .map(|s| s.to_string());
-
-    let Some(cargo_ver) = cargo_ver else {
-        eprintln!("  [WARN] Could not parse version from Cargo.toml");
-        return Err(BinaryStepFailure::Build);
-    };
+    let cargo_ver = read_cargo_version(&cargo_toml).map_err(|e| {
+        eprintln!("  [FAIL] Could not read package version from Cargo.toml: {e}");
+        BinaryStepFailure::Build
+    })?;
 
     // Preserve every existing line — comments, blank lines, and any
     // KEY=VALUE we do not manage (BOI_VERSION, custom instance pins,
@@ -923,15 +929,10 @@ fn sync_versions_file_protected(
     let installed_bin = hex_dot_dir.join("bin/hex");
     let installed_sha_file = hex_dot_dir.join("bin/hex.sha");
 
-    let installed_ver = Command::new(&installed_bin)
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|o| {
-            String::from_utf8(o.stdout)
-                .ok()
-                .and_then(|s| s.split_whitespace().nth(1).map(|v| v.to_string()))
-        });
+    let installed_ver = read_installed_version(&installed_bin).map_err(|e| {
+        eprintln!("  [FAIL] Could not read installed hex version: {e}");
+        BinaryStepFailure::Build
+    })?;
 
     let installed_sha = fs::read_to_string(&installed_sha_file)
         .ok()
@@ -2419,6 +2420,82 @@ mod tests {
             detect_managed_changes(&source, &destination, "scripts", true).unwrap();
         assert_eq!((changed, new_count, unchanged), (0, 0, 0));
         assert!(log.is_empty());
+    }
+
+    fn binary_preflight_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let instance = tmp.path().join("instance");
+        write_file(
+            &source.join("system/harness/Cargo.toml"),
+            "[package]\nversion = \"1.0.0\"\n",
+        );
+        write_file(
+            &instance.join("VERSIONS"),
+            "HEX_FOUNDATION_VERSION=v1.0.0\n",
+        );
+        write_file(
+            &instance.join(".hex/bin/hex"),
+            "#!/bin/sh\nprintf 'hex 1.0.0\\n'\n",
+        );
+        fs::set_permissions(
+            instance.join(".hex/bin/hex"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        init_test_repo(&source);
+        seed_commit(&source, "preflight fixture");
+        let sha = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&source)
+            .output()
+            .unwrap();
+        assert!(sha.status.success());
+        fs::write(instance.join(".hex/bin/hex.sha"), sha.stdout).unwrap();
+        (tmp, source, instance)
+    }
+
+    #[test]
+    fn preflight_binary_metadata_preserves_true_noop() {
+        let (_tmp, source, instance) = binary_preflight_fixture();
+        assert!(!binary_is_stale(&instance, &source).unwrap());
+    }
+
+    #[test]
+    fn preflight_binary_metadata_rejects_failed_version_command() {
+        let (_tmp, source, instance) = binary_preflight_fixture();
+        write_file(
+            &instance.join(".hex/bin/hex"),
+            "#!/bin/sh\nprintf 'hex 1.0.0\\n'\nexit 9\n",
+        );
+        assert!(
+            binary_is_stale(&instance, &source).is_err(),
+            "failed executable must not prove current version"
+        );
+    }
+
+    #[test]
+    fn preflight_binary_metadata_rejects_unreadable_versions() {
+        let (_tmp, source, instance) = binary_preflight_fixture();
+        fs::remove_file(instance.join("VERSIONS")).unwrap();
+        fs::create_dir(instance.join("VERSIONS")).unwrap();
+        assert!(
+            binary_is_stale(&instance, &source).is_err(),
+            "required unreadable metadata must not pass no-op"
+        );
+    }
+
+    #[test]
+    fn preflight_binary_metadata_rejects_malformed_manifest_with_version_line() {
+        let (_tmp, source, instance) = binary_preflight_fixture();
+        write_file(
+            &source.join("system/harness/Cargo.toml"),
+            "[package]\nversion = \"1.0.0\"\nthis is not toml\n",
+        );
+        assert!(
+            binary_is_stale(&instance, &source).is_err(),
+            "finding a version line is not parsing a manifest"
+        );
     }
 
     // The wrapper block's guard is the function signature "claude() {".
