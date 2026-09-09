@@ -646,7 +646,7 @@ def _launchctl_loaded(launchctl: Callable[[list[str]], tuple[int, str, str]], do
 
 
 def _launchctl_program(output: str) -> Optional[str]:
-    values = [line.removeprefix("program = ") for line in output.splitlines() if line.startswith("program = ")]
+    values = [line.lstrip()[len("program = "):] for line in output.splitlines() if line.lstrip().startswith("program = ")]
     if len(values) != 1 or not values[0]:
         raise InstallError("launchctl print lacks one exact program field")
     return values[0]
@@ -658,26 +658,44 @@ def _atomic_service_plist(path: Path, value: Mapping[str, Any], previous: Mappin
     parent = path.parent
     if not parent.is_dir() or parent.is_symlink():
         raise InstallError(f"service plist parent is missing or aliased: {parent}")
+    parent_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
     temporary = parent / f".{path.name}.candidate-{secrets.token_hex(8)}"
-    _write_private(temporary, plistlib.dumps(dict(value), fmt=plistlib.FMT_XML, sort_keys=False))
     published = False
     try:
+        _write_private(temporary, plistlib.dumps(dict(value), fmt=plistlib.FMT_XML, sort_keys=False))
         if _entry_identity(path) != dict(previous):
             raise InstallError("service plist changed before publication")
         os.replace(temporary, path)
         published = True
-        fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        os.fsync(parent_fd)
     except BaseException as exc:
         if temporary.exists():
             temporary.unlink()
         if isinstance(exc, InstallError):
             raise InstallError(str(exc), published=published) from exc
         raise InstallError(f"service plist publication failed: {exc}", published=published) from exc
+    finally:
+        os.close(parent_fd)
     return published
+
+
+def _service_plist_sha256(path: Path) -> str:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_PLIST_BYTES:
+                raise InstallError("service plist changed or is too large")
+            payload = os.read(fd, MAX_PLIST_BYTES + 1)
+        finally:
+            os.close(fd)
+    except InstallError:
+        raise
+    except OSError as exc:
+        raise InstallError(f"cannot hash service plist: {exc}") from exc
+    if len(payload) > MAX_PLIST_BYTES:
+        raise InstallError("service plist changed or is too large")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _service_receipt_path(paths: Paths) -> Path:
@@ -782,37 +800,50 @@ def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: 
         allowed_arguments = {str(paths.cli.absolute()), str(paths.executable.absolute())}
         if not isinstance(arguments, list) or len(arguments) != 1 or not isinstance(arguments[0], str) or arguments[0] not in allowed_arguments:
             raise InstallError("service plist has unsupported ProgramArguments")
+        program = current.get("Program")
+        if program is not None and (not isinstance(program, str) or program not in allowed_arguments):
+            raise InstallError("service plist has unsupported Program")
         associated = current.get("AssociatedBundleIdentifiers", [owner["bundle_identifier"]])
         if not isinstance(associated, list) or any(not isinstance(item, str) for item in associated):
             raise InstallError("service plist has invalid AssociatedBundleIdentifiers")
         desired = dict(current)
         desired["ProgramArguments"] = [owner["executable_path"]]
+        if program is not None:
+            desired["Program"] = owner["executable_path"]
         desired["AssociatedBundleIdentifiers"] = [owner["bundle_identifier"]]
         receipt = _read_service_receipt(paths)
         pending = _read_service_pending(paths)
-        receipt_matches = receipt == {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": hashlib.sha256(plist.read_bytes()).hexdigest(), "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"]}
-        needs_change = desired != current or (loaded and live_program != owner["executable_path"]) or (loaded and not receipt_matches) or (loaded and pending is not None)
+        plist_sha256 = _service_plist_sha256(plist)
+        receipt_matches = receipt == {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": plist_sha256, "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"]}
+        recovery_pending = pending is not None
+        needs_change = desired != current or (loaded and live_program != owner["executable_path"]) or (loaded and not receipt_matches) or recovery_pending
         if dry_run or not needs_change:
             action = "would-restart" if dry_run and loaded and needs_change else "would-update-stopped" if dry_run and needs_change else "loaded" if loaded else "stopped"
             return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": action, "service_needs_change": needs_change, "published": False, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
         published = _atomic_service_plist(plist, desired, previous)
-        if not loaded:
+        if not loaded and not recovery_pending:
             return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "updated-stopped", "service_needs_change": True, "published": published, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
-        pending_value = {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": hashlib.sha256(plist.read_bytes()).hexdigest(), "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"], "phase": "reload-pending"}
+        pending_value = {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": _service_plist_sha256(plist), "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"], "phase": "reload-pending"}
         _write_service_pending(paths, pending_value)
-        returncode, _, stderr = launchctl(["bootout", domain])
-        if returncode:
-            raise InstallError(f"service bootout failed after plist publication: {stderr.strip()[-500:]}", published=True)
-        returncode, _, stderr = launchctl(["bootstrap", f"gui/{os.getuid()}", str(plist.absolute())])
-        if returncode:
-            raise InstallError(f"service bootstrap failed after plist publication: {stderr.strip()[-500:]}", published=True)
-        verified_loaded, verified_output = _launchctl_loaded(launchctl, domain)
-        if not verified_loaded or _launchctl_program(verified_output) != owner["executable_path"]:
-            raise InstallError("service reload did not load the verified scipd executable", published=True)
-        receipt_value = {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": hashlib.sha256(plist.read_bytes()).hexdigest(), "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"]}
-        _write_service_receipt(paths, receipt_value)
-        _clear_service_pending(paths)
-        return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "restarted", "service_needs_change": True, "published": True, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
+        try:
+            if loaded:
+                returncode, _, stderr = launchctl(["bootout", domain])
+                if returncode:
+                    raise InstallError(f"service bootout failed after plist publication: {stderr.strip()[-500:]}", published=True)
+            returncode, _, stderr = launchctl(["bootstrap", f"gui/{os.getuid()}", str(plist.absolute())])
+            if returncode:
+                raise InstallError(f"service bootstrap failed after plist publication: {stderr.strip()[-500:]}", published=True)
+            verified_loaded, verified_output = _launchctl_loaded(launchctl, domain)
+            if not verified_loaded or _launchctl_program(verified_output) != owner["executable_path"]:
+                raise InstallError("service reload did not load the verified scipd executable", published=True)
+            receipt_value = {"schema_version": 1, "product": product, "generation": owner["generation"], "plist_sha256": _service_plist_sha256(plist), "bundle_identifier": owner["bundle_identifier"], "executable_path": owner["executable_path"]}
+            _write_service_receipt(paths, receipt_value)
+            _clear_service_pending(paths)
+        except InstallError as exc:
+            if exc.published is None:
+                exc.published = True
+            raise
+        return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "restarted" if loaded else "recovered", "service_needs_change": True, "published": True, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
 
 
 def preflight(product: str, root: Path, signer: Signer, *, policy_path: Optional[Path] = None, lock_held: bool = False) -> dict[str, Any]:

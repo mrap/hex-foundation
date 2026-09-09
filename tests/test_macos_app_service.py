@@ -5,6 +5,7 @@ import json
 import os
 import plistlib
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -65,7 +66,7 @@ class FakeLaunchctl:
         if argv[0] == "print":
             if not self.loaded:
                 return 1, "", "Could not find service"
-            return 0, f"program = {self.program}\n", ""
+            return 0, f"\tprogram = {self.program}\n", ""
         if argv[0] == "bootout":
             if self.fail_restart:
                 return 1, "", "bootout failed"
@@ -183,6 +184,23 @@ class MacAppServiceTests(unittest.TestCase):
         marker = json.loads((self.paths.root / "SCIPD.service-reconcile-pending.json").read_text(encoding="utf-8"))
         self.assertEqual(marker["phase"], "reload-pending")
 
+    def test_pending_unloaded_service_is_recovered(self):
+        self.seed()
+        self.write_plist([str(self.paths.executable.absolute())], ["wrong.id"])
+        pending = self.paths.root / "SCIPD.service-reconcile-pending.json"
+        pending.write_text(json.dumps({"schema_version": 1, "phase": "reload-pending"}), encoding="utf-8")
+        launchctl = FakeLaunchctl(self.paths, False, "")
+        result = INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=launchctl, plist_path=self.plist)
+        self.assertEqual(result["service_action"], "recovered")
+        self.assertFalse(pending.exists())
+        self.assertEqual([call[0] for call in launchctl.calls], ["print", "bootstrap", "print"])
+
+    def test_conflicting_program_is_rejected(self):
+        self.seed()
+        self.write_plist([str(self.paths.executable.absolute())], ["com.mrap.hex.scipd"], Program="/tmp/not-scipd")
+        with self.assertRaisesRegex(INSTALL.InstallError, "unsupported Program"):
+            INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=FakeLaunchctl(self.paths, False, ""), plist_path=self.plist)
+
     def test_generation_change_forces_reload(self):
         self.seed()
         self.write_plist([str(self.paths.executable.absolute())], ["com.mrap.hex.scipd"])
@@ -220,6 +238,19 @@ class MacAppServiceTests(unittest.TestCase):
                 INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=launchctl, plist_path=self.plist)
         self.assertTrue(context.exception.published)
         self.assertEqual(plistlib.loads(self.plist.read_bytes())["ProgramArguments"], [str(self.paths.executable.absolute())])
+
+    def test_launchctl_exception_reports_published(self):
+        self.seed()
+        self.write_plist([str(self.paths.executable.absolute())], ["wrong.id"])
+
+        def broken_launchctl(argv):
+            if argv[0] == "print":
+                return 0, f"\tprogram = {self.paths.executable.absolute()}\n", ""
+            raise INSTALL.InstallError("launchctl transport failed")
+
+        with self.assertRaisesRegex(INSTALL.InstallError, "launchctl transport failed") as context:
+            INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=broken_launchctl, plist_path=self.plist)
+        self.assertTrue(context.exception.published)
 
     def test_actual_copied_cli_uses_injected_boundaries(self):
         fixture = self.base / "fixture"
@@ -261,6 +292,13 @@ class MacAppServiceTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertEqual(result["product"], "code-intel-daemon")
         self.assertEqual(result["service_action"], "updated-stopped")
+
+        completed = subprocess.run([sys.executable, "-I", "-B", str(copied_app), "service-reconcile", "code-intel-cli", "--root", str(root)], capture_output=True, text=True, env={"HOME": str(home), "PATH": "/usr/bin:/bin"})
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("only code-intel-daemon", completed.stderr)
+        service_cli = subprocess.run([sys.executable, "-I", "-B", str(copied_app), "service-reconcile", "code-intel-daemon", "--root", str(home / "missing-codeintel")], capture_output=True, text=True, env={"HOME": str(home), "PATH": "/usr/bin:/bin"})
+        self.assertNotEqual(service_cli.returncode, 0)
+        self.assertIn("product root", service_cli.stderr)
 
     def test_cli_product_is_rejected(self):
         with self.assertRaisesRegex(INSTALL.InstallError, "only code-intel-daemon"):
