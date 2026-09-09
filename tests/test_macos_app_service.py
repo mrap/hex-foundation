@@ -134,6 +134,7 @@ class MacAppServiceTests(unittest.TestCase):
         launchctl = FakeLaunchctl(self.paths, False, "")
         result = INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=launchctl, plist_path=self.plist)
         self.assertEqual(result["service_action"], "updated-stopped")
+        self.assertFalse(result["service_recovery_pending"])
         self.assertEqual([call[0] for call in launchctl.calls], ["print"])
 
     def test_absent_service_does_not_create_or_start(self):
@@ -141,6 +142,7 @@ class MacAppServiceTests(unittest.TestCase):
         launchctl = FakeLaunchctl(self.paths, False, "")
         result = INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=launchctl, plist_path=self.plist)
         self.assertEqual(result["service_action"], "absent")
+        self.assertFalse(result["service_recovery_pending"])
         self.assertFalse(self.plist.exists())
         self.assertEqual([call[0] for call in launchctl.calls], ["print"])
 
@@ -190,10 +192,19 @@ class MacAppServiceTests(unittest.TestCase):
         pending = self.paths.root / "SCIPD.service-reconcile-pending.json"
         pending.write_text(json.dumps({"schema_version": 1, "product": "code-intel-daemon", "generation": json.loads(self.paths.state.read_text(encoding="utf-8"))["generation"], "plist_sha256": INSTALL._sha256(self.plist), "bundle_identifier": "com.mrap.hex.scipd", "executable_path": str(self.paths.executable.absolute()), "phase": "reload-pending", "original_loaded": True}), encoding="utf-8")
         launchctl = FakeLaunchctl(self.paths, False, "")
+        dry = INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, dry_run=True, launchctl=launchctl, plist_path=self.plist)
+        self.assertTrue(dry["service_recovery_pending"])
         result = INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=launchctl, plist_path=self.plist)
         self.assertEqual(result["service_action"], "recovered")
+        self.assertTrue(result["service_recovery_pending"])
         self.assertFalse(pending.exists())
-        self.assertEqual([call[0] for call in launchctl.calls], ["print", "bootstrap", "print"])
+        self.assertEqual([call[0] for call in launchctl.calls], ["print", "print", "bootstrap", "print"])
+        state = json.loads(self.paths.state.read_text(encoding="utf-8"))
+        state["generation"] = "new-generation"
+        self.paths.state.write_text(json.dumps(state), encoding="utf-8")
+        next_result = INSTALL.service_reconcile("code-intel-daemon", self.root, self.signer, policy_path=self.policy, launchctl=launchctl, plist_path=self.plist)
+        self.assertEqual(next_result["service_action"], "restarted")
+        self.assertFalse(next_result["service_recovery_pending"])
 
     def test_conflicting_program_is_rejected(self):
         self.seed()

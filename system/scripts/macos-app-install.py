@@ -815,7 +815,7 @@ def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: 
                 raise InstallError("pending service reload has no readable plist")
             if loaded:
                 raise InstallError("loaded scipd service has no readable plist")
-            return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "absent", "service_needs_change": False, "published": False, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
+            return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "absent", "service_needs_change": False, "service_recovery_pending": False, "published": False, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
         if current.get("Label") != SCIPD_LAUNCHD_LABEL:
             raise InstallError("service plist has the wrong Label")
         arguments = current.get("ProgramArguments")
@@ -841,10 +841,10 @@ def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: 
         needs_change = desired != current or (loaded and live_program != owner["executable_path"]) or (loaded and not receipt_matches) or recovery_pending
         if dry_run or not needs_change:
             action = "would-restart" if dry_run and needs_change and (loaded or recovery_pending) else "would-update-stopped" if dry_run and needs_change else "loaded" if loaded else "stopped"
-            return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": action, "service_needs_change": needs_change, "published": False, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
+            return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": action, "service_needs_change": needs_change, "service_recovery_pending": recovery_pending, "published": False, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
         published = _atomic_service_plist(plist, desired, previous)
         if not loaded and not recovery_pending:
-            return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "updated-stopped", "service_needs_change": True, "published": published, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
+            return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "updated-stopped", "service_needs_change": True, "service_recovery_pending": recovery_pending, "published": published, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
         planned_sha256 = hashlib.sha256(plistlib.dumps(dict(desired), fmt=plistlib.FMT_XML, sort_keys=False)).hexdigest()
         if _service_plist_sha256(plist) != planned_sha256:
             raise InstallError("published service plist differs from planned bytes", published=published)
@@ -868,7 +868,7 @@ def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: 
             if exc.published is None:
                 exc.published = True
             raise
-        return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "restarted" if loaded else "recovered", "service_needs_change": True, "published": True, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
+        return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "restarted" if loaded else "recovered", "service_needs_change": True, "service_recovery_pending": recovery_pending, "published": True, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
 
 
 def preflight(product: str, root: Path, signer: Signer, *, policy_path: Optional[Path] = None, lock_held: bool = False) -> dict[str, Any]:
