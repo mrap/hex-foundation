@@ -12,6 +12,7 @@ mode PRODUCT --root ROOT
 preflight PRODUCT --root ROOT
 verify-current PRODUCT --root ROOT
 install PRODUCT --root ROOT --source PATH --version VERSION --source-revision REVISION --helper-source-revision FOUNDATION_REVISION
+service-reconcile PRODUCT --root ROOT
 ```
 
 Configured and previously signed products stay on the common transaction path.
@@ -26,4 +27,17 @@ recorded separately.
 
 Non-macOS behavior stays unchanged. A truly unconfigured legacy macOS install
 keeps its existing raw path until the common mode command reports a managed
-state. Code-intel binaries remain outside this caller's product map.
+state.
+
+The source installer prepares both code-intel products before a build and
+rechecks them after the build. It reads the version from
+`system/code-intel/Cargo.toml`, publishes `cq` and `scipd` through the common
+transaction at `~/.codeintel`, and never copies them into `.hex/bin` when the
+products are managed. It records the source checkout revision before the build
+and refuses publication if the checkout becomes dirty or moves.
+
+After both managed products publish, the caller invokes
+`service-reconcile code-intel-daemon --root "$HOME/.codeintel"`. It accepts only
+schema 1, the exact product, `signed-current`, a string `service_action`, and a
+boolean `service_needs_change`. The common operation keeps absent or stopped
+services stopped. Any reconciliation error fails the install.
