@@ -64,16 +64,12 @@ placeholder for the machine id).
   alert. It falls back to `Unnamed job`. Chosen approach: **reject and fall
   back**, not partial redaction — a name is either trustworthy and shown, or it
   isn't and `Unnamed job` ships instead.
-  - The path check is scoped to path-**shaped** strings (a leading `/` or
-    `~/`), not "contains a slash anywhere" — an ordinary spec title like
-    `docs/testing.md refresh` contains a slash but is not a path leak, and an
-    over-broad rule would mangle it into `Unnamed job` for no privacy benefit.
-    Relative paths without a leading anchor (e.g. `secrets/id_rsa`) are
-    intentionally **not** rejected: the leak class this guards is absolute
-    home/system paths (`/…`, `~/…`), and over-matching would mangle ordinary
-    slash-bearing titles. The label source (`Transition.ref_`, a BOI task
-    `ref`) is operator-authored and not a filesystem path in practice.
-  - The credential check is scoped to well-known secret prefixes (`ghp_`,
+  - The path check rejects path-shaped values and embedded private/system
+    paths (`/…`, `~/…`, `/Users/…`, `/private/…`, `/var/…`, `/home/…`, and
+    `/etc/…`). Ordinary slash-bearing prose such as `docs/testing.md refresh`
+    remains valid. The label source (`Transition.ref_`, a BOI task `ref`) is
+    operator-authored and not a filesystem path in practice.
+  - The credential check rejects well-known secret prefixes (`ghp_`,
     `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`, `xoxb-`, `xoxp-`, `AKIA`).
 - Names are folded to a single line and length-bounded (≤120 bytes of name +
   ellipsis) without splitting a UTF-8 character (no panics, no mojibake). The
@@ -161,10 +157,10 @@ No row from the live database is embedded in this document or in any test.
   version-correct lookup (the join above), unit-tested against a temp SQLite
   fixture. Query error → LOUD stderr (S6) then `None`.
 - `resolve_spec_title(spec_id)` — production opens `~/.boi/v2/boi.db`
-  READ-ONLY; absent db → quiet `None`, open error → LOUD then `None`. Under
-  `cfg(test)` it NEVER reads a live database (returns `None`, so worker tests
-  get the `Unnamed job` fallback deterministically and the lookup core is
-  covered directly against the in-memory fixture instead).
+  READ-ONLY; absent db → quiet `None`, open error → LOUD then `None`.
+  `emit_spec_alert_from_db` accepts an explicit fixture or missing path for
+  tests, so worker tests never fall back to the live database. The lookup core
+  is also covered directly against an in-memory fixture.
 - `display_name(Option<&str>)`, `looks_like_path`, `looks_like_credential`,
   `truncate_name`, `render_push_body(name, outcome)` — the sanitize + compose
   seam.
@@ -229,8 +225,8 @@ below are from real runs.
 No claim above is for a command that was not actually run. No model-facing or
 production credentials were used. The live `~/.boi/v2/boi.db` was read
 READ-ONLY, in an ad-hoc `sqlite3` shell, purely to confirm the schema DDL and
-the `snapshot` JSON shape; worker tests never read it (the `cfg(test)` seam
-above guarantees this).
+the `snapshot` JSON shape. Worker tests pass explicit fixture or missing paths
+and never read the live database.
 
 ## Deployment boundary
 

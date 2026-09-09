@@ -698,15 +698,17 @@ const UNNAMED_JOB: &str = "Unnamed job";
 /// phone-notification length and any sane push-service limit.
 const MAX_NAME_BYTES: usize = 120;
 
-/// A path-SHAPED string: a leading `/`, `~/`, or `/Users/`. Scoped to a leading
-/// anchor on purpose — an ordinary title like `docs/testing.md refresh` has a
-/// slash but is not a path leak, and an "any slash" rule would mangle it for no
-/// privacy benefit.
+/// A path-shaped string or embedded private/system path. Ordinary slash-bearing
+/// prose such as `docs/testing.md refresh` remains valid display text.
 fn looks_like_path(s: &str) -> bool {
     s.split_whitespace().any(|token| {
-        let token = token.trim_matches(|c: char| c == '"' || c == '\'' || c == '(' || c == '[');
+        let token = token.trim_matches(|c: char| {
+            matches!(c, '"' | '\'' | '(' | '[' | ')' | ']' | '{' | '}' | ':' | ';' | ',')
+        });
         token.starts_with('/')
             || token.starts_with("~/")
+            || token.contains("=/")
+            || token.contains("=~/")
             || token.contains("/Users/")
             || token.contains("/private/")
             || token.contains("/var/")
@@ -715,9 +717,8 @@ fn looks_like_path(s: &str) -> bool {
     })
 }
 
-/// A credential-SHAPED token by well-known secret prefix. Rejected (→ fallback)
-/// rather than shipped raw. Deliberately prefix-anchored so a legit title is
-/// only ever downgraded to `Unnamed job` (safe), never partially redacted.
+/// A credential-shaped token by well-known secret prefix. Rejected rather than
+/// partially redacted, wherever the token appears in the display text.
 fn looks_like_credential(s: &str) -> bool {
     const PREFIXES: [&str; 9] = [
         "ghp_",
@@ -743,7 +744,9 @@ fn looks_like_email(s: &str) -> bool {
 
 fn looks_like_machine_id(s: &str) -> bool {
     s.split_whitespace().any(|token| {
-        let token = token.trim_matches(|c: char| c == '"' || c == '\'' || c == '(' || c == '[');
+        let token = token.trim_matches(|c: char| {
+            matches!(c, '"' | '\'' | '(' | '[' | ')' | ']' | '{' | '}' | ':' | ';' | ',')
+        });
         let bytes = token.as_bytes();
         bytes.len() >= 9
             && matches!(bytes.first(), Some(b'S' | b'T'))
@@ -1179,7 +1182,8 @@ mod tests {
         {
             let tmp = tempfile::TempDir::new().unwrap();
             rig(&tmp);
-            emit_spec_alert("Sredfail1", "failed");
+            let db_path = missing_boi_db(&tmp);
+            emit_spec_alert_from_db(Some(&db_path), "Sredfail1", "failed");
             let emails = crate::alert::test_sink::emails();
             let pushes = crate::alert::test_sink::pushes();
             assert_eq!(
@@ -1199,7 +1203,8 @@ mod tests {
         {
             let tmp = tempfile::TempDir::new().unwrap();
             rig(&tmp);
-            emit_spec_alert("Sredok1", "completed");
+            let db_path = missing_boi_db(&tmp);
+            emit_spec_alert_from_db(Some(&db_path), "Sredok1", "completed");
             let pushes = crate::alert::test_sink::pushes();
             assert_eq!(
                 pushes.len(),
@@ -1787,16 +1792,9 @@ mod tests {
     //     ambiguous about "is this raw?" ever ships.
     //   * names are folded to a single line and length-bounded without
     //     splitting a UTF-8 char (no panics, no mojibake).
-    //   * diagnostic detail (blocked_reason, full spec title lookup wiring)
-    //     is intentionally NOT asserted here — no current call path can
-    //     inject a resolved spec title into `emit_spec_alert`, or exercise a
-    //     name-sanitizer that does not exist yet. Adding either would require
-    //     new production function signatures, which this preparatory phase
-    //     must not introduce (compiling a test against an unimplemented API
-    //     would break the whole lib test target, per the GROUP 1 precedent
-    //     above). Execute must add focused unit tests for whatever concrete
-    //     title-lookup/sanitizer function it introduces, in addition to
-    //     keeping every test below green.
+    //   * diagnostic detail remains outside the phone body. Title lookup and
+    //     sanitization are covered by focused tests below. These worker tests
+    //     use an explicit missing fixture database, never the live BOI DB.
 
     /// Shared rig: fresh HEX_DIR, ntfy configured (push only; no email needed
     /// — task alerts and non-failed spec alerts use `AlertClass::Default`),
@@ -1816,6 +1814,10 @@ mod tests {
         tmp
     }
 
+    fn missing_boi_db(tmp: &tempfile::TempDir) -> PathBuf {
+        tmp.path().join("missing-boi.db")
+    }
+
     fn only_push_body() -> String {
         let pushes = crate::alert::test_sink::pushes();
         assert_eq!(pushes.len(), 1, "expected exactly one push: {pushes:?}");
@@ -1830,8 +1832,9 @@ mod tests {
             ("Sredgrp2b", "failed"),
             ("Sredgrp2c", "canceled"),
         ] {
-            let _tmp = red_rig();
-            emit_spec_alert(spec_id, status);
+            let tmp = red_rig();
+            let db_path = missing_boi_db(&tmp);
+            emit_spec_alert_from_db(Some(&db_path), spec_id, status);
             let body = only_push_body();
 
             assert!(
@@ -2309,6 +2312,8 @@ mod tests {
         );
         assert_eq!(display_name(Some("contact person@example.invalid")), UNNAMED_JOB);
         assert_eq!(display_name(Some("job S1vwthf8e")), UNNAMED_JOB);
+        assert_eq!(display_name(Some("(S12345678)")), UNNAMED_JOB);
+        assert_eq!(display_name(Some("path=/tmp/fixture/report.txt")), UNNAMED_JOB);
         assert_eq!(display_name(Some("job\rname")), UNNAMED_JOB);
     }
 
