@@ -1490,6 +1490,8 @@ def compatibility_alias(product: str, root: Path, hex_workspace: Path, signer: S
     candidate = None; candidate_identity = None
     try:
         with contextlib.ExitStack() as stack:
+            # A read-only negative must not create an absent product root.
+            stack.enter_context(_open_dir(root))
             bound = [(path, stack.enter_context(_open_dir(path)))
                      for path in (hex_workspace, hex_root, parent)]
             for path, fd in bound:
@@ -1501,6 +1503,11 @@ def compatibility_alias(product: str, root: Path, hex_workspace: Path, signer: S
             owner = service_owner(product, root, signer, lock_held=True)
             result.update(source_revision=owner['source_revision'], generation=owner['generation'])
             previous = _alias_entry(parent_fd, name)
+            # Verification can outlive a cooperating installer changing paths.
+            # Validate the public parents even when this call will be a no-op.
+            for path, fd in bound:
+                _revalidate_parent(fd, path)
+                if path.is_symlink(): raise InstallError('compatibility parent changed to a symlink')
             if previous['kind'] == 'symlink':
                 if previous['target'] != str(target):
                     raise InstallError('foreign compatibility alias is preserved')

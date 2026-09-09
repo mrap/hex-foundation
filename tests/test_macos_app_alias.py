@@ -104,6 +104,25 @@ class AliasTests(unittest.TestCase):
         self.assertEqual(self.alias.lstat(), before)
         self.assertFalse((self.workspace / '.hex/.code-intel-compat-backups').exists())
 
+    def test_missing_product_root_dry_run_creates_nothing(self):
+        self.root.rename(self.home / 'saved-codeintel')
+        result = self.cli('--dry-run')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.root.exists())
+        self.assertEqual(self.alias.read_bytes(), self.old)
+
+    def test_current_alias_rejects_parent_replacement_during_verification(self):
+        self.alias.unlink(); self.alias.symlink_to(self.paths.cli)
+        original = self.signer.verify_installed
+        def replace_parent(*args):
+            self.bin.rename(self.workspace / '.hex/old-bin')
+            self.bin.mkdir()
+            self.alias.write_bytes(b'actor replacement')
+            return original(*args)
+        with patch.object(self.signer, 'verify_installed', replace_parent):
+            with self.assertRaises(INSTALL.InstallError): self.call()
+        self.assertEqual(self.alias.read_bytes(), b'actor replacement')
+
     def test_missing_alias_is_created_without_archive(self):
         self.alias.unlink()
         value = self.call()
