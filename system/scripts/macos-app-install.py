@@ -16,6 +16,7 @@ import fcntl
 import hashlib
 import json
 import os
+import plistlib
 import re
 import secrets
 import selectors
@@ -42,6 +43,8 @@ RENAME_EXCL = 0x00000004
 POLICY_RELATIVE = Path("Library/Application Support/Hex/build-signing/policy.json")
 MAX_JSON_BYTES = 64 * 1024
 MAX_HELPER_BYTES = 1024 * 1024
+MAX_PLIST_BYTES = 64 * 1024
+SCIPD_LAUNCHD_LABEL = "com.hex.scipd"
 
 
 class InstallError(RuntimeError):
@@ -551,6 +554,125 @@ def service_owner(product: str, root: Path, signer: Signer, *, policy_path: Opti
     if _tree_sha256(paths.app) != state["bundle_sha256"] or _sha256(paths.executable) != state["executable_sha256"]:
         raise InstallError("installed app hashes differ from state")
     return {"schema_version": STATE_SCHEMA_VERSION, "product": product, "mode": "signed-current", "policy_available": True, "bundle_path": str(paths.app.absolute()), "executable_path": str(paths.executable.absolute()), "compatibility_path": str(paths.cli.absolute()), "helper_path": str(paths.helper_dir.absolute()), "bundle_identifier": item.bundle_identifier, "generation": state["generation"], "version": state["version"], "team_id": state["team_id"], "certificate_sha1": state["certificate_sha1"], "designated_requirements": state["designated_requirements"], "mach_o_uuids": state["mach_o_uuids"], "bundle_sha256": state["bundle_sha256"], "executable_sha256": state["executable_sha256"], "helpers": state["helpers"], "source_revision": state["source_revision"]}
+
+
+def _service_plist_path(path: Optional[Path]) -> Path:
+    return path or (Path.home() / "Library/LaunchAgents" / f"{SCIPD_LAUNCHD_LABEL}.plist")
+
+
+def _read_service_plist(path: Path) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
+    if not os.path.lexists(path):
+        return None, {"present": False}
+    if path.is_symlink():
+        raise InstallError(f"service plist must not be a symlink: {path}")
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise InstallError(f"service plist is not a regular file: {path}")
+            if info.st_size > MAX_PLIST_BYTES:
+                raise InstallError(f"service plist is too large: {path}")
+            payload = os.read(fd, MAX_PLIST_BYTES + 1)
+        finally:
+            os.close(fd)
+        if len(payload) > MAX_PLIST_BYTES:
+            raise InstallError(f"service plist is too large: {path}")
+        value = plistlib.loads(payload)
+    except InstallError:
+        raise
+    except (OSError, ValueError, plistlib.InvalidFileException) as exc:
+        raise InstallError(f"invalid service plist: {path}") from exc
+    if not isinstance(value, dict):
+        raise InstallError(f"service plist is not a dictionary: {path}")
+    return value, _entry_identity(path)
+
+
+def _launchctl_default(argv: list[str], timeout: float = 5.0) -> tuple[int, str, str]:
+    try:
+        result = subprocess.run(["/bin/launchctl", *argv], capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise InstallError(f"launchctl unavailable or timed out: {exc}") from exc
+    return result.returncode, result.stdout, result.stderr
+
+
+def _launchctl_loaded(launchctl: Callable[[list[str]], tuple[int, str, str]], domain: str) -> tuple[bool, str]:
+    returncode, stdout, stderr = launchctl(["print", domain])
+    if returncode == 0:
+        return True, stdout
+    lowered = stderr.lower()
+    if "could not find service" in lowered or "service could not be found" in lowered or "no such process" in lowered:
+        return False, stdout
+    raise InstallError(f"launchctl print failed ({returncode}): {stderr.strip()[-500:]}")
+
+
+def _atomic_service_plist(path: Path, value: Mapping[str, Any], previous: Mapping[str, Any]) -> None:
+    if _entry_identity(path) != dict(previous):
+        raise InstallError("service plist changed before publication")
+    parent = path.parent
+    if not parent.is_dir() or parent.is_symlink():
+        raise InstallError(f"service plist parent is missing or aliased: {parent}")
+    temporary = parent / f".{path.name}.candidate-{secrets.token_hex(8)}"
+    _write_private(temporary, plistlib.dumps(dict(value), fmt=plistlib.FMT_XML, sort_keys=False))
+    try:
+        if _entry_identity(path) != dict(previous):
+            raise InstallError("service plist changed before publication")
+        os.replace(temporary, path)
+        fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException:
+        if temporary.exists():
+            temporary.unlink()
+        raise
+
+
+def service_reconcile(product: str, root: Path, signer: Signer, *, policy_path: Optional[Path] = None, dry_run: bool = False, launchctl: Optional[Callable[[list[str]], tuple[int, str, str]]] = None, plist_path: Optional[Path] = None) -> dict[str, Any]:
+    if product != "code-intel-daemon":
+        raise InstallError("service-reconcile supports only code-intel-daemon")
+    paths = product_paths(product, root)
+    _path_guard(paths)
+    launchctl = launchctl or _launchctl_default
+    plist = _service_plist_path(plist_path)
+    domain = f"gui/{os.getuid()}/{SCIPD_LAUNCHD_LABEL}"
+    with _product_lock(paths) as lock_fd:
+        if isinstance(signer, ProcessSigner):
+            signer.bind_owner(paths, lock_fd)
+        owner = service_owner(product, root, signer, policy_path=policy_path, lock_held=True)
+        loaded, launch_output = _launchctl_loaded(launchctl, domain)
+        current, previous = _read_service_plist(plist)
+        if current is None:
+            if loaded:
+                raise InstallError("loaded scipd service has no readable plist")
+            return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "absent", "service_needs_change": False, "published": False, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
+        if current.get("Label") != SCIPD_LAUNCHD_LABEL:
+            raise InstallError("service plist has the wrong Label")
+        arguments = current.get("ProgramArguments")
+        allowed_arguments = {str(paths.cli.absolute()), str(paths.executable.absolute())}
+        if not isinstance(arguments, list) or len(arguments) != 1 or not isinstance(arguments[0], str) or arguments[0] not in allowed_arguments:
+            raise InstallError("service plist has unsupported ProgramArguments")
+        associated = current.get("AssociatedBundleIdentifiers", [owner["bundle_identifier"]])
+        if not isinstance(associated, list) or any(not isinstance(item, str) for item in associated):
+            raise InstallError("service plist has invalid AssociatedBundleIdentifiers")
+        desired = dict(current)
+        desired["ProgramArguments"] = [str(paths.cli.absolute())]
+        desired["AssociatedBundleIdentifiers"] = [owner["bundle_identifier"]]
+        needs_change = desired != current or (loaded and str(paths.cli.absolute()) not in launch_output)
+        if dry_run or not needs_change:
+            action = "would-restart" if dry_run and loaded and needs_change else "would-update-stopped" if dry_run and needs_change else "loaded" if loaded else "stopped"
+            return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": action, "service_needs_change": needs_change, "published": False, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
+        _atomic_service_plist(plist, desired, previous)
+        if not loaded:
+            return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "updated-stopped", "service_needs_change": True, "published": True, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
+        returncode, _, stderr = launchctl(["kickstart", "-k", domain])
+        if returncode:
+            raise InstallError(f"service restart failed after plist publication: {stderr.strip()[-500:]}", published=True)
+        verified_loaded, verified_output = _launchctl_loaded(launchctl, domain)
+        if not verified_loaded or str(paths.cli.absolute()) not in verified_output:
+            raise InstallError("service restart did not load the verified scipd executable", published=True)
+        return {"schema_version": 1, "product": product, "mode": "signed-current", "service_action": "restarted", "service_needs_change": True, "published": True, "plist_path": str(plist.absolute()), "executable_path": owner["executable_path"]}
 
 
 def preflight(product: str, root: Path, signer: Signer, *, policy_path: Optional[Path] = None, lock_held: bool = False) -> dict[str, Any]:
@@ -1388,6 +1510,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     common("preflight")
     common("verify-current")
     common("service-owner")
+    service_parser = common("service-reconcile")
+    service_parser.add_argument("--dry-run", action="store_true")
     common("cleanup-status")
     common("cleanup-retry")
     install_parser = commands.add_parser("install")
@@ -1440,6 +1564,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                     result = service_owner(args.product, args.root, signer, policy_path=policy, lock_held=True)
             else:
                 raise InstallError("service-owner requires --lock-fd")
+            return _emit(result)
+        if args.command == "service-reconcile":
+            if args.lock_fd is not None:
+                raise InstallError("service-reconcile does not accept an inherited lock")
+            result = service_reconcile(args.product, args.root, signer, policy_path=policy, dry_run=args.dry_run)
             return _emit(result)
         helper = Path(__file__).with_name("macos-signing.py")
         state = install(args.product, args.root, args.source, signer, policy_path=policy, helper_provenance=_helper_provenance(helper, args.root, args.helper_source_revision), helper_sources={"macos-signing.py": helper, "macos-app-install.py": Path(__file__).absolute()}, source_revision=args.source_revision, version=args.version)
