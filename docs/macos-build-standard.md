@@ -31,9 +31,23 @@ use public certificate expectations and do not require the signing key.
 | Hex service start, restart and recovery | Verify the installed app and helpers before changing a service. |
 | BOI daemon start and restart | Verify the installed app and helpers before changing a service. |
 | Managed prebuilt download | Reject until downloaded bytes have verifiable source provenance. |
-| Code-intel binaries | Preserve existing files. Their separate app and service integration is not yet implemented. |
+| CQ and SCIPD installation/update | Publish separate apps through the common transaction, repair fixed Hex command aliases, and reconcile an existing SCIPD service. |
 
-Hex and BOI retain distinct bundle identifiers. Their command-line paths point
+These rows define the source integration contract, not a claim that a candidate
+has passed its caller tests or reached an installed machine. Qualify the combined
+native and shell callers before deployment. Mock protocol tests do not establish
+real signing or service qualification.
+
+The fixed products share the same machine policy:
+
+| Product key | Bundle identifier | Bundle |
+|---|---|---|
+| `hex` | `com.mrap.hex` | `Hex.app` |
+| `boi` | `com.mrap.boi` | `BOI.app` |
+| `code-intel-cli` | `com.mrap.hex.cq` | `CQ.app` |
+| `code-intel-daemon` | `com.mrap.hex.scipd` | `SCIPD.app` |
+
+Their command-line paths point
 into the installed bundles, not into Cargo output folders. Each installation
 records the actual app hashes and source revision. It also records the exact
 helper bytes used to verify future service starts.
@@ -48,6 +62,18 @@ Genuinely unconfigured legacy installs keep their existing behavior. Once a
 valid policy or signed installation exists, removing configuration does not
 authorize an unsigned replacement. Linux and App Store products retain their
 own build requirements.
+
+## Service coverage limits
+
+The managed service callers cover Hex harness/watchdog operations, BOI daemon
+start/restart and reconciliation of an existing SCIPD service. A stopped SCIPD
+service stays stopped unless a recorded interrupted reload requires recovery.
+An absent service stays absent. First-time SCIPD service creation and managed
+HITL-nudge service installation have no qualified automatic setup path yet.
+
+Do not use direct plist edits and `launchctl bootstrap` as a managed deployment
+shortcut. Such commands bypass application admission. Read-only `launchctl`
+diagnostics remain useful. Legacy documentation is not signing qualification.
 
 ## Adding a product
 
