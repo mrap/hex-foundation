@@ -1376,6 +1376,186 @@ def _validate_lock_fd(fd: int, paths: Paths) -> None:
         raise InstallError("inherited lock fd is invalid") from exc
 
 
+class AliasError(InstallError):
+    """A compatibility publication failure with faithful partial results."""
+    def __init__(self, message: str, result: dict):
+        super().__init__(message, published=result['published'])
+        self.result = dict(result)
+
+
+def _alias_entry(parent_fd: int, name: str) -> dict:
+    try:
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return {'kind': 'missing'}
+    result = {'dev': info.st_dev, 'ino': info.st_ino, 'mode': stat.S_IMODE(info.st_mode),
+              'size': info.st_size, 'mtime_ns': info.st_mtime_ns}
+    if stat.S_ISLNK(info.st_mode):
+        result.update(kind='symlink', target=os.readlink(name, dir_fd=parent_fd))
+        return result
+    if not stat.S_ISREG(info.st_mode):
+        raise InstallError('compatibility entry is not a regular file or canonical alias')
+    fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        current = os.fstat(fd)
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise InstallError('compatibility entry changed during inspection')
+        digest = hashlib.sha256()
+        remaining = info.st_size
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk: raise InstallError('compatibility entry shrank during inspection')
+            digest.update(chunk); remaining -= len(chunk)
+        after = os.fstat(fd)
+        if os.read(fd, 1) or (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (info.st_size, info.st_mtime_ns, info.st_ctime_ns):
+            raise InstallError('compatibility entry changed during inspection')
+        result.update(kind='regular', sha256=digest.hexdigest())
+        return result
+    finally:
+        os.close(fd)
+
+
+def _alias_archive(parent_fd: int, name: str, previous: dict, archive: Path, result: dict, archive_fd: int) -> None:
+    source_fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent_fd)
+    destination = archive / ('previous-' + name)
+    output_fd = None
+    try:
+        output_fd = os.open(destination.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=archive_fd)
+        info = os.fstat(source_fd)
+        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != (
+            previous['dev'], previous['ino'], previous['size'], previous['mtime_ns']
+        ):
+            raise InstallError('compatibility entry changed before archive')
+        digest = hashlib.sha256(); remaining = info.st_size
+        while remaining:
+            chunk = os.read(source_fd, min(65536, remaining))
+            if not chunk: raise InstallError('compatibility entry shrank while archiving')
+            digest.update(chunk); remaining -= len(chunk)
+            view = memoryview(chunk)
+            while view:
+                count = os.write(output_fd, view)
+                if count <= 0: raise InstallError('short compatibility archive write')
+                view = view[count:]
+        after = os.fstat(source_fd)
+        if os.read(source_fd, 1) or digest.hexdigest() != previous['sha256'] or (
+            after.st_size, after.st_mtime_ns, after.st_ctime_ns
+        ) != (info.st_size, info.st_mtime_ns, info.st_ctime_ns):
+            raise InstallError('compatibility entry changed while archiving')
+        os.fsync(output_fd)
+        os.lseek(output_fd, 0, os.SEEK_SET)
+        copied = hashlib.sha256(); remaining = previous['size']
+        while remaining:
+            chunk = os.read(output_fd, min(65536, remaining))
+            if not chunk: raise InstallError('compatibility archive was truncated')
+            copied.update(chunk); remaining -= len(chunk)
+        if os.read(output_fd, 1) or copied.hexdigest() != previous['sha256']:
+            raise InstallError('compatibility archive hash mismatch')
+    finally:
+        os.close(source_fd)
+        if output_fd is not None: os.close(output_fd)
+    record = dict(result, archive_status='prepared', previous=previous)
+    receipt_fd = os.open('receipt.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=archive_fd)
+    try:
+        view = memoryview((json.dumps(record, sort_keys=True) + '\n').encode())
+        while view:
+            count = os.write(receipt_fd, view)
+            if count <= 0: raise InstallError('short compatibility receipt write')
+            view = view[count:]
+        os.fsync(receipt_fd)
+    finally:
+        os.close(receipt_fd)
+    _fsync_dir(archive_fd)
+
+
+def compatibility_alias(product: str, root: Path, hex_workspace: Path, signer: Signer,
+                        *, dry_run: bool = False) -> dict:
+    """Verify one fixed code-intel product, then migrate its old Hex command."""
+    if product not in ('code-intel-cli', 'code-intel-daemon'):
+        raise InstallError('compatibility aliases support only code-intel products')
+    expected_root = Path.home().absolute() / '.codeintel'
+    if not root.is_absolute() or root != expected_root or _real(root) != root:
+        raise InstallError('compatibility product root must be canonical HOME/.codeintel')
+    if not hex_workspace.is_absolute() or _real(hex_workspace) != hex_workspace:
+        raise InstallError('Hex workspace must be an absolute canonical directory')
+    paths = product_paths(product, root)
+    name = PRODUCTS[product].executable
+    hex_root = hex_workspace / '.hex'
+    parent = hex_root / 'bin'
+    alias = parent / name
+    target = paths.cli
+    result = {'schema_version': 1, 'product': product, 'source_revision': None, 'generation': None,
+              'alias_path': str(alias), 'target_path': str(target), 'action': 'current',
+              'changed': False, 'published': False, 'archive_path': None}
+    candidate = None; candidate_identity = None
+    try:
+        with contextlib.ExitStack() as stack:
+            bound = [(path, stack.enter_context(_open_dir(path)))
+                     for path in (hex_workspace, hex_root, parent)]
+            for path, fd in bound:
+                if os.fstat(fd).st_uid != os.getuid():
+                    raise InstallError(f'compatibility parent is not owned by this user: {path}')
+            parent_fd = bound[-1][1]
+            lock_fd = stack.enter_context(_product_lock(paths))
+            if isinstance(signer, ProcessSigner): signer.bind_owner(paths, lock_fd)
+            owner = service_owner(product, root, signer, lock_held=True)
+            result.update(source_revision=owner['source_revision'], generation=owner['generation'])
+            previous = _alias_entry(parent_fd, name)
+            if previous['kind'] == 'symlink':
+                if previous['target'] != str(target):
+                    raise InstallError('foreign compatibility alias is preserved')
+                return result
+            result['action'] = 'would-migrate' if previous['kind'] == 'regular' else 'would-create'
+            if dry_run: return result
+            if previous['kind'] == 'regular':
+                archive_parent = hex_root / '.code-intel-compat-backups'
+                try: os.mkdir(archive_parent.name, mode=0o700, dir_fd=bound[1][1])
+                except FileExistsError: pass
+                archive_parent_fd = stack.enter_context(_open_dir(archive_parent))
+                if os.fstat(archive_parent_fd).st_uid != os.getuid():
+                    raise InstallError('compatibility archive parent is not owned by this user')
+                archive = archive_parent / (product + '-' + secrets.token_hex(12))
+                os.mkdir(archive.name, mode=0o700, dir_fd=archive_parent_fd)
+                result['archive_path'] = str(archive)
+                archive_fd = stack.enter_context(_open_dir(archive))
+                bound.extend(((archive_parent, archive_parent_fd), (archive, archive_fd)))
+                _alias_archive(parent_fd, name, previous, archive, result, archive_fd)
+                backup_identity = _alias_entry(archive_fd, 'previous-' + name)
+                if backup_identity.get('kind') != 'regular' or backup_identity.get('sha256') != previous['sha256']:
+                    raise InstallError('prepared compatibility archive does not match old bytes')
+                _revalidate_parent(archive_parent_fd, archive_parent)
+                _fsync_dir(archive_parent_fd)
+                _fsync_dir(bound[1][1])
+            candidate = parent / ('.' + name + '.compat-candidate-' + secrets.token_hex(12))
+            os.symlink(str(target), candidate.name, dir_fd=parent_fd)
+            candidate_identity = _alias_entry(parent_fd, candidate.name)
+            try:
+                _fsync_dir(parent_fd)
+                for path, fd in bound:
+                    _revalidate_parent(fd, path)
+                    if path.is_symlink(): raise InstallError('compatibility parent changed to a symlink')
+                if _alias_entry(parent_fd, name) != previous:
+                    raise InstallError('compatibility entry changed before publication')
+                if previous['kind'] == 'regular' and _alias_entry(archive_fd, 'previous-' + name) != backup_identity:
+                    raise InstallError('compatibility archive changed before publication')
+                if previous['kind'] == 'missing':
+                    _libc_renameatx(parent_fd, candidate.name, parent_fd, name, RENAME_EXCL)
+                else:
+                    _libc_renameatx(parent_fd, candidate.name, parent_fd, name, 0)
+                result.update(action='migrated' if previous['kind'] == 'regular' else 'created',
+                              changed=True, published=True)
+                _fsync_dir(parent_fd)
+            finally:
+                current = _alias_entry(parent_fd, candidate.name)
+                if current == candidate_identity:
+                    os.unlink(candidate.name, dir_fd=parent_fd)
+                elif current['kind'] != 'missing':
+                    raise InstallError(f'changed compatibility candidate preserved: {candidate}')
+            return result
+    except (OSError, InstallError) as exc:
+        raise AliasError(str(exc), result) from exc
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1394,6 +1574,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     common("service-owner")
     common("cleanup-status")
     common("cleanup-retry")
+    alias_parser = commands.add_parser("compatibility-alias")
+    alias_parser.add_argument("product", choices=("code-intel-cli", "code-intel-daemon"))
+    alias_parser.add_argument("--root", required=True, type=Path)
+    alias_parser.add_argument("--hex-workspace", required=True, type=Path)
+    alias_parser.add_argument("--dry-run", action="store_true")
     install_parser = commands.add_parser("install")
     install_parser.add_argument("product", choices=sorted(PRODUCTS))
     install_parser.add_argument("--root", required=True, type=Path)
@@ -1405,6 +1590,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     policy = central_policy_path()
     try:
+        if args.command == "compatibility-alias":
+            return _emit(compatibility_alias(args.product, args.root, args.hex_workspace,
+                                             ProcessSigner(), dry_run=args.dry_run))
         if args.policy is not None and args.policy.absolute() != policy.absolute():
             raise InstallError("CLI signing policy must use the central machine path")
         if args.command in ("cleanup-status", "cleanup-retry"):
@@ -1448,6 +1636,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         helper = Path(__file__).with_name("macos-signing.py")
         state = install(args.product, args.root, args.source, signer, policy_path=policy, helper_provenance=_helper_provenance(helper, args.root, args.helper_source_revision), helper_sources={"macos-signing.py": helper, "macos-app-install.py": Path(__file__).absolute()}, source_revision=args.source_revision, version=args.version)
         return _emit(state)
+    except AliasError as exc:
+        print(json.dumps(dict(exc.result, error=str(exc))), file=sys.stderr)
+        return 1
     except InstallError as exc:
         print(json.dumps({"schema_version": STATE_SCHEMA_VERSION, "error": str(exc), "published": bool(exc.published) if exc.published is not None else False}), file=sys.stderr)
         return 1
