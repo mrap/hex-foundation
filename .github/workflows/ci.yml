@@ -19,6 +19,47 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  macos-signing-change-filter:
+    name: detect macOS signing changes
+    runs-on: ubuntu-latest
+    outputs:
+      macos_signing: ${{ steps.filter.outputs.macos_signing }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        name: identify affected paths
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base="$PR_BASE_SHA"
+          elif [[ "$EVENT_BEFORE" == "0000000000000000000000000000000000000000" ]]; then
+            printf 'macos_signing=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            base="$EVENT_BEFORE"
+          fi
+
+          macos_signing=false
+          changed="$(git diff --name-only "$base" "$HEAD_SHA")"
+          while IFS= read -r path; do
+            case "$path" in
+              .github/workflows/ci.yml|install.sh|system/harness/src/upgrade.rs|system/harness/src/harness/supervise.rs|system/harness/src/main.rs|system/harness/src/*identity*|system/scripts/macos-signing.py|system/scripts/macos-app-install.py|tests/test_macos_signing.py|tests/test_macos_app_install.py|docs/macos-signing.md|docs/macos-app-install.md)
+                macos_signing=true
+                ;;
+            esac
+          done <<< "$changed"
+
+          printf 'macos_signing=%s\n' "$macos_signing" >> "$GITHUB_OUTPUT"
+
   style-hook-contract:
     name: advisory hook contract tests
     runs-on: ubuntu-latest
@@ -73,3 +114,27 @@ jobs:
           components: rust-analyzer
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+
+  macos-signing-install:
+    name: macOS signing and install policy tests
+    needs: macos-signing-change-filter
+    if: needs.macos-signing-change-filter.outputs.macos_signing == 'true'
+    # Explicit current standard GitHub-hosted macOS label. Keep this stable
+    # instead of following macos-latest as Apple runner images change.
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify credential-free test inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f tests/test_macos_signing.py
+          test -f tests/test_macos_app_install.py
+      - name: Run signing and install policy tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(python3 -I -c 'import sys; print(sys.platform)')" = darwin
+          python3 -W error -I -B tests/test_macos_signing.py
+          python3 -W error -I -B tests/test_macos_app_install.py
