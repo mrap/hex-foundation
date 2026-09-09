@@ -463,7 +463,7 @@ _resolve_git_tag() {
     refs=$(git ls-remote "$repo" "refs/tags/$tag^{}" "refs/tags/$tag" 2>/dev/null) || return 1
     sha=$(printf '%s\n' "$refs" | awk -v peeled="refs/tags/$tag^{}" -v direct="refs/tags/$tag" '$2 == peeled { print $1; exit }')
     [ -n "$sha" ] || sha=$(printf '%s\n' "$refs" | awk -v direct="refs/tags/$tag" '$2 == direct { print $1; exit }')
-    /usr/bin/python3 -I -B -c 'import re,sys; raise SystemExit(0 if re.fullmatch(r"[0-9a-fA-F]{40}", sys.argv[1] or "") else 1)' "$sha" || return 1
+    /usr/bin/python3 -I -B -c 'import re,sys; raise SystemExit(0 if re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", sys.argv[1] or "") else 1)' "$sha" || return 1
     printf '%s\n' "$sha"
 }
 
@@ -536,7 +536,7 @@ if not isinstance(value, dict) or type(value.get("schema_version")) is not int o
     raise SystemExit("invalid verified BOI metadata")
 revision=value.get("source_revision")
 version=value.get("version")
-if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", revision) or not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+if not isinstance(revision, str) or not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", revision) or not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
     raise SystemExit("invalid verified BOI source revision or version")
 print("%s\t%s" % (revision, version))
 ' <<< "$verified_metadata") || {

@@ -4,6 +4,11 @@
 
 ## Policy
 
+Managed installation uses the canonical machine policy described in the
+[macOS build standard](macos-build-standard.md). The explicit policy argument
+below is for standalone candidate staging and read-only verification, not a
+second per-repository installation policy.
+
 Use a local JSON policy containing only public identity configuration:
 
 ```json

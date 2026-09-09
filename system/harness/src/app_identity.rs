@@ -54,6 +54,21 @@ impl AppPaths {
                 return Ok(true);
             }
         }
+        let alias = self.root.join("bin/hex-agent");
+        match fs::symlink_metadata(&alias) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = fs::read_link(&alias)?;
+                // The old compatibility alias points to the raw CLI. A direct
+                // app alias is signed evidence even when the app is now absent.
+                if target != Path::new("hex") && target != self.cli {
+                    return Ok(true);
+                }
+            }
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Err(io::Error::other("unexpected Hex agent alias file type")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
         match fs::symlink_metadata(&self.cli) {
             Ok(metadata) if metadata.file_type().is_symlink() => Ok(true),
             Ok(metadata) if metadata.is_file() => Ok(false),
@@ -357,15 +372,15 @@ fn read_regular(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn valid_revision(revision: &str) -> bool {
+    matches!(revision.len(), 40 | 64) && revision.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 fn check_helper(path: &Path, record: &HelperRecord) -> io::Result<()> {
     use sha2::{Digest, Sha256};
     if record.sha256.len() != 64
         || !record.sha256.bytes().all(|b| b.is_ascii_hexdigit())
-        || record.source_revision.len() != 40
-        || !record
-            .source_revision
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit())
+        || !valid_revision(&record.source_revision)
     {
         return Err(io::Error::other("invalid installed helper provenance"));
     }
@@ -605,7 +620,7 @@ fn prepare_upgrade_at(paths: &AppPaths, source_dir: &Path) -> io::Result<Upgrade
         "signed-current" => {
             let revision = result
                 .source_revision
-                .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                .filter(|s| valid_revision(s))
                 .ok_or_else(|| {
                     io::Error::other("verified installation lacks product source revision")
                 })?;
@@ -666,6 +681,44 @@ mod tests {
         fs::remove_file(&paths.cli).unwrap();
         symlink(&paths.executable, &paths.cli).unwrap();
         assert!(paths.managed_evidence().unwrap());
+    }
+
+    #[test]
+    fn orphan_signed_alias_cannot_downgrade_to_raw_legacy() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(temp.path(), &temp.path().join("hex")).unwrap();
+        fs::create_dir_all(paths.cli.parent().unwrap()).unwrap();
+        let alias = paths.root.join("bin/hex-agent");
+        for raw_cli in [false, true] {
+            if raw_cli {
+                fs::write(&paths.cli, b"raw legacy").unwrap();
+            }
+            for target in [Path::new("hex"), paths.cli.as_path()] {
+                symlink(target, &alias).unwrap();
+                assert!(!paths.managed_evidence().unwrap());
+                fs::remove_file(&alias).unwrap();
+            }
+            for target in [
+                Path::new("../Hex.app/Contents/MacOS/hex"),
+                paths.executable.as_path(),
+            ] {
+                symlink(target, &alias).unwrap();
+                assert!(paths.managed_evidence().unwrap());
+                assert!(prepare_upgrade_at(&paths, &temp.path().join("source")).is_err());
+                fs::remove_file(&alias).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn revision_format_matches_shared_contract() {
+        for length in [39, 40, 41, 63, 64, 65] {
+            assert_eq!(
+                valid_revision(&"a".repeat(length)),
+                matches!(length, 40 | 64)
+            );
+        }
+        assert!(!valid_revision(&"z".repeat(40)));
     }
 
     #[test]

@@ -52,7 +52,7 @@ jobs:
           changed="$(git diff --name-only "$base" "$HEAD_SHA")"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/ci.yml|Cargo.toml|Cargo.lock|install.sh|system/harness/Cargo.toml|system/harness/src/lib.rs|system/harness/src/upgrade.rs|system/harness/src/harness/supervise.rs|system/harness/src/main.rs|system/harness/src/*identity*|system/harness/tests/macos_app_admission.rs|system/scripts/macos-signing.py|system/scripts/macos-app-install.py|tests/test_macos_signing.py|tests/test_macos_app_install.py|tests/test_macos_install_caller.py|docs/macos-signing.md|docs/macos-app-install.md|docs/macos-install-callers.md)
+              .github/workflows/ci.yml|Cargo.toml|Cargo.lock|install.sh|system/harness/Cargo.toml|system/harness/src/lib.rs|system/harness/src/upgrade.rs|system/harness/src/harness/supervise.rs|system/harness/src/main.rs|system/harness/src/*identity*|system/harness/tests/macos_app_admission.rs|system/scripts/macos-signing.py|system/scripts/macos-app-install.py|tests/test_macos_signing.py|tests/test_macos_app_install.py|tests/test_macos_install_caller.py|docs/macos-signing.md|docs/macos-app-install.md|docs/macos-install-callers.md|docs/macos-build-standard.md)
                 macos_signing=true
                 ;;
             esac
@@ -132,6 +132,7 @@ jobs:
           test -f tests/test_macos_signing.py
           test -f tests/test_macos_app_install.py
           test -f tests/test_macos_install_caller.py
+          bash -n install.sh
       - name: Run signing and install policy tests
         shell: bash
         run: |
