@@ -753,6 +753,57 @@ class GuardianBoundaryTests(unittest.TestCase):
             with self.assertRaises(INSTALL.InstallError):
                 INSTALL._status_transition(frame, ready)
 
+    def test_control_frame_has_one_total_deadline(self):
+        import socket, threading, time
+        reader, writer = socket.socketpair()
+        intervals = []
+        fragments = [b'{', b'"token":', b'null,', b'"command":', b'"status"', b'}\n']
+        writer.sendall(fragments[0])
+        def send_slowly():
+            previous = time.monotonic()
+            try:
+                for fragment in fragments[1:]:
+                    threading.Event().wait(.25)
+                    now = time.monotonic()
+                    intervals.append(now - previous)
+                    writer.sendall(fragment)
+                    previous = now
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # The reader closes after its total deadline.
+        thread = threading.Thread(target=send_slowly)
+        thread.start()
+        started = time.monotonic()
+        try:
+            with self.assertRaises((TimeoutError, socket.timeout)):
+                INSTALL._receive_control(reader, timeout=1)
+            self.assertLess(time.monotonic() - started, 2)
+        finally:
+            reader.close()
+            thread.join(timeout=1)
+            writer.close()
+        self.assertFalse(thread.is_alive())
+        self.assertGreaterEqual(len(intervals), 2)
+        self.assertTrue(all(interval < 1 for interval in intervals), intervals)
+
+    def test_control_reader_preserves_valid_fragmented_and_coalesced_frames(self):
+        import socket, threading
+        expected = {'token': None, 'command': 'status'}
+        for fragments in ([b'{"token":null,"command":"status"}\n'],
+                          [b'{"token":', b'null,', b'"command":"status"}', b'\n']):
+            reader, writer = socket.socketpair()
+            def send():
+                for fragment in fragments:
+                    writer.sendall(fragment)
+                    threading.Event().wait(.005)
+            thread = threading.Thread(target=send)
+            thread.start()
+            try:
+                self.assertEqual(INSTALL._receive_control(reader, timeout=.3), expected)
+            finally:
+                thread.join(timeout=1)
+                reader.close(); writer.close()
+            self.assertFalse(thread.is_alive())
+
     def test_duplicate_and_oversized_control_frames_fail(self):
         import socket
         for payload in (b'{"token":null,"token":null,"command":"status"}\n', b'x' * (INSTALL.CONTROL_LIMIT + 1)):

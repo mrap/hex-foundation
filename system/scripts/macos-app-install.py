@@ -979,9 +979,13 @@ def _unique_control_pairs(items):
 
 
 def _receive_control(connection: socket.socket, timeout: float = 2) -> dict:
-    connection.settimeout(timeout)
+    deadline = time.monotonic() + timeout
     data = bytearray()
     while b'\n' not in data:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('cleanup control frame deadline exceeded')
+        connection.settimeout(remaining)
         part = connection.recv(min(512, CONTROL_LIMIT + 1 - len(data)))
         if not part:
             raise InstallError('incomplete cleanup request')
