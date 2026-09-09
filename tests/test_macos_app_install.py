@@ -23,7 +23,17 @@ def run_owned(helper, argv=None, timeout=30):
     with INSTALL._product_lock(paths) as fd:
         runner = INSTALL.ProcessSigner(helper, timeout=timeout)
         runner.bind_owner(paths, fd)
-        return runner._run(argv or [])
+        try:
+            return runner._run(argv or [])
+        except BaseException:
+            receipt = INSTALL._failure_path(paths)
+            if receipt.exists():
+                try:
+                    error = INSTALL._read_json(receipt, "fixture cleanup receipt").get("error")
+                    print(json.dumps({"cleanup_error": error}), file=sys.stderr)
+                except (INSTALL.InstallError, OSError):
+                    print("fixture cleanup diagnostic unavailable", file=sys.stderr)
+            raise
 
 
 class FakeSigner:
@@ -802,6 +812,42 @@ class FinalBoundaryTests(unittest.TestCase):
             with patch.object(tempfile, "TemporaryFile", side_effect=AssertionError("output must not spool to disk")):
                 with self.assertRaisesRegex(INSTALL.InstallError, "output is too large"):
                     run_owned(helper, timeout=2)
+
+    def test_reaped_group_transient_permission_failure_requires_absence(self):
+        import errno
+        from types import SimpleNamespace
+        from unittest.mock import patch, call
+        process = SimpleNamespace(pid=12345, returncode=-9)
+        with patch.object(INSTALL.os, "killpg", side_effect=[
+                PermissionError(errno.EPERM, "fixture permission"),
+                ProcessLookupError(errno.ESRCH, "fixture absent")]) as observe:
+            self.assertIsNone(INSTALL._cleanup_work(process, (), 0.2))
+        self.assertEqual(observe.call_args_list, [call(12345, 0), call(12345, 0)])
+
+    def test_reaped_group_permanent_permission_failure_never_claims_clean(self):
+        import errno
+        import time
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        process = SimpleNamespace(pid=12345, returncode=-9)
+        start = time.monotonic()
+        with patch.object(INSTALL.os, "killpg", side_effect=PermissionError(errno.EPERM, "fixture permission")) as observe:
+            with self.assertRaisesRegex(INSTALL.InstallError, "group remains present"):
+                INSTALL._cleanup_work(process, (), 0.03)
+        self.assertGreaterEqual(time.monotonic() - start, 0.03)
+        self.assertGreaterEqual(observe.call_count, 2)
+        self.assertTrue(all(value.args == (12345, 0) for value in observe.call_args_list))
+
+    def test_reaped_group_unknown_observation_error_is_not_reclassified(self):
+        import errno
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        process = SimpleNamespace(pid=12345, returncode=-9)
+        with patch.object(INSTALL.os, "killpg", side_effect=OSError(errno.EIO, "fixture unexpected")) as observe:
+            with self.assertRaises(OSError) as error:
+                INSTALL._cleanup_work(process, (), 0.2)
+        self.assertEqual(error.exception.errno, errno.EIO)
+        observe.assert_called_once_with(12345, 0)
 
     def test_normal_leader_exit_does_not_leave_held_pipe_descendant(self):
         import fcntl

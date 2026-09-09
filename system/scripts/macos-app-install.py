@@ -1352,6 +1352,12 @@ def _group_present(pgid: int) -> bool:
         return True
     except ProcessLookupError:
         return False
+    except OSError as exc:
+        if exc.errno == errno.EPERM:
+            # Permission denial is not proof of absence. Keep the bounded
+            # observation active; only ESRCH can establish group absence.
+            return True
+        raise
 
 
 def _cleanup_work(process: subprocess.Popen, streams: tuple, budget: float) -> Optional[str]:
