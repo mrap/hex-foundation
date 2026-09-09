@@ -34,6 +34,8 @@ MACOS_APP_INSTALLER="$SCRIPT_DIR/system/scripts/macos-app-install.py"
 MACOS_APP_MODE="legacy-raw"
 MACOS_APP_MANAGED=false
 MACOS_APP_POLICY_AVAILABLE=false
+MACOS_APP_SOURCE_REVISION=""
+MACOS_APP_SERVICE_RECOVERY_PENDING=false
 
 _macos_app_enabled() {
     [ "$(uname -s)" = "Darwin" ]
@@ -64,7 +66,21 @@ print("%s\t%s" % (value["mode"], str(value["managed"] or value["policy_available
 
 _macos_app_preflight() {
     local product=$1 root=$2
-    _macos_app_json preflight "$product" "$root" >/dev/null
+    local payload
+    payload="$(_macos_app_json preflight "$product" "$root")" || return 1
+    /usr/bin/python3 -I -B -c '
+import json,re,sys
+value=json.loads(sys.stdin.read())
+product=sys.argv[1]
+if not isinstance(value,dict) or value.get("schema_version") != 1 or value.get("product") != product:
+    raise SystemExit("invalid macOS app-installer preflight response")
+if type(value.get("managed")) is not bool or type(value.get("policy_available")) is not bool:
+    raise SystemExit("invalid macOS app-installer preflight flags")
+revision=value.get("source_revision", "")
+if value.get("mode") == "signed-current" and (not isinstance(revision,str) or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}",revision)):
+    raise SystemExit("signed preflight lacks an exact source revision")
+print(revision)
+' "$product" <<< "$payload"
 }
 
 _macos_app_verify_current() {
@@ -77,6 +93,57 @@ _macos_app_install() {
     _macos_app_json install "$product" "$root" \
         --source "$source" --version "$version" --source-revision "$revision" \
         --helper-source-revision "$helper_revision" >/dev/null
+}
+
+_macos_app_service_reconcile() {
+    local product=$1 root=$2 dry_run=${3:-false} payload
+    [ "$product" = code-intel-daemon ] || {
+        echo "ERROR: service reconciliation is only valid for code-intel-daemon" >&2
+        return 1
+    }
+    if [ "$dry_run" = true ]; then
+        payload="$(_macos_app_json service-reconcile "$product" "$root" --dry-run)" || return 1
+    else
+        payload="$(_macos_app_json service-reconcile "$product" "$root")" || return 1
+    fi
+    MACOS_APP_SERVICE_RECOVERY_PENDING=$(/usr/bin/python3 -I -B -c '
+import json,sys
+value=json.loads(sys.stdin.read())
+if not isinstance(value, dict) or type(value.get("schema_version")) is not int or value.get("schema_version") != 1 or value.get("product") != sys.argv[1] or value.get("mode") != "signed-current" or type(value.get("service_action")) is not str or type(value.get("service_needs_change")) is not bool or type(value.get("published")) is not bool or type(value.get("service_recovery_pending")) is not bool or not isinstance(value.get("plist_path"),str) or not isinstance(value.get("executable_path"),str):
+    raise SystemExit("invalid service-reconcile response")
+action=value["service_action"]
+changed=action in {"restarted","recovered","updated-stopped"}
+unchanged=action in {"loaded","stopped","absent"}
+preview=action in {"would-restart","would-update-stopped"}
+if sys.argv[4] == "true":
+    if (preview and (not value["service_needs_change"] or value["published"])) or (not preview and (not unchanged or value["service_needs_change"] or value["published"])):
+        raise SystemExit("invalid dry-run service state")
+elif not (changed or unchanged) or value["service_needs_change"] != changed or value["published"] != changed:
+    raise SystemExit("invalid service-reconcile state")
+expected_plist=sys.argv[2]+"/Library/LaunchAgents/com.hex.scipd.plist"
+expected_executable=sys.argv[3]+"/SCIPD.app/Contents/MacOS/scipd"
+if value["plist_path"] != expected_plist or value["executable_path"] != expected_executable:
+    raise SystemExit("service-reconcile paths do not match the fixed owner")
+print(str(value["service_recovery_pending"]).lower())
+' "$product" "$HOME" "$root" "$dry_run" <<< "$payload") || return 1
+}
+
+_macos_app_compatibility_alias() {
+    local product=$1 root=$2 workspace=$3 expected_revision=${4:-} payload expected_name expected_alias expected_target
+    payload=$(/usr/bin/python3 -I -B "$MACOS_APP_INSTALLER" compatibility-alias "$product" --root "$root" --hex-workspace "$workspace") || return 1
+    expected_name=cq
+    [ "$product" = code-intel-daemon ] && expected_name=scipd
+    expected_alias="$workspace/.hex/bin/$expected_name"
+    expected_target="$root/bin/$expected_name"
+    /usr/bin/python3 -I -B -c '
+import json,sys
+value=json.loads(sys.stdin.read())
+if not isinstance(value, dict) or value.get("schema_version") != 1 or value.get("product") != sys.argv[1] or not isinstance(value.get("source_revision"),str) or not __import__("re").fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}",value["source_revision"]) or not isinstance(value.get("generation"),str) or not value["generation"] or value.get("alias_path") != sys.argv[2] or value.get("target_path") != sys.argv[3] or value.get("action") not in {"current", "created", "migrated"} or type(value.get("changed")) is not bool or type(value.get("published")) is not bool:
+    raise SystemExit("invalid compatibility-alias response")
+changed=value["action"] in {"created","migrated"}
+if value["changed"] != changed or value["published"] != changed or (sys.argv[4] and value["source_revision"] != sys.argv[4]):
+    raise SystemExit("invalid compatibility-alias state")
+' "$product" "$expected_alias" "$expected_target" "$expected_revision" <<< "$payload"
 }
 
 _macos_app_recheck() {
@@ -116,6 +183,8 @@ _macos_app_prepare() {
     MACOS_APP_MODE="legacy-raw"
     MACOS_APP_MANAGED=false
     MACOS_APP_POLICY_AVAILABLE=false
+    MACOS_APP_SOURCE_REVISION=""
+    MACOS_APP_SERVICE_RECOVERY_PENDING=false
     if ! _macos_app_enabled; then
         return 0
     fi
@@ -145,7 +214,7 @@ _macos_app_prepare() {
     esac
     # Preflight is required before any build or same-version decision. A
     # signed-policy-missing result is an error from the common boundary.
-    _macos_app_preflight "$product" "$root" || {
+    MACOS_APP_SOURCE_REVISION="$(_macos_app_preflight "$product" "$root")" || {
         echo "ERROR: macOS app-install preflight failed for $product" >&2
         return 1
     }
@@ -690,11 +759,40 @@ _harness_build_from_source() {
         return 1
     fi
     local hex_managed_at_start="$MACOS_APP_MANAGED"
+    local codeintel_cli_mode_at_start codeintel_daemon_mode_at_start
+    local codeintel_cli_managed_at_start codeintel_daemon_managed_at_start
+    local codeintel_cli_revision_at_start codeintel_daemon_revision_at_start
+    _macos_app_prepare code-intel-cli "$HOME/.codeintel" || return 1
+    codeintel_cli_mode_at_start="$MACOS_APP_MODE"
+    codeintel_cli_managed_at_start="$MACOS_APP_MANAGED"
+    codeintel_cli_revision_at_start="${MACOS_APP_SOURCE_REVISION:-}"
+    _macos_app_prepare code-intel-daemon "$HOME/.codeintel" || return 1
+    codeintel_daemon_mode_at_start="$MACOS_APP_MODE"
+    codeintel_daemon_managed_at_start="$MACOS_APP_MANAGED"
+    codeintel_daemon_revision_at_start="${MACOS_APP_SOURCE_REVISION:-}"
+    if [ "$codeintel_cli_mode_at_start" = signed-policy-missing ] || [ "$codeintel_daemon_mode_at_start" = signed-policy-missing ]; then
+        echo "ERROR: code-intel signed policy is missing; refusing companion publication" >&2
+        return 1
+    fi
+    local source_revision source_status
+    source_status=$(git -C "$SCRIPT_DIR" status --porcelain --untracked-files=all) || return 1
+    if [ -n "$source_status" ]; then
+        echo "ERROR: source checkout is dirty; refusing managed build" >&2
+        return 1
+    fi
+    source_revision=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || return 1
     echo "  Building hex from source..."
     local hex_target_dir="${CARGO_TARGET_DIR:-$TARGET_DIR/.hex/cargo-target}"
     if [[ "$hex_target_dir" != /* ]]; then hex_target_dir="$SCRIPT_DIR/$hex_target_dir"; fi
     hex_target_dir="$(mkdir -p "$hex_target_dir" && cd "$hex_target_dir" && pwd -P)" || return 1
     ( cd "$SCRIPT_DIR/system/harness" && CARGO_TARGET_DIR="$hex_target_dir" cargo build --release 2>&1 ) || return 1
+    local source_revision_after source_status_after
+    source_status_after=$(git -C "$SCRIPT_DIR" status --porcelain --untracked-files=all) || return 1
+    source_revision_after=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || return 1
+    if [ -n "$source_status_after" ] || [ "$source_revision_after" != "$source_revision" ]; then
+        echo "ERROR: source checkout changed during build; refusing publication" >&2
+        return 1
+    fi
     # Cargo receives an absolute target directory, so the artifact lookup uses
     # the exact output path and cannot select a stale worktree artifact.
     local built=""
@@ -729,11 +827,12 @@ _harness_build_from_source() {
         # `hex upgrade` can verify binary freshness. Never fails the install (S6).
         write_hex_sha_sidecar
     fi
-    if [ "$MACOS_APP_MANAGED" = true ]; then
-        echo "  code-intel binaries preserved; no signed product mapping is configured"
-    else
-        _code_intel_build_and_deploy "$hex_target_dir" || true
-    fi
+    _code_intel_build_and_deploy "$hex_target_dir" "$codeintel_cli_managed_at_start" "$codeintel_daemon_managed_at_start" "$source_revision" "$codeintel_cli_mode_at_start" "$codeintel_daemon_mode_at_start" "$codeintel_cli_revision_at_start" "$codeintel_daemon_revision_at_start" || {
+        if [ "$MACOS_APP_MANAGED" = true ]; then
+            echo "ERROR: code-intel companion transaction failed after Hex was installed; Hex is already installed" >&2
+        fi
+        return 1
+    }
     return 0
 }
 
@@ -745,29 +844,96 @@ _harness_build_from_source() {
 # hex. Best-effort: a failure here must not fail the hex install (and must not
 # trigger the prebuilt-hex download fallback) — warn loudly and move on.
 _code_intel_build_and_deploy() {
+    local target_dir="${1:-${CARGO_TARGET_DIR:-$TARGET_DIR/.hex/cargo-target}}"
+    local cli_managed="${2:-false}" daemon_managed="${3:-false}" source_revision="${4:-}"
+    local cli_mode="${5:-}" daemon_mode="${6:-}" cli_revision="${7:-}" daemon_revision="${8:-}"
     if [ ! -f "$SCRIPT_DIR/system/code-intel/Cargo.toml" ]; then
+        if [ "$cli_managed" = true ] || [ "$daemon_managed" = true ]; then
+            echo "ERROR: managed code-intel state exists but Cargo.toml is missing" >&2
+            return 1
+        fi
         return 0
     fi
-    local target_dir="${1:-${CARGO_TARGET_DIR:-$TARGET_DIR/.hex/cargo-target}}"
+    local version
+    version=$(/usr/bin/python3 -I -B -c 'import re,sys; text=open(sys.argv[1]).read(); block=re.search(r"(?ms)^\[package\]\s*(.*?)(?=^\[|\Z)",text); match=re.search(r"^version\s*=\s*\"([^\"]+)\"\s*$",block.group(1),re.M) if block else None; sys.stdout.write(match.group(1)+"\n") if match else sys.exit("missing package version")' "$SCRIPT_DIR/system/code-intel/Cargo.toml") || return 1
+    if [ "$cli_managed" = true ] || [ "$daemon_managed" = true ]; then
+        [ "$cli_managed" = true ] && [ "$daemon_managed" = true ] || {
+            echo "ERROR: code-intel products have inconsistent managed state; refusing partial publication" >&2
+            return 1
+        }
+        if [ "$daemon_mode" = signed-current ] && [ -n "$daemon_revision" ] && [ "$daemon_revision" != "$source_revision" ]; then
+            _macos_app_service_reconcile code-intel-daemon "$HOME/.codeintel" true || return 1
+            if [ "$MACOS_APP_SERVICE_RECOVERY_PENDING" = true ]; then
+                _macos_app_service_reconcile code-intel-daemon "$HOME/.codeintel" false || return 1
+            fi
+        fi
+        if [ "$cli_mode" = signed-current ] && [ "$cli_revision" = "$source_revision" ]; then
+            _macos_app_compatibility_alias code-intel-cli "$HOME/.codeintel" "$TARGET_DIR" "$source_revision" || return 1
+        fi
+        if [ "$daemon_mode" = signed-current ] && [ "$daemon_revision" = "$source_revision" ]; then
+            _macos_app_compatibility_alias code-intel-daemon "$HOME/.codeintel" "$TARGET_DIR" "$source_revision" || return 1
+        fi
+        if [ "$cli_mode" = signed-current ] && [ "$cli_revision" = "$source_revision" ] && [ "$daemon_mode" = signed-current ] && [ "$daemon_revision" = "$source_revision" ]; then
+            _macos_app_service_reconcile code-intel-daemon "$HOME/.codeintel" || return 1
+            return 0
+        fi
+    fi
+    local build_target
+    local host_target
+    mkdir -p "$target_dir" || return 1
+    build_target=$(mktemp -d "$target_dir/code-intel-build.XXXXXX") || return 1
+    host_target=$(rustc -vV | awk '/^host: / {print $2}') || { rm -rf -- "$build_target"; return 1; }
+    case "$host_target" in
+        ""|*/*|*" "*)
+        echo "ERROR: rustc host target is invalid" >&2
+        rm -rf -- "$build_target"
+        return 1
+        ;;
+    esac
+    cleanup_target() { rm -rf -- "$build_target"; }
     echo "  Building code-intel binaries (cq, scipd)..."
-    if ! ( cd "$SCRIPT_DIR/system/code-intel" && CARGO_TARGET_DIR="$target_dir" cargo build --release 2>&1 ); then
-        echo "  WARNING: code-intel build failed — cq/scipd not installed (hex still works)" >&2
+    if ! ( cd "$SCRIPT_DIR/system/code-intel" && CARGO_TARGET_DIR="$build_target" cargo build --locked --release --package scipd --bin cq --bin scipd --target "$host_target" 2>&1 ); then
+        echo "  ERROR: code-intel build failed; no companion publication occurred" >&2
+        cleanup_target
         return 1
     fi
-    local name ci_bin candidate
+    local source_after source_status_after
+    source_status_after=$(git -C "$SCRIPT_DIR" status --porcelain --untracked-files=all) || { cleanup_target; return 1; }
+    source_after=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || { cleanup_target; return 1; }
+    if [ -n "$source_status_after" ] || [ "$source_after" != "$source_revision" ]; then
+        echo "  ERROR: source checkout changed during code-intel build; refusing companion publication" >&2
+        cleanup_target
+        return 1
+    fi
+    local name ci_bin
     for name in cq scipd; do
-        ci_bin=""
-        # Same dual probe as the hex binary: workspace builds emit to the
-        # workspace-root target dir, standalone builds to the crate's own.
-        ci_bin="$target_dir/release/$name"
-        if [ -x "$ci_bin" ]; then
+        ci_bin="$build_target/$host_target/release/$name"
+        [ -x "$ci_bin" ] || { echo "ERROR: missing exact code-intel artifact: $ci_bin" >&2; cleanup_target; return 1; }
+        local product=code-intel-cli root="$HOME/.codeintel"
+        [ "$name" = scipd ] && product=code-intel-daemon
+        if [ "$cli_managed" = true ]; then
+            local source_now source_status_now
+            source_status_now=$(git -C "$SCRIPT_DIR" status --porcelain --untracked-files=all) || { cleanup_target; return 1; }
+            source_now=$(git -C "$SCRIPT_DIR" rev-parse HEAD) || { cleanup_target; return 1; }
+            if [ -n "$source_status_now" ] || [ "$source_now" != "$source_revision" ]; then
+                echo "  ERROR: source checkout changed before publishing $name; refusing companion publication" >&2
+                cleanup_target
+                return 1
+            fi
+            if { [ "$name" = cq ] && { [ "$cli_mode" != signed-current ] || [ "$cli_revision" != "$source_revision" ]; }; } || { [ "$name" = scipd ] && { [ "$daemon_mode" != signed-current ] || [ "$daemon_revision" != "$source_revision" ]; }; }; then
+                _macos_app_install "$product" "$root" "$ci_bin" "$version" "$source_revision" "$source_revision" || { cleanup_target; return 1; }
+                _macos_app_compatibility_alias "$product" "$root" "$TARGET_DIR" "$source_revision" || { cleanup_target; return 1; }
+            fi
+        else
+            mkdir -p "$TARGET_DIR/.hex/bin"
             cp "$ci_bin" "$TARGET_DIR/.hex/bin/$name"
             chmod +x "$TARGET_DIR/.hex/bin/$name"
-            echo "  $name binary           ✓"
-        else
-            echo "  WARNING: $name binary not found after code-intel build" >&2
         fi
     done
+    if [ "$cli_managed" = true ]; then
+        _macos_app_service_reconcile code-intel-daemon "$HOME/.codeintel" || { cleanup_target; return 1; }
+    fi
+    cleanup_target
 }
 
 _harness_download_prebuilt() {

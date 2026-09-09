@@ -74,6 +74,7 @@ with open(os.environ['FAKE_LOG'], 'a', encoding='utf-8') as stream:
 if os.environ.get('FAKE_FAIL') == args[0]:
     raise SystemExit(17)
 result = {'schema_version': 1, 'product': args[1], 'mode': os.environ['FAKE_MODE'], 'managed': os.environ['FAKE_MODE'] != 'legacy-raw', 'policy_available': os.environ.get('FAKE_POLICY') == 'true'}
+if args[0] == 'preflight' and os.environ['FAKE_MODE'] == 'signed-current': result['source_revision'] = 'a' * 40
 print(json.dumps(result))
 """
         )
@@ -153,7 +154,7 @@ def test_managed_prebuilt_fails_closed() -> None:
         (fake_bin / "curl").chmod(0o755)
         helper = temp / "app-install.py"
         helper.write_text(
-            "import json; print(json.dumps({'schema_version': 1, 'product': 'hex', 'mode': 'signed-current', 'managed': True, 'policy_available': True}))\n"
+            "import json; print(json.dumps({'schema_version': 1, 'product': 'hex', 'mode': 'signed-current', 'managed': True, 'policy_available': True, 'source_revision': 'a' * 40}))\n"
         )
         root = temp / "hex"
         root.mkdir()
@@ -354,6 +355,193 @@ _harness_build_from_source
         assert alias.read_text(encoding="utf-8") == "old-alias"
 
 
+def test_codeintel_managed_build_uses_exact_artifacts_and_reconcile() -> None:
+    with tempfile.TemporaryDirectory(prefix="hex-codeintel-caller-") as raw:
+        temp = Path(raw)
+        source = temp / "source"
+        (source / "system" / "code-intel").mkdir(parents=True)
+        (source / "system" / "code-intel" / "Cargo.toml").write_text('[package]\nname = "scipd"\nversion = "2.3.4"\n', encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.name", "test"], check=True)
+        subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+        source_revision = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+        target = temp / "target"
+        fake_bin = temp / "bin"
+        fake_bin.mkdir()
+        (fake_bin / "cargo").write_text(
+            "#!/bin/sh\n"
+            "if [ \"${CARGO_MODE:-ok}\" = fail ]; then exit 23; fi\n"
+            "if [ \"${SOURCE_CHANGE:-0}\" = 1 ]; then printf changed >> \"$TEST_SOURCE/system/code-intel/Cargo.toml\"; fi\n"
+            "target=host; while [ $# -gt 0 ]; do [ \"$1\" = --target ] && target=$2 && shift; shift; done\n"
+            "mkdir -p \"$CARGO_TARGET_DIR/$target/release\"\n"
+            "printf cq > \"$CARGO_TARGET_DIR/$target/release/cq\"\n"
+            "if [ \"${MISSING_SCIPD:-0}\" != 1 ]; then printf scipd > \"$CARGO_TARGET_DIR/$target/release/scipd\"; fi\n"
+            "chmod +x \"$CARGO_TARGET_DIR/$target/release/cq\"; [ \"${MISSING_SCIPD:-0}\" = 1 ] || chmod +x \"$CARGO_TARGET_DIR/$target/release/scipd\"\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "cargo").chmod(0o755)
+        helper = temp / "macos-app-install.py"
+        log = temp / "calls.jsonl"
+        helper.write_text(
+            "import json, os, sys\n"
+            "args=sys.argv[1:]\n"
+            "with open(os.environ['CALL_LOG'], 'a') as stream: stream.write(json.dumps(args)+'\\n')\n"
+            "if args[0] == 'install' and os.environ.get('INSTALL_FAIL') == args[1]: raise SystemExit(17)\n"
+            "if args[0] == 'compatibility-alias': print(json.dumps({'schema_version':1,'product':args[1],'source_revision':os.environ.get('TEST_REVISION','a'*40),'generation':'g','alias_path':os.environ['HEX_WORKSPACE']+'/.hex/bin/'+('scipd' if args[1]=='code-intel-daemon' else 'cq'),'target_path':args[3]+'/bin/'+('scipd' if args[1]=='code-intel-daemon' else 'cq'),'action':'current','changed':False,'published':False}))\n"
+            "elif args[0] == 'service-reconcile' and os.environ.get('RECONCILE_BAD') == '1': print('{}'); raise SystemExit(0)\n"
+            "elif args[0] == 'service-reconcile': pending=os.environ.get('SERVICE_PENDING') == '1'; dry='--dry-run' in args; action='would-update-stopped' if dry and pending else ('stopped' if dry else ('recovered' if pending else 'stopped')); changed=action in {'recovered','updated-stopped','restarted'}; print(json.dumps({'schema_version':1,'product':args[1],'mode':'signed-current','service_action':action,'service_needs_change':dry and pending or changed,'published':changed,'service_recovery_pending':pending,'plist_path':os.environ['HOME']+'/Library/LaunchAgents/com.hex.scipd.plist','executable_path':args[3]+'/SCIPD.app/Contents/MacOS/scipd'}))\n"
+            "else: print(json.dumps({'schema_version':1,'product':args[1],'mode':'signed-current'}))\n",
+            encoding="utf-8",
+        )
+        shell = temp / "codeintel.sh"
+        shell.write_text(
+            _function_source()
+            + _block_source("_code_intel_build_and_deploy() {", "_harness_download_prebuilt() {")
+            + """
+set -euo pipefail
+SCRIPT_DIR="$TEST_SOURCE"
+TARGET_DIR="$TEST_TARGET"
+MACOS_APP_INSTALLER="$TEST_HELPER"
+_macos_app_enabled() { return 0; }
+_code_intel_build_and_deploy "$TEST_TARGET_DIR" true true "$TEST_REVISION" signed-current signed-current "${CLI_REVISION:-}" "${DAEMON_REVISION:-}"
+test ! -e "$TEST_TARGET_DIR"/code-intel-build.*
+test ! -e "$TEST_HEX/.hex/bin/cq"
+test ! -e "$TEST_HEX/.hex/bin/scipd"
+""",
+            encoding="utf-8",
+        )
+        env = os.environ | {
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "TEST_SOURCE": str(source),
+            "TEST_TARGET": str(temp / "hex"),
+            "TEST_TARGET_DIR": str(target),
+            "TEST_HELPER": str(helper),
+            "TEST_HEX": str(temp / "hex"),
+            "HEX_WORKSPACE": str(temp / "hex"),
+            "CALL_LOG": str(log),
+            "TEST_REVISION": source_revision,
+        }
+        result = subprocess.run(["bash", str(shell)], env=env, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        assert [call[0:2] for call in calls] == [
+            ["install", "code-intel-cli"],
+            ["compatibility-alias", "code-intel-cli"],
+            ["install", "code-intel-daemon"],
+            ["compatibility-alias", "code-intel-daemon"],
+            ["service-reconcile", "code-intel-daemon"],
+        ]
+        assert calls[0][calls[0].index("--version") + 1] == "2.3.4"
+        assert calls[0][calls[0].index("--source") + 1].startswith(str(target / "code-intel-build."))
+        assert calls[0][calls[0].index("--source") + 1].endswith("/release/cq")
+        assert not list(target.glob("code-intel-build.*"))
+
+        log.write_text("", encoding="utf-8")
+        healthy_retry = subprocess.run(
+            ["bash", str(shell)],
+            env=env | {"CLI_REVISION": "old" * 10, "DAEMON_REVISION": "old" * 10},
+            capture_output=True,
+            text=True,
+        )
+        assert healthy_retry.returncode == 0, healthy_retry.stderr
+        healthy_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        assert "--dry-run" in next(call for call in healthy_calls if call[0] == "service-reconcile")
+
+        log.write_text("", encoding="utf-8")
+        pending_retry = subprocess.run(
+            ["bash", str(shell)],
+            env=env | {"SERVICE_PENDING": "1", "CLI_REVISION": "old" * 10, "DAEMON_REVISION": "old" * 10},
+            capture_output=True,
+            text=True,
+        )
+        assert pending_retry.returncode == 0, pending_retry.stderr
+        pending_calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        service_calls = [call for call in pending_calls if call[0] == "service-reconcile"]
+        assert "--dry-run" in service_calls[0]
+        assert "--dry-run" not in service_calls[1]
+        assert pending_calls.index(service_calls[0]) < pending_calls.index(next(call for call in pending_calls if call[0] == "install"))
+
+        failed_build = subprocess.run(["bash", str(shell)], env=env | {"CARGO_MODE": "fail"}, capture_output=True, text=True)
+        assert failed_build.returncode != 0
+        (target / "release").mkdir(parents=True, exist_ok=True)
+        (target / "release" / "scipd").write_text("stale", encoding="utf-8")
+        missing_artifact = subprocess.run(["bash", str(shell)], env=env | {"MISSING_SCIPD": "1"}, capture_output=True, text=True)
+        assert missing_artifact.returncode != 0
+        assert "missing exact code-intel artifact" in missing_artifact.stderr
+        failed_install = subprocess.run(["bash", str(shell)], env=env | {"INSTALL_FAIL": "code-intel-cli"}, capture_output=True, text=True)
+        assert failed_install.returncode != 0
+        failed_reconcile = subprocess.run(["bash", str(shell)], env=env | {"RECONCILE_BAD": "1"}, capture_output=True, text=True)
+        assert failed_reconcile.returncode != 0
+        changed_source = subprocess.run(["bash", str(shell)], env=env | {"SOURCE_CHANGE": "1"}, capture_output=True, text=True)
+        assert changed_source.returncode != 0
+        assert "changed during code-intel build" in changed_source.stderr
+
+
+def test_managed_companion_failure_is_not_raw_fallback_after_hex_success() -> None:
+    with tempfile.TemporaryDirectory(prefix="hex-managed-companion-") as raw:
+        temp = Path(raw)
+        source = temp / "source"
+        (source / "system" / "harness").mkdir(parents=True)
+        (source / "system" / "code-intel").mkdir(parents=True)
+        (source / "system" / "code-intel" / "Cargo.toml").write_text('[package]\nname = "scipd"\nversion = "2.3.4"\n', encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.name", "test"], check=True)
+        subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-qm", "fixture"], check=True)
+        fake_bin = temp / "bin"
+        fake_bin.mkdir()
+        (fake_bin / "cargo").write_text(
+            "#!/bin/sh\ntarget_prefix=; while [ $# -gt 0 ]; do [ \"$1\" = --target ] && target_prefix=/$2 && shift; shift; done\nmkdir -p \"$CARGO_TARGET_DIR$target_prefix/release\"\n"
+            "printf hex > \"$CARGO_TARGET_DIR$target_prefix/release/hex\"\n"
+            "printf cq > \"$CARGO_TARGET_DIR$target_prefix/release/cq\"\n"
+            "printf scipd > \"$CARGO_TARGET_DIR$target_prefix/release/scipd\"\n"
+            "chmod +x \"$CARGO_TARGET_DIR$target_prefix/release/hex\" \"$CARGO_TARGET_DIR$target_prefix/release/cq\" \"$CARGO_TARGET_DIR$target_prefix/release/scipd\"\n",
+            encoding="utf-8",
+        )
+        (fake_bin / "cargo").chmod(0o755)
+        log = temp / "installs.log"
+        shell = temp / "managed.sh"
+        shell.write_text(
+            _function_source()
+            + _block_source("_harness_build_from_source() {", "# Build + deploy the code-intel")
+            + _block_source("_code_intel_build_and_deploy() {", "_harness_download_prebuilt() {")
+            + """
+set -euo pipefail
+SCRIPT_DIR="$TEST_SOURCE"
+TARGET_DIR="$TEST_TARGET"
+VERSION=2.3.4
+MACOS_APP_INSTALLER=fixture
+_macos_app_prepare() { MACOS_APP_MODE=signed-current; MACOS_APP_MANAGED=true; MACOS_APP_POLICY_AVAILABLE=true; }
+_macos_app_recheck() { :; }
+_macos_app_install() { printf '%s\n' "$1" >> "$TEST_LOG"; [ "$1" != code-intel-cli ]; }
+write_hex_sha_sidecar() { :; }
+if _harness_build_from_source; then exit 21; fi
+grep -qx hex "$TEST_LOG"
+grep -qx code-intel-cli "$TEST_LOG"
+test ! -e "$TEST_TARGET/.hex/bin/cq"
+test ! -e "$TEST_TARGET/.hex/bin/scipd"
+""",
+            encoding="utf-8",
+        )
+        target = temp / "target"
+        result = subprocess.run(
+            ["bash", str(shell)],
+            env=os.environ | {
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "TEST_SOURCE": str(source),
+                "TEST_TARGET": str(target),
+                "TEST_LOG": str(log),
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "Hex is already installed" in result.stderr
+
+
 if __name__ == "__main__":
     test_common_app_installer_boundary()
     test_managed_prebuilt_fails_closed()
@@ -361,4 +549,6 @@ if __name__ == "__main__":
     test_pinned_checkout_rejects_wrong_and_dirty_source()
     test_boi_build_failure_and_target_artifact_are_real_paths()
     test_hex_missing_artifact_preserves_alias()
+    test_codeintel_managed_build_uses_exact_artifacts_and_reconcile()
+    test_managed_companion_failure_is_not_raw_fallback_after_hex_success()
     print("macOS install caller tests: ok")
